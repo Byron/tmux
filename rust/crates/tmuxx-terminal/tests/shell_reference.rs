@@ -1,31 +1,50 @@
 //! C shell markers are retained data, independent of tmux's copy-mode widgets.
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::{path::PathBuf, process::Command};
 use tmuxx_terminal::{Effect, Terminal};
 fn check(cases: Vec<Value>) {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap()
-        .to_owned();
-    let dir = PathBuf::from(format!("/tmp/txshell-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let fixture = dir.join("fixture.json");
-    let result = dir.join("result.json");
-    std::fs::write(&fixture, serde_json::to_vec(&cases).unwrap()).unwrap();
-    assert!(
-        Command::new("python3")
-            .arg("-B")
-            .arg(root.join("rust/conformance/shell_output.py"))
-            .arg(std::env::var_os("TMUXX_C_TMUX").expect("TMUXX_C_TMUX"))
-            .arg(&fixture)
-            .arg(&result)
-            .status()
+    #[cfg(windows)]
+    let observations: Vec<Vec<Value>> = {
+        let remote = remote_reference::RemoteReference::new();
+        let output = remote.observe("shell_output", &serde_json::to_vec(&cases).unwrap());
+        assert!(
+            output.status.success(),
+            "remote C shell observation failed: {output:?}"
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    #[cfg(unix)]
+    let (observations, dir): (Vec<Vec<Value>>, PathBuf) = {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
             .unwrap()
-            .success()
-    );
-    let observations: Vec<Vec<Value>> =
-        serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+            .to_owned();
+        let dir = PathBuf::from(format!("/tmp/txshell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = dir.join("fixture.json");
+        let result = dir.join("result.json");
+        std::fs::write(&fixture, serde_json::to_vec(&cases).unwrap()).unwrap();
+        assert!(
+            Command::new("python3")
+                .arg("-B")
+                .arg(root.join("rust/conformance/shell_output.py"))
+                .arg(std::env::var_os("TMUXX_C_TMUX").expect("TMUXX_C_TMUX"))
+                .arg(&fixture)
+                .arg(&result)
+                .status()
+                .unwrap()
+                .success()
+        );
+        (
+            serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap(),
+            dir,
+        )
+    };
     for (case, observations) in cases.iter().zip(observations) {
         let mut terminal = Terminal::new(
             case["cols"].as_u64().unwrap() as u16,
@@ -116,6 +135,7 @@ fn check(cases: Vec<Value>) {
             );
         }
     }
+    #[cfg(unix)]
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]

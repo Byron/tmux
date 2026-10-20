@@ -1,10 +1,138 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tmuxx_protocol::native::{Request, Response, ServerMessage};
 use tmuxx_runtime::{ClientContext, LocalClient, Options, ServerHandle};
+#[cfg(windows)]
+#[path = "scheduler/windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::Oracle;
+
+fn fixture_shell() -> String {
+    #[cfg(unix)]
+    return "/bin/sh".into();
+    #[cfg(windows)]
+    return PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe")
+        .to_str()
+        .unwrap()
+        .to_owned();
+}
+
+#[cfg(windows)]
+fn powershell(source: &str) -> String {
+    // The scheduler deliberately uses system cmd.exe; invoke the explicit
+    // PowerShell fixture without changing the production shell contract.
+    const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = source
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let mut encoded = String::new();
+    for chunk in bytes.chunks(3) {
+        let bits = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for (shift, present) in [
+            (18, true),
+            (12, true),
+            (6, chunk.len() > 1),
+            (0, chunk.len() > 2),
+        ] {
+            encoded.push(if present {
+                DIGITS[((bits >> shift) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    format!(
+        "\"{}\" -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}",
+        fixture_shell()
+    )
+}
+
+fn fixture_argv(argv: &[&str]) -> Vec<Vec<u8>> {
+    let values = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    #[cfg(windows)]
+    let mut values = values;
+    #[cfg(windows)]
+    {
+        // Equivalent private fixture programs run in the actual Windows shell;
+        // the commands under test still traverse the production job scheduler.
+        for value in &mut values {
+            if let Some(replacement) = windows::job(value) {
+                *value = replacement;
+                continue;
+            }
+            if value == "printf '%s' '#{1}'" {
+                // Keep the placeholder visible to production job formatting.
+                *value = "python -c \"import sys;sys.stdout.write(sys.argv[1])\" \"#{1}\"".into();
+                continue;
+            }
+            let replacement = match value.as_str() {
+                "true" => {
+                    *value = "exit /b 0".into();
+                    continue;
+                }
+                "false" => {
+                    *value = "exit /b 1".into();
+                    continue;
+                }
+                "printf ready > ready; while [ ! -e release ]; do sleep 0.01; done; printf JOB" => {
+                    "[IO.File]::WriteAllText('ready','ready'); while (!(Test-Path -LiteralPath 'release')) { Start-Sleep -Milliseconds 10 }; [Console]::Write('JOB')"
+                }
+                "printf hidden >&2" => "[Console]::Error.Write('hidden')",
+                "printf stderr >&2" => "[Console]::Error.Write('stderr')",
+                "touch forbidden" => "[IO.File]::WriteAllText('forbidden','')",
+                "sleep 0.02; printf done > background" => {
+                    "Start-Sleep -Milliseconds 20; [IO.File]::WriteAllText('background','done')"
+                }
+                "sleep 30 & echo $! > descendant; exit 0" => {
+                    "python -c \"import pathlib,subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); pathlib.Path('descendant.tmp').write_text(str(child.pid)); pathlib.Path('descendant.tmp').replace('descendant')\"; exit 0"
+                }
+                _ => continue,
+            };
+            *value = powershell(replacement);
+        }
+        if values.len() >= 2 && values[values.len() - 2..] == ["sleep", "30"] {
+            values.truncate(values.len() - 2);
+            values.extend([
+                std::env::var("TMUXX_REMOTE_PYTHON").unwrap_or_else(|_| "python".into()),
+                "-c".into(),
+                "import time; time.sleep(30)".into(),
+            ]);
+        }
+    }
+    values.iter().map(|arg| arg.as_bytes().to_vec()).collect()
+}
+
+#[cfg(windows)]
+fn windows_process(pid: u32) -> std::os::windows::io::OwnedHandle {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(!handle.is_null());
+    unsafe { OwnedHandle::from_raw_handle(handle) }
+}
+
+#[cfg(windows)]
+fn assert_windows_dead(process: &std::os::windows::io::OwnedHandle) {
+    use std::os::windows::io::AsRawHandle;
+    assert_eq!(
+        unsafe {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(
+                process.as_raw_handle(),
+                3000,
+            )
+        },
+        0,
+        "shell descendant survived owner shutdown"
+    );
+}
 
 struct Fixture {
     host: Option<ServerHandle>,
@@ -19,9 +147,17 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&dir).unwrap();
-        let host = tmuxx_runtime::start(Options::new(dir.join("native"))).unwrap();
+        #[cfg(unix)]
+        let endpoint = dir.join("native");
+        #[cfg(windows)]
+        let endpoint =
+            tmuxx_runtime::windows::endpoint(dir.file_name().unwrap().to_str().unwrap()).unwrap();
+        let host = tmuxx_runtime::start(Options::new(endpoint)).unwrap();
         let client = host.connect().unwrap();
-        ok(&client, &["set-option", "-g", "default-shell", "/bin/sh"]);
+        ok(
+            &client,
+            &["set-option", "-g", "default-shell", &fixture_shell()],
+        );
         Self {
             host: Some(host),
             dir,
@@ -32,7 +168,7 @@ impl Fixture {
             .as_ref()
             .unwrap()
             .connect_with_context(ClientContext {
-                cwd: Some(self.dir.to_string_lossy().into_owned()),
+                cwd: Some(self.dir.to_str().unwrap().to_owned()),
                 ..ClientContext::default()
             })
             .unwrap()
@@ -48,7 +184,7 @@ fn send(client: &LocalClient, id: u64, argv: &[&str]) {
     client
         .send(Request {
             request_id: id,
-            argv: argv.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+            argv: fixture_argv(argv),
             stdin: None,
             subscribe: false,
             control: false,
@@ -392,6 +528,45 @@ fn background_jobs_and_disconnected_waiters_do_not_block_remaining_clients() {
 }
 
 #[test]
+fn command_only_job_target_formats_survive_preparation() {
+    let fixture = Fixture::new();
+    let client = fixture.client();
+    ok(&client, &["new-session", "-d", "-s", "main", "sleep", "30"]);
+    assert_eq!(
+        ok(
+            &client,
+            &[
+                "run",
+                "-Ct",
+                "main:0.0",
+                "display -p '#{session_name}:#{pane_id}:#{command}'"
+            ]
+        )
+        .output,
+        b"main:%0:run-shell\n"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires pinned remote C oracle"]
+fn time_literals_and_incomplete_directives_match_c() {
+    let fixture = Fixture::new();
+    let client = fixture.client();
+    let oracle = reference(&fixture);
+    ok(&client, &["new-session", "-d", "-s", "main", "sleep", "30"]);
+    for format in [
+        "main:%0:run-shell",
+        "%1|%42|%Q|%q|%N|%E|%O",
+        "%",
+        "界%0/😀%q",
+        "year:%Y|%q|percent:%%",
+    ] {
+        assert_reference(&client, &oracle, &["display", "-p", format]);
+    }
+}
+
+#[test]
 fn shutdown_reaps_shell_descendants_that_keep_stdout_open() {
     let mut fixture = Fixture::new();
     let client = fixture.client();
@@ -407,10 +582,16 @@ fn shutdown_reaps_shell_descendants_that_keep_stdout_open() {
         .trim()
         .parse()
         .unwrap();
+    #[cfg(windows)]
+    let process = windows_process(pid as u32);
     let start = Instant::now();
     fixture.host.take().unwrap().shutdown().unwrap();
     assert!(start.elapsed() < Duration::from_secs(3));
+    #[cfg(windows)]
+    assert_windows_dead(&process);
+    #[cfg(unix)]
     let deadline = Instant::now() + Duration::from_secs(3);
+    #[cfg(unix)]
     while unsafe { libc::kill(pid, 0) } == 0 {
         assert!(
             Instant::now() < deadline,
@@ -424,7 +605,11 @@ fn shutdown_reaps_shell_descendants_that_keep_stdout_open() {
 fn relative_source_and_hidden_assignments_affect_jobs_but_do_not_export_secrets() {
     let fixture = Fixture::new();
     let client = fixture.client();
+    #[cfg(unix)]
     std::fs::write(fixture.dir.join("config"), b"%hidden SECRET=value\nVISIBLE=present\nrun-shell 'printf \"%s:%s\" \"$VISIBLE\" \"${SECRET-unset}\"'\n").unwrap();
+    #[cfg(windows)]
+    std::fs::write(fixture.dir.join("config"), format!("%hidden SECRET=value\nVISIBLE=present\nrun-shell '{}'\n",
+        powershell(r#"[Console]::Write($env:VISIBLE+":"+$(if (Test-Path Env:SECRET) {$env:SECRET} else {"unset"}))"#))).unwrap();
     assert_eq!(
         ok(&client, &["source-file", "config"]).output,
         b"present:unset\n"
@@ -435,12 +620,23 @@ fn relative_source_and_hidden_assignments_affect_jobs_but_do_not_export_secrets(
     );
 }
 
+#[cfg(unix)]
 use std::process::{Child, Command, Output, Stdio};
+#[cfg(unix)]
 struct Oracle {
     program: PathBuf,
     socket: PathBuf,
 }
+#[cfg(unix)]
 impl Oracle {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            program: std::env::var_os("TMUXX_C_TMUX")
+                .expect("set TMUXX_C_TMUX")
+                .into(),
+            socket: fixture.dir.join("oracle"),
+        }
+    }
     fn start(&self, args: &[&str]) -> Child {
         Command::new(&self.program)
             .args(["-S"])
@@ -470,6 +666,7 @@ impl Oracle {
         child.wait_with_output().unwrap()
     }
 }
+#[cfg(unix)]
 impl Drop for Oracle {
     fn drop(&mut self) {
         let _ = self.run(&["kill-server"]);
@@ -481,12 +678,7 @@ impl Drop for Oracle {
 fn shell_condition_wait_and_exit_status_match_c_reference() {
     let fixture = Fixture::new();
     let client = fixture.client();
-    let oracle = Oracle {
-        program: std::env::var_os("TMUXX_C_TMUX")
-            .expect("set TMUXX_C_TMUX")
-            .into(),
-        socket: fixture.dir.join("oracle"),
-    };
+    let oracle = Oracle::new(&fixture);
     let created = oracle.run(&[
         "new-session",
         "-d",
@@ -720,18 +912,13 @@ fn source_globs_dry_run_formats_aliases_and_shell_validation_are_effective() {
         );
         assert_eq!(
             ok(&client, &["show-options", "-gqv", "default-shell"]).output,
-            b"/bin/sh\n"
+            format!("{}\n", fixture_shell()).as_bytes()
         );
     }
 }
 
 fn reference(fixture: &Fixture) -> Oracle {
-    let oracle = Oracle {
-        program: std::env::var_os("TMUXX_C_TMUX")
-            .expect("set TMUXX_C_TMUX")
-            .into(),
-        socket: fixture.dir.join("oracle"),
-    };
+    let oracle = Oracle::new(fixture);
     assert!(
         oracle
             .run(&["new-session", "-d", "-s", "main", "sleep", "30"])
@@ -741,8 +928,16 @@ fn reference(fixture: &Fixture) -> Oracle {
     oracle
 }
 fn assert_reference(client: &LocalClient, oracle: &Oracle, args: &[&str]) {
+    #[cfg(windows)]
+    oracle.prepare();
     let rust = command(client, args);
     let c = oracle.run(args);
+    #[cfg(windows)]
+    if windows::compare_system_shell(args, &rust, &c) {
+        return;
+    }
+    #[cfg(windows)]
+    let rust = oracle.normalize(rust);
     assert_eq!(
         rust.output,
         c.stdout,
@@ -765,57 +960,62 @@ fn assert_reference(client: &LocalClient, oracle: &Oracle, args: &[&str]) {
 #[test]
 #[ignore = "requires separate C oracle in TMUXX_C_TMUX"]
 fn named_user_tilde_and_empty_home_fallback_match_c() {
-    let fixture = Fixture::new();
-    let client = fixture.client();
-    let oracle = reference(&fixture);
-    ok(&client, &["new-session", "-d", "-s", "main", "sleep", "30"]);
-    let path = fixture.dir.join("tilde.conf");
-    for home in [Some("/tmuxx-home with spaces"), Some(""), None] {
-        let args = if let Some(home) = home {
-            vec!["set-environment", "-g", "HOME", home]
-        } else {
-            vec!["set-environment", "-gu", "HOME"]
-        };
-        assert_reference(&client, &oracle, &args);
-        std::fs::write(&path,b"display -p ~\ndisplay -p ~/bin\ndisplay -p ~root\ndisplay -p ~root/bin\ndisplay -p '~root'\ndisplay -p \"~root\"\ndisplay -p mid~root\ndisplay -p prefix\"~root\"\ndisplay -p \"\"~root\n").unwrap();
+    #[cfg(windows)]
+    return windows::named_user_tilde();
+    #[cfg(unix)]
+    {
+        let fixture = Fixture::new();
+        let client = fixture.client();
+        let oracle = reference(&fixture);
+        ok(&client, &["new-session", "-d", "-s", "main", "sleep", "30"]);
+        let path = fixture.dir.join("tilde.conf");
+        for home in [Some("/tmuxx-home with spaces"), Some(""), None] {
+            let args = if let Some(home) = home {
+                vec!["set-environment", "-g", "HOME", home]
+            } else {
+                vec!["set-environment", "-gu", "HOME"]
+            };
+            assert_reference(&client, &oracle, &args);
+            std::fs::write(&path,b"display -p ~\ndisplay -p ~/bin\ndisplay -p ~root\ndisplay -p ~root/bin\ndisplay -p '~root'\ndisplay -p \"~root\"\ndisplay -p mid~root\ndisplay -p prefix\"~root\"\ndisplay -p \"\"~root\n").unwrap();
+            assert_reference(&client, &oracle, &["source-file", "tilde.conf"]);
+            assert_reference(
+                &client,
+                &oracle,
+                &[
+                    "set-option",
+                    "-s",
+                    "command-alias[50]",
+                    "account-home=display-message -p ~root/bin",
+                ],
+            );
+            assert_reference(&client, &oracle, &["account-home"]);
+        }
+        std::fs::write(&path, b"HOME='/prepared value'\ndisplay -p ~\n").unwrap();
         assert_reference(&client, &oracle, &["source-file", "tilde.conf"]);
-        assert_reference(
-            &client,
-            &oracle,
-            &[
-                "set-option",
-                "-s",
-                "command-alias[50]",
-                "account-home=display-message -p ~root/bin",
-            ],
-        );
-        assert_reference(&client, &oracle, &["account-home"]);
-    }
-    std::fs::write(&path, b"HOME='/prepared value'\ndisplay -p ~\n").unwrap();
-    assert_reference(&client, &oracle, &["source-file", "tilde.conf"]);
-    for source in [
-        "display -p ~tmuxx_no_such_account_42\n".to_string(),
-        format!("display -p ~{}\n", "a".repeat(1023)),
-    ] {
-        std::fs::write(&path, &source).unwrap();
-        let rust = command(&client, &["source-file", "tilde.conf"]);
-        let c = oracle.run(&["source-file", "tilde.conf"]);
-        assert!(!c.status.success());
-        let expected = if source.contains("tmuxx_no_such") {
-            "syntax error"
-        } else {
-            "user name is too long"
-        };
-        assert_eq!(rust.status, Some(1));
-        assert_eq!(rust.error, None);
-        assert_eq!(rust.output, c.stdout);
-        assert!(c.stderr.is_empty(), "{c:?}");
-        assert!(
-            String::from_utf8_lossy(&rust.output)
-                .trim_end()
-                .ends_with(expected),
-            "{rust:?}"
-        );
+        for source in [
+            "display -p ~tmuxx_no_such_account_42\n".to_string(),
+            format!("display -p ~{}\n", "a".repeat(1023)),
+        ] {
+            std::fs::write(&path, &source).unwrap();
+            let rust = command(&client, &["source-file", "tilde.conf"]);
+            let c = oracle.run(&["source-file", "tilde.conf"]);
+            assert!(!c.status.success());
+            let expected = if source.contains("tmuxx_no_such") {
+                "syntax error"
+            } else {
+                "user name is too long"
+            };
+            assert_eq!(rust.status, Some(1));
+            assert_eq!(rust.error, None);
+            assert_eq!(rust.output, c.stdout);
+            assert!(c.stderr.is_empty(), "{c:?}");
+            assert!(
+                String::from_utf8_lossy(&rust.output)
+                    .trim_end()
+                    .ends_with(expected),
+                "{rust:?}"
+            );
+        }
     }
 }
 #[test]
@@ -1158,6 +1358,19 @@ fn job_flags_delay_validation_cwd_and_target_context_match_c() {
     let client = fixture.client();
     let oracle = reference(&fixture);
     ok(&client, &["new-session", "-d", "-s", "main", "sleep", "30"]);
+    #[cfg(windows)]
+    ok(
+        &client,
+        &[
+            "set-option",
+            "-g",
+            "default-shell",
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32/cmd.exe")
+                .to_str()
+                .unwrap(),
+        ],
+    );
     for args in [
         vec!["set-option", "-g", "default-shell", "/bin/zsh"],
         vec!["set-option", "-s", "default-terminal", "vt220"],
@@ -1256,12 +1469,17 @@ fn native_job_delay_bound_is_an_explicit_c_difference() {
 #[test]
 #[ignore = "requires separate C oracle in TMUXX_C_TMUX"]
 fn shell_job_stdin_socket_eof_and_signal_match_c() {
-    let fixture = Fixture::new();
-    let client = fixture.client();
-    let oracle = reference(&fixture);
-    ok(&client, &["new-session", "-d", "-s", "main", "sleep", "30"]);
-    let script = "if test -S /dev/fd/0; then printf socket:; else printf other:; fi; if read line; then printf input; else printf eof; fi";
-    assert_reference(&client, &oracle, &["run-shell", script]);
-    assert_eq!(ok(&client, &["run-shell", script]).output, b"socket:eof\n");
-    assert_reference(&client, &oracle, &["run-shell", "kill -TERM $$"]);
+    #[cfg(windows)]
+    return windows::job_stdin_and_termination();
+    #[cfg(unix)]
+    {
+        let fixture = Fixture::new();
+        let client = fixture.client();
+        let oracle = reference(&fixture);
+        ok(&client, &["new-session", "-d", "-s", "main", "sleep", "30"]);
+        let script = "if test -S /dev/fd/0; then printf socket:; else printf other:; fi; if read line; then printf input; else printf eof; fi";
+        assert_reference(&client, &oracle, &["run-shell", script]);
+        assert_eq!(ok(&client, &["run-shell", script]).output, b"socket:eof\n");
+        assert_reference(&client, &oracle, &["run-shell", "kill -TERM $$"]);
+    }
 }

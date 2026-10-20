@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -8,12 +8,46 @@ use tmuxx_runtime::{LocalClient, Options, ServerHandle};
 
 fn host() -> ServerHandle {
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(unix)]
     let path = std::env::temp_dir().join(format!(
         "tmuxx-views-{}-{}.sock",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    #[cfg(windows)]
+    let path = tmuxx_runtime::windows::endpoint(&format!(
+        "native-views-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
     tmuxx_runtime::start(Options::new(path)).unwrap()
+}
+
+#[cfg(windows)]
+const RAW_CONSOLE: &str = "import ctypes,msvcrt,os\nk=ctypes.WinDLL('kernel32',use_last_error=True)\nk.GetStdHandle.restype=ctypes.c_void_p\nk.SetConsoleMode.argtypes=[ctypes.c_void_p,ctypes.c_ulong]\nassert k.SetConsoleCP(65001) and k.SetConsoleOutputCP(65001)\nassert k.SetConsoleMode(k.GetStdHandle(-10),0x200)\nassert k.SetConsoleMode(k.GetStdHandle(-11),0xD)\nmsvcrt.setmode(0,os.O_BINARY); msvcrt.setmode(1,os.O_BINARY)\n";
+
+fn fixture_argv(argv: &[&str]) -> Vec<Vec<u8>> {
+    #[cfg(unix)]
+    let argv = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    #[cfg(windows)]
+    let argv = {
+        let mut values = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        // These are explicit fixture programs, not command-runtime rewrites.
+        if values.len() >= 2 && values[values.len() - 2..] == ["sleep", "30"] {
+            values.truncate(values.len() - 2);
+            values.extend(["python", "-u", "-c", "import time; time.sleep(30)"].map(str::to_owned));
+        }
+        if let Some(index) = values.iter().position(|arg| arg == "python3") {
+            values[index] = "python".into();
+            let script = values.last_mut().unwrap();
+            *script = script
+                .replace("import os,tty; tty.setraw(0); ", RAW_CONSOLE)
+                .replace("import os,tty\ntty.setraw(0)\n", RAW_CONSOLE);
+        }
+        values
+    };
+    argv.iter().map(|arg| arg.as_bytes().to_vec()).collect()
 }
 
 fn receive<T>(client: &LocalClient, mut select: impl FnMut(ServerMessage) -> Option<T>) -> T {
@@ -41,7 +75,7 @@ fn command(
     client
         .send(Request {
             request_id: 1,
-            argv: argv.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+            argv: fixture_argv(argv),
             stdin: input,
             subscribe,
             control: false,
@@ -640,7 +674,41 @@ fn retention_acknowledgement_preserves_only_selected_panes_after_all_views_leave
 fn native_cell_geometry_updates_terminal_queries_pty_and_pairwise_arbitration() {
     let host = host();
     let admin = host.connect().unwrap();
+    #[cfg(unix)]
     let script = "import os,tty,fcntl,termios,struct\ntty.setraw(0)\ninitial=struct.unpack('HHHH',fcntl.ioctl(0,termios.TIOCGWINSZ,b'\\0'*8))\nos.write(1,('INITIAL='+','.join(map(str,initial))+'\\r\\nREADY').encode())\nwhile os.read(0,1):\n size=struct.unpack('HHHH',fcntl.ioctl(0,termios.TIOCGWINSZ,b'\\0'*8))\n os.write(1,b'\\x1b[16t')\n reply=b''\n while not reply.endswith(b't'): reply+=os.read(0,1)\n os.write(1,(' SIZE='+','.join(map(str,size))+' REPLY='+reply.hex()+'\\r\\n').encode())";
+    // ConPTY exposes cell dimensions through the console API, not TIOCGWINSZ
+    // pixels. Read those real cells and query the terminal's actual pixel size.
+    #[cfg(windows)]
+    let windows_script = format!(
+        "{RAW_CONSOLE}{}",
+        r#"class Coord(ctypes.Structure):
+ _fields_=[('x',ctypes.c_short),('y',ctypes.c_short)]
+class Rect(ctypes.Structure):
+ _fields_=[('left',ctypes.c_short),('top',ctypes.c_short),('right',ctypes.c_short),('bottom',ctypes.c_short)]
+class Info(ctypes.Structure):
+ _fields_=[('size',Coord),('cursor',Coord),('attributes',ctypes.c_ushort),('window',Rect),('maximum',Coord)]
+k.GetConsoleScreenBufferInfo.argtypes=[ctypes.c_void_p,ctypes.POINTER(Info)]
+def query(code):
+ os.write(1,code)
+ reply=b''
+ while not reply.endswith(b't'): reply+=os.read(0,1)
+ return reply
+def size():
+ info=Info()
+ assert k.GetConsoleScreenBufferInfo(k.GetStdHandle(-11),ctypes.byref(info))
+ pixels=query(b'\x1b[14t')
+ assert pixels.startswith(b'\x1b[4;'),repr(pixels)
+ height,width=map(int,pixels[4:-1].split(b';'))
+ return info.window.bottom-info.window.top+1,info.window.right-info.window.left+1,width,height
+os.write(1,('INITIAL='+','.join(map(str,size()))+'\r\nREADY').encode())
+while os.read(0,1):
+ current=size()
+ reply=query(b'\x1b[16t')
+ os.write(1,(' SIZE='+','.join(map(str,current))+' REPLY='+reply.hex()+'\r\n').encode())
+"#
+    );
+    #[cfg(windows)]
+    let script = windows_script.as_str();
     assert_eq!(
         command(
             &admin,
@@ -1076,26 +1144,23 @@ fn agent_status_is_retained_without_views_and_reconnect_keeps_the_process() {
     let host = host();
     let admin = host.connect().unwrap();
     let frame = "\x1b]777;rustty-agent;1;eyJvcCI6ImJlZ2luIiwic3RhdGUiOiJuZWVkc19pbnB1dCIsInRocmVhZF9pZCI6InJlbW90ZSJ9\x07";
-    assert_eq!(
-        command(
-            &admin,
-            &[
-                "new-session",
-                "-d",
-                "-s",
-                "agent",
-                "/bin/sh",
-                "-c",
-                "printf '%s' \"$1\"; printf READY; sleep 30",
-                "sh",
-                frame,
-            ],
-            None,
-            false
-        )
-        .error,
-        None
+    #[cfg(unix)]
+    let program = [
+        "/bin/sh",
+        "-c",
+        "printf '%s' \"$1\"; printf READY; sleep 30",
+        "sh",
+        frame,
+    ];
+    #[cfg(windows)]
+    let script = format!(
+        "{RAW_CONSOLE}\nimport sys,time\nos.write(1,sys.argv[1].encode('utf-8')+b'READY')\ntime.sleep(30)"
     );
+    #[cfg(windows)]
+    let program = ["python", "-u", "-c", script.as_str(), frame];
+    let mut argv = vec!["new-session", "-d", "-s", "agent"];
+    argv.extend(program);
+    assert_eq!(command(&admin, &argv, None, false).error, None);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !command(&admin, &["capture-pane", "-p", "-t", "%0"], None, false)
         .output

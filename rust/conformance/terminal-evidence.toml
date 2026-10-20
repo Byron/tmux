@@ -3,6 +3,7 @@
 
 [[suites]]
 id = "terminal-history-head-reference"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "history_reference", "head_history_counters_match_c_and_survive_snapshots", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -14,6 +15,7 @@ description = "HEAD C compares primary history size, limit, added/collected/gene
 
 [[suites]]
 id = "terminal-history-supported-reference"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "history_reference", "history_limits_resets_and_regions_match_supported_c", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -25,6 +27,7 @@ description = "The shared HEAD/3.7c history row/cursor/limit contract runs the s
 
 [[suites]]
 id = "terminal-history-native-allocation"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "history_reference", "native_history_allocation_metrics_account_for_page_capacity", "--", "--exact"]
 env = {}
@@ -36,6 +39,7 @@ description = "Allocated native row/cell slots bound live rows/cells, byte compo
 
 [[suites]]
 id = "terminal-history-allocation-difference"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "history_reference", "native_history_allocation_metrics_are_explicit_c_difference", "--", "--ignored", "--exact", "--nocapture"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -47,6 +51,7 @@ description = "Records independent C/native byte totals and six-field allocation
 
 [[suites]]
 id = "terminal"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--lib"]
 env = {}
@@ -98,6 +103,7 @@ description = "Native focus reports respect server gate even at DEC1004 activati
 
 [[suites]]
 id = "layout"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-layout", "--lib"]
 env = {}
@@ -139,6 +145,7 @@ description = "Every preset remains valid at minimum supported dimensions and re
 
 [[suites]]
 id = "clipboard-policy-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "clipboard"]
 env = {}
@@ -150,6 +157,7 @@ description = "OSC52 defaults deny application access; explicit policies govern 
 
 [[suites]]
 id = "clipboard-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "clipboard_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -161,6 +169,7 @@ description = "Current C matches 31 OSC52 policy/selector/base64 fixtures and au
 
 [[suites]]
 id = "graphics-reset-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "images_reference", "tmux_graphics_profile_and_pending_query_survive_snapshot_and_reset"]
 env = {}
@@ -172,6 +181,7 @@ description = "Pending graphics query survives snapshot restore, produces one re
 
 [[suites]]
 id = "graphics-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "images_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -193,6 +203,7 @@ description = "Seven boundary fixtures compare C replies for encoded chunks, acc
 
 [[suites]]
 id = "graphics-pixels"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "images_pixels_reference", "--", "--include-ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -219,6 +230,7 @@ description = "Stable row IDs and image anchors survive native restore after ref
 
 [[suites]]
 id = "graphics-global-quota"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "images_quota_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -230,6 +242,7 @@ description = "Eleven C fixture groups across two pane PTYs compare source/place
 
 [[suites]]
 id = "terminal-options-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "terminal_options_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -256,6 +269,7 @@ description = "Twenty-two C fixtures compare shell command running/status/line, 
 
 [[suites]]
 id = "shell-clock-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--lib", "formats_terminal::tests"]
 env = {}
@@ -267,6 +281,7 @@ description = "Prompt/start/end timestamps and command duration follow the owner
 
 [[suites]]
 id = "native-pane-style-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--lib", "styles::tests"]
 env = {}
@@ -278,6 +293,7 @@ description = "Pane activation changes native color defaults, snapshots retain u
 
 [[suites]]
 id = "sixel-retained-state"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "images_pixels_reference", "sixel", "--", "--include-ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -289,6 +305,7 @@ description = "Image-enabled C redraw pixels and exact cursor positions match RG
 
 [[suites]]
 id = "sixel-global-quota"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "images_quota_reference", "sixel", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -300,6 +317,7 @@ description = "Two C pane PTYs prove a SIXEL image consumes one source object, o
 
 [[suites]]
 id = "shell-retained-state"
+platforms = ["darwin", "linux"]
 profiles = ["native-views", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "shell_reference", "--", "--include-ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -316,6 +334,7 @@ description = "Every partial OSC133 byte boundary survives JSON/native snapshot 
 
 [[suites]]
 id = "clear-history-command-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "history_reference", "clear_history_clears_primary_history_from_both_screens_like_c", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -327,6 +346,7 @@ description = "The real command clears primary history from either active screen
 
 [[suites]]
 id = "buffer-command-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "clipboard_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -343,6 +363,7 @@ description = "Real C empty-pane input matches named capture bytes, preserved un
 
 [[suites]]
 id = "buffer-native-clipboard-targets"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "native_views", "buffer_clipboard_flags_target_exact_native_view_and_keep_binary_data", "--", "--exact"]
 env = {}
@@ -354,6 +375,7 @@ description = "set/load -w target precisely one native view, preserve binary dat
 
 [[suites]]
 id = "pane-creation-and-history-flags"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "pane_flags_reference", "--", "--include-ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }

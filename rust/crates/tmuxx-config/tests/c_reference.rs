@@ -1,34 +1,56 @@
 //! Explicitly enabled executable oracle: TMUXX_C_ORACLE=/path/to/tmux cargo test
 //! -p tmuxx-config --test c_reference -- --ignored. No C code is linked into Rust.
 
-#![cfg(unix)]
-
+#[cfg(unix)]
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::path::PathBuf;
-use std::process::{Command, Output};
+#[cfg(unix)]
+use std::process::Command;
+use std::process::Output;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use tmuxx_config::{Environment, prepare};
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
 
+#[cfg(unix)]
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 struct Reference {
+    #[cfg(unix)]
     executable: OsString,
+    #[cfg(unix)]
     label: String,
+    #[cfg(unix)]
     source: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 
 impl Reference {
     fn new() -> Self {
+        #[cfg(unix)]
         let executable = std::env::var_os("TMUXX_C_ORACLE")
             .expect("set TMUXX_C_ORACLE to the C tmux executable");
+        #[cfg(unix)]
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+        #[cfg(unix)]
         let label = format!("tmuxx-parser-{}-{serial}", std::process::id());
+        #[cfg(unix)]
         let source = std::env::temp_dir().join(format!("{label}.conf"));
         let reference = Self {
+            #[cfg(unix)]
             executable,
+            #[cfg(unix)]
             label,
+            #[cfg(unix)]
             source,
+            #[cfg(windows)]
+            remote: remote_reference::RemoteReference::new(),
         };
         reference.run(["new-session", "-d", "-s", "oracle", "sleep 60"]);
         reference
@@ -37,21 +59,36 @@ impl Reference {
     fn output<I, S>(&self, args: I) -> Output
     where
         I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
+        S: AsRef<[u8]>,
     {
-        Command::new(&self.executable)
-            .args(["-L", &self.label, "-f", "/dev/null"])
-            .args(args)
-            .env_remove("TMUX")
-            .env("LC_ALL", "C.UTF-8")
-            .output()
-            .expect("launch C oracle")
+        #[cfg(unix)]
+        {
+            Command::new(&self.executable)
+                .args(["-L", &self.label, "-f", "/dev/null"])
+                .args(
+                    args.into_iter()
+                        .map(|arg| OsStr::from_bytes(arg.as_ref()).to_owned()),
+                )
+                .env_remove("TMUX")
+                .env("LC_ALL", "C.UTF-8")
+                .output()
+                .expect("launch C oracle")
+        }
+        #[cfg(windows)]
+        {
+            let args = args
+                .into_iter()
+                .map(|arg| arg.as_ref().to_vec())
+                .collect::<Vec<_>>();
+            self.remote
+                .output(&args.iter().map(Vec::as_slice).collect::<Vec<_>>(), &[])
+        }
     }
 
     fn run<I, S>(&self, args: I) -> Vec<u8>
     where
         I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
+        S: AsRef<[u8]>,
     {
         let output = self.output(args);
         assert!(
@@ -65,21 +102,31 @@ impl Reference {
     }
 
     fn source(&self, source: &[u8]) {
-        std::fs::write(&self.source, source).unwrap();
-        self.run([OsStr::new("source-file"), self.source.as_os_str()]);
+        let output = self.source_output(source);
+        assert!(output.status.success(), "C source failed: {output:?}");
+    }
+
+    fn source_output(&self, source: &[u8]) -> Output {
+        #[cfg(unix)]
+        {
+            std::fs::write(&self.source, source).unwrap();
+            self.output([
+                b"source-file".as_slice(),
+                self.source.as_os_str().as_bytes(),
+            ])
+        }
+        #[cfg(windows)]
+        self.remote.source(source)
     }
 
     fn option(&self, name: &[u8]) -> Vec<u8> {
-        let mut value = self.run([
-            OsStr::new("show-options"),
-            OsStr::new("-gqv"),
-            OsStr::from_bytes(name),
-        ]);
+        let mut value = self.run([b"show-options".as_slice(), b"-gqv", name]);
         assert_eq!(value.pop(), Some(b'\n'));
         value
     }
 }
 
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         let _ = self.output(["kill-server"]);
@@ -155,7 +202,7 @@ fn text_parser_and_argv_match_c_execution() {
     }
 
     let argv = [b"set-option".as_slice(), b"-g", b"@argv", b"literal\\;"];
-    reference.run(argv.iter().map(|arg| OsString::from_vec(arg.to_vec())));
+    reference.run(argv);
     let parsed = tmuxx_command::parse_argv(argv).unwrap();
     assert_eq!(reference.option(b"@argv"), parsed[0].args[3]);
 }
@@ -167,12 +214,23 @@ fn high_byte_preservation_is_an_explicit_reference_difference() {
     let source = b"set-option -g @raw \xff\n";
     let parsed = tmuxx_command::parse(source).unwrap();
     assert_eq!(parsed[0].args[3], b"\xff");
-    std::fs::write(&reference.source, source).unwrap();
-    let c = reference.output([OsStr::new("source-file"), reference.source.as_os_str()]);
+    let c = reference.source_output(source);
     // C's lexer promotes a plain char to int. Signed-char ABIs interpret 0xff
     // as EOF; unsigned-char ABIs (including aarch64 GNU/Linux) retain it.
     // Assert each target's actual contract without normalizing either output.
-    if (0xff_u8 as std::ffi::c_char as i32) < 0 {
+    #[cfg(unix)]
+    let signed_char = (0xff_u8 as std::ffi::c_char as i32) < 0;
+    #[cfg(windows)]
+    let signed_char = {
+        let identity: serde_json::Value =
+            serde_json::from_slice(&reference.remote.identity()).unwrap();
+        assert!(
+            identity["host"][0] == "Linux" && identity["host"][4] == "x86_64",
+            "the Windows high-byte C oracle requires the pinned Linux/x86_64 build with recorded default C flags; another reference ABI needs measured char signedness: {identity}"
+        );
+        true
+    };
+    if signed_char {
         assert!(
             !c.status.success(),
             "reference changed; review signed-char high-byte difference"
@@ -218,12 +276,7 @@ fn format_observations_match_c() {
         (b"@quote", b"!~]=%\n\t|&;<>(){}$`\\\"'*?[# "),
     ];
     for (name, value) in options {
-        reference.run([
-            OsStr::new("set-option"),
-            OsStr::new("-g"),
-            OsStr::from_bytes(name),
-            OsStr::from_bytes(value),
-        ]);
+        reference.run([b"set-option".as_slice(), b"-g".as_slice(), name, value]);
     }
     for format in [
         b"#{session_name}/#{pane_id}/##/#,/#}".as_slice(),
@@ -293,11 +346,7 @@ fn format_observations_match_c() {
         b"#{n:#{R:abcdefgh,8192}}",
         b"#{R:abcdefgh,8193}",
     ] {
-        let mut c = reference.run([
-            OsStr::new("display-message"),
-            OsStr::new("-p"),
-            OsStr::from_bytes(format),
-        ]);
+        let mut c = reference.run([b"display-message".as_slice(), b"-p".as_slice(), format]);
         assert_eq!(c.pop(), Some(b'\n'));
         let rust = tmuxx_format::expand(format, |key| {
             Some(match key {
@@ -312,7 +361,45 @@ fn format_observations_match_c() {
             })
         })
         .unwrap();
+        #[cfg(windows)]
+        if format == "#{m:??,é}".as_bytes() {
+            // The glibc oracle also accepts the UTF-8 byte count after its
+            // wide-character match fails. Native Windows has an explicit
+            // scalar glob contract; assert both real results, never normalize.
+            assert_eq!(rust, b"0", "Windows glob must preserve scalar boundaries");
+            assert_eq!(c, b"1", "review the pinned glibc wildcard difference");
+            continue;
+        }
         assert_eq!(rust, c, "format {}", String::from_utf8_lossy(format));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the explicit pinned glibc C oracle"]
+fn native_globs_preserve_scalar_boundaries_against_glibc_byte_fallback() {
+    let reference = Reference::new();
+    for (pattern, text, native, c) in [
+        ("?", "é", b"1".as_slice(), b"1".as_slice()),
+        ("??", "é", b"0", b"1"),
+        ("???", "é", b"0", b"0"),
+        ("?", "界", b"1", b"1"),
+        ("??", "界", b"0", b"0"),
+        ("???", "界", b"0", b"1"),
+        ("??", "ab", b"1", b"1"),
+        ("???", "abc", b"1", b"1"),
+    ] {
+        let format = format!("#{{m:{pattern},{text}}}");
+        assert_eq!(
+            tmuxx_format::expand(format.as_bytes(), |_| None).unwrap(),
+            native,
+            "{format}"
+        );
+        assert_eq!(
+            reference.run(["display-message", "-p", &format]),
+            [c, b"\n"].concat(),
+            "review pinned glibc {format}"
+        );
     }
 }
 
@@ -328,11 +415,7 @@ fn preparation_suppresses_jobs_and_boolean_evaluation_short_circuits() {
         b"#{&&:0,#(echo unused)}".as_slice(),
         b"#{||:1,#(echo unused)}",
     ] {
-        let c = reference.run([
-            OsStr::new("display-message"),
-            OsStr::new("-p"),
-            OsStr::from_bytes(expression),
-        ]);
+        let c = reference.run([b"display-message".as_slice(), b"-p".as_slice(), expression]);
         let mut rust = tmuxx_format::expand(expression, |_| None).unwrap();
         rust.push(b'\n');
         assert_eq!(rust, c);
@@ -367,12 +450,7 @@ fn regex_and_substitution_observations_match_c() {
         (b"@replace", b"X"),
     ];
     for (key, value) in values {
-        reference.run([
-            OsStr::new("set"),
-            OsStr::new("-g"),
-            OsStr::from_bytes(key),
-            OsStr::from_bytes(value),
-        ]);
+        reference.run([b"set".as_slice(), b"-g".as_slice(), key, value]);
     }
     for format in [
         b"#{m/r:a+,aba}".as_slice(),
@@ -410,11 +488,7 @@ fn regex_and_substitution_observations_match_c() {
         b"#{w;n;s/a/long/:@value}",
         b"#{n;m/r:a+,aaaa}",
     ] {
-        let mut c = reference.run([
-            OsStr::new("display-message"),
-            OsStr::new("-p"),
-            OsStr::from_bytes(format),
-        ]);
+        let mut c = reference.run([b"display-message".as_slice(), b"-p".as_slice(), format]);
         assert_eq!(c.pop(), Some(b'\n'));
         let rust = tmuxx_format::expand(format, |key| {
             values
@@ -441,12 +515,7 @@ fn timestamp_and_time_expansion_match_c() {
         (b"@label", b"literal"),
     ];
     for (key, value) in values {
-        reference.run([
-            OsStr::new("set"),
-            OsStr::new("-g"),
-            OsStr::from_bytes(key),
-            OsStr::from_bytes(value),
-        ]);
+        reference.run([b"set".as_slice(), b"-g".as_slice(), key, value]);
     }
     for format in [
         b"#{t:@stamp}".as_slice(),
@@ -462,10 +531,10 @@ fn timestamp_and_time_expansion_match_c() {
         b"#{t/f/%Y:@missing}",
     ] {
         reference.run([
-            OsStr::new("set-option"),
-            OsStr::new("-gF"),
-            OsStr::new("@result"),
-            OsStr::from_bytes(format),
+            b"set-option".as_slice(),
+            b"-gF".as_slice(),
+            b"@result".as_slice(),
+            format,
         ]);
         let c = reference.option(b"@result");
         let rust = tmuxx_format::expand(format, |key| {
@@ -571,10 +640,14 @@ fn fuzzy_color_argument_quotes_and_contextless_modifiers_match_c() {
     let check = |format: &str, values: &[(&[u8], &[u8])]| {
         for (name, value) in values {
             reference.run([
-                OsStr::new("set-option"),
-                OsStr::new("-g"),
-                OsStr::from_bytes(name),
-                OsStr::from_bytes(if *value == b";" { b"\\;" } else { value }),
+                b"set-option".as_slice(),
+                b"-g".as_slice(),
+                name,
+                if *value == b";" {
+                    b"\\;".as_slice()
+                } else {
+                    value
+                },
             ]);
         }
         let mut expected = reference.run(["display-message", "-p", format]);
@@ -741,12 +814,7 @@ fn modifier_delimiters_escaping_precedence_and_failures_match_c() {
         (b"@time", b"1700000000"),
     ];
     for (name, value) in values {
-        reference.run([
-            OsStr::new("set-option"),
-            OsStr::new("-g"),
-            OsStr::from_bytes(name),
-            OsStr::from_bytes(value),
-        ]);
+        reference.run([b"set-option".as_slice(), b"-g".as_slice(), name, value]);
     }
     let check = |format: &str| {
         reference.run(["set-option", "-gF", "@result", format]);

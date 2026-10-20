@@ -1,7 +1,22 @@
 # These suites execute the actual integrated sibling checkout. Its pinned base,
 # integration result hashes, and all crate sources enter the evidence identity.
 [[suites]]
+id = "rustty-system-discovery-recovery"
+platforms = ["darwin", "linux", "win32"]
+kind = "rustty-cargo"
+profiles = ["native-views", "system-client"]
+args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty", "--features", "sessions", "--lib", "tmuxx::system::tests::discovery_recovery_coalesces_structural_churn_once_with_a_fixed_deadline", "--", "--exact"]
+timeout = 600
+env = {}
+
+[[suites.assertions]]
+id = "rustty.system-discovery-coalescing-and-deadline"
+tests = ["tmuxx::system::tests::discovery_recovery_coalesces_structural_churn_once_with_a_fixed_deadline"]
+description = "Rustty coalesces structural discovery deferral on the same SSH actor until 150ms of structural quiet, permits one explicit read-only bootstrap recovery, and retains a fixed five-second deadline that continued events cannot extend. Actual external graph-burst reconciliation is exercised by the Windows system-C GUI suite."
+
+[[suites]]
 id = "rustty-native-adapter"
+platforms = ["darwin", "linux", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views", "app-owned", "standalone"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty", "--features", "sessions", "--lib", "tmuxx::tests::", "--", "--test-threads=1"]
@@ -40,6 +55,7 @@ description = "Both native detach variants close every attached view and mark th
 
 [[suites]]
 id = "rustty-native-workspace"
+platforms = ["darwin", "linux", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views", "system-client"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--lib", "tmuxx_workspace::tests::", "--", "--test-threads=1"]
@@ -54,6 +70,7 @@ description = "Actual Rustty workspace maps session/window/pane identity, duplic
 [[suites]]
 id = "rustty-system-ssh"
 kind = "rustty-system-ssh"
+platforms = ["darwin", "linux"]
 profiles = ["system-client", "native-views"]
 args = []
 timeout = 600
@@ -66,6 +83,7 @@ description = "An isolated real SSH server executes the selected stock C binary.
 
 [[suites]]
 id = "cli-process-lifetimes"
+platforms = ["darwin", "linux"]
 profiles = ["app-owned", "standalone", "native-views", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "lifetime", "--", "--test-threads=1"]
 env = {}
@@ -143,6 +161,7 @@ description = "A freshly built actual Rustty desktop renders two native panes in
 
 [[suites]]
 id = "native-input-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "native_input_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }

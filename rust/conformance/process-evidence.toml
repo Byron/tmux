@@ -1,6 +1,7 @@
 # Named lifecycle contracts, not certification of every process or shell behavior.
 [[suites]]
 id = "process-core"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--lib", "process::tests"]
 env = {}
@@ -27,6 +28,7 @@ description = "key and failed-key retain the required statuses; only native Key 
 
 [[suites]]
 id = "process-runtime"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "process::tests"]
 env = {}
@@ -43,6 +45,7 @@ description = "Only the owning connection and original request may feed at most 
 
 [[suites]]
 id = "process-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "empty_respawn_and_pipe_lifecycle_match_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -55,6 +58,7 @@ description = "Four C/Rust client/server pairings: finite empty-pane stdin/captu
 
 [[suites]]
 id = "process-live-stdin-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "live_stdin_streams_before_eof_and_cancels_with_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -66,6 +70,7 @@ description = "Four C/Rust pairings: split/display -I render before EOF, other c
 
 [[suites]]
 id = "process-wait-and-shutdown-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "input_shutdown_and_pane_wait_follow_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -77,6 +82,7 @@ description = "Four C/Rust pairings: shutdown cancels idle stdin with ordinary-c
 
 [[suites]]
 id = "process-native-stdin"
+platforms = ["darwin", "linux"]
 profiles = ["app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "native_cli_streams_input_before_eof", "--", "--ignored", "--exact", "--test-threads=1"]
 env = {}
@@ -89,6 +95,7 @@ description = "Native JSON transport supplies acknowledged bounded stdin chunks 
 
 [[suites]]
 id = "process-key-retention-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "retained_key_panes_and_failed_key_policy_match_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -100,6 +107,7 @@ description = "Four C/Rust pairings: split-window/new-pane -k store key retentio
 
 [[suites]]
 id = "process-respawn-cell-pixels-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "respawn_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }

@@ -934,11 +934,12 @@ fn window_creation_policy_aggressive_resize_and_limits_match_c() {
         second.ok("refresh-client -f '!ignore-size'");
         first.ok("set-option -gw window-size smallest");
         first.ok("refresh-client -C 120,50");
-        output.push(first.command("new-window -d -P -F '#{window_width}x#{window_height}' ''"));
-        // new-session '' executes a shell that exits immediately; unlike
-        // new-window '', it does not request an empty retained pane. Keep the
-        // other session's current window alive while comparing resize policy.
-        first.ok("new-session -d -s other 'sleep 30'");
+        // Older C starts a short-lived shell for an empty new-window command;
+        // new-session does so on both references. Keep sizing fixtures alive.
+        output.push(
+            first.command("new-window -d -P -F '#{window_width}x#{window_height}' 'sleep 60'"),
+        );
+        first.ok("new-session -d -s other 'sleep 60'");
         first.ok("link-window -d -s test:0 -t other:1");
         second.ok("switch-client -t other");
         assert_eq!(
@@ -980,7 +981,7 @@ fn window_creation_policy_aggressive_resize_and_limits_match_c() {
             first.command("new-window -d -t test: -P -F '#{window_width}x#{window_height}' ''"),
         );
         output.push(first.command(
-            "new-session -d -s large -x 12000 -y 1 -P -F '#{window_width}x#{window_height}' 'sleep 30'",
+            "new-session -d -s large -x 12000 -y 1 -P -F '#{window_width}x#{window_height}' 'sleep 60'",
         ));
         output.push(first.command("show-options -v -t large default-size"));
         observations.push(output);

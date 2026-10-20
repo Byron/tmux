@@ -119,34 +119,51 @@ fn native_creation_styles_and_history_trim_survive_snapshots() {
 #[test]
 #[ignore = "requires current C tmux and PTY/socket access"]
 fn creation_presentation_flags_are_explicit_no_mutation_differences() {
+    #[cfg(unix)]
     use std::{path::PathBuf, process::Command};
     use tmuxx_core::{ClientContext, Engine};
     struct Server {
+        #[cfg(unix)]
         binary: PathBuf,
+        #[cfg(unix)]
         socket: PathBuf,
+        #[cfg(windows)]
+        remote: common::remote_reference::RemoteReference,
     }
     impl Server {
         fn run(&self, args: &[&str]) -> Vec<u8> {
+            #[cfg(unix)]
             let output = Command::new(&self.binary)
                 .args(["-f", "/dev/null", "-S"])
                 .arg(&self.socket)
                 .args(args)
                 .output()
                 .unwrap();
+            #[cfg(windows)]
+            let output = self.remote.output(
+                &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+                &[],
+            );
             assert!(output.status.success(), "{args:?}: {output:?}");
             output.stdout
         }
     }
+    #[cfg(unix)]
     impl Drop for Server {
         fn drop(&mut self) {
             self.run(&["kill-server"]);
         }
     }
+    #[cfg(unix)]
     let c = Server {
         binary: std::env::var_os("TMUXX_C_TMUX")
             .expect("set TMUXX_C_TMUX")
             .into(),
         socket: PathBuf::from(format!("/tmp/tmuxx-pane-flags-{}", std::process::id())),
+    };
+    #[cfg(windows)]
+    let c = Server {
+        remote: common::remote_reference::RemoteReference::new(),
     };
     c.run(&["new-session", "-dE"]);
     let mut engine = Engine::default();

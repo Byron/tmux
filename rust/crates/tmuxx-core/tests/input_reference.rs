@@ -1,16 +1,30 @@
 //! Read child input bytes directly, without any terminal rendering normalization.
+#[cfg(windows)]
+use common::remote_reference;
+use std::time::{Duration, Instant};
+#[cfg(unix)]
 use std::{
     path::PathBuf,
     process::Command,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tmuxx_core::{ClientContext, Effect, Engine};
 struct Oracle {
+    #[cfg(unix)]
     binary: PathBuf,
+    #[cfg(unix)]
     socket: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl Oracle {
     fn run(&self, args: &[&str]) -> Vec<u8> {
+        #[cfg(windows)]
+        let result = self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        );
+        #[cfg(unix)]
         let result = Command::new(&self.binary)
             .args(["-S"])
             .arg(&self.socket)
@@ -25,7 +39,36 @@ impl Oracle {
         );
         result.stdout
     }
+    fn path(&self, leaf: &str) -> String {
+        #[cfg(unix)]
+        return self
+            .socket
+            .parent()
+            .unwrap()
+            .join(leaf)
+            .to_str()
+            .unwrap()
+            .to_owned();
+        #[cfg(windows)]
+        return String::from_utf8(self.remote.path(leaf.as_bytes())).unwrap();
+    }
+    fn wait(&self, leaf: &str) -> Vec<u8> {
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            #[cfg(unix)]
+            if let Ok(bytes) = std::fs::read(self.path(leaf)) {
+                return bytes;
+            }
+            #[cfg(windows)]
+            if self.remote.exists(leaf.as_bytes()) {
+                return self.remote.get(leaf.as_bytes());
+            }
+            assert!(Instant::now() < end, "missing C file {leaf}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
 }
+#[cfg(unix)]
 impl Drop for Oracle {
     fn drop(&mut self) {
         let _ = Command::new(&self.binary)
@@ -52,19 +95,10 @@ fn run(engine: &mut Engine, context: &mut ClientContext, args: &[&str]) -> Vec<u
         .flatten()
         .collect()
 }
-fn wait(path: &std::path::Path) -> Vec<u8> {
-    let end = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(bytes) = std::fs::read(path) {
-            return bytes;
-        }
-        assert!(Instant::now() < end, "{}", path.display());
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
 #[test]
 #[ignore = "requires C tmux and a raw PTY child"]
 fn key_bytes_match_c_across_modes_modifiers_and_backspace_options() {
+    #[cfg(unix)]
     let directory = std::env::temp_dir().join(format!(
         "tx-keys-{}-{}",
         std::process::id(),
@@ -73,12 +107,18 @@ fn key_bytes_match_c_across_modes_modifiers_and_backspace_options() {
             .unwrap()
             .as_nanos()
     ));
+    #[cfg(unix)]
     std::fs::create_dir(&directory).unwrap();
+    #[cfg(unix)]
     let oracle = Oracle {
         binary: std::env::var_os("TMUXX_C_TMUX")
             .expect("set TMUXX_C_TMUX")
             .into(),
         socket: directory.join("c"),
+    };
+    #[cfg(windows)]
+    let oracle = Oracle {
+        remote: remote_reference::RemoteReference::new(),
     };
     oracle.run(&["new", "-d", "-s", "keys", "sleep 120"]);
     let keys = [
@@ -106,13 +146,13 @@ fn key_bytes_match_c_across_modes_modifiers_and_backspace_options() {
     .into_iter()
     .enumerate()
     {
-        let output = directory.join(format!("bytes-{index}"));
-        let ready = directory.join(format!("ready-{index}"));
+        let output = format!("bytes-{index}");
+        let ready = format!("ready-{index}");
         let script = format!(
             "import os,tty,pathlib\ntty.setraw(0)\nos.write(1,bytes.fromhex('{}'))\npathlib.Path({:?}).write_bytes(b'')\ndata=bytearray()\nwhile True:\n b=os.read(0,1)\n if b==b'\\xff': break\n data.extend(b)\np=pathlib.Path({:?})\np.with_suffix('.tmp').write_bytes(data)\np.with_suffix('.tmp').replace(p)\nwhile True: os.read(0,1)\n",
             mode.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-            ready.to_str().unwrap(),
-            output.to_str().unwrap()
+            oracle.path(&ready),
+            oracle.path(&output)
         );
         let mut engine = Engine::default();
         let mut context = ClientContext::default();
@@ -127,7 +167,7 @@ fn key_bytes_match_c_across_modes_modifiers_and_backspace_options() {
         oracle.run(&["respawnp", "-k", "python3", "-u", "-c", &script]);
         run(&mut engine, &mut context, &["new", "-d"]);
         engine.feed(0, mode);
-        wait(&ready);
+        oracle.wait(&ready);
         let mode_format = "#{pane_key_mode}:#{keypad_cursor_flag}:#{keypad_flag}";
         let query =
             tmuxx_command::parse_argv(["display", "-p", mode_format].iter().map(|s| s.as_bytes()))
@@ -237,7 +277,7 @@ fn key_bytes_match_c_across_modes_modifiers_and_backspace_options() {
                 .collect::<Vec<_>>()
         );
         oracle.run(&["send", "-H", "ff"]);
-        let actual = wait(&output);
+        let actual = oracle.wait(&output);
         let first = actual.iter().zip(&expected).position(|(a, b)| a != b);
         assert_eq!(
             actual, expected,
@@ -250,6 +290,7 @@ fn key_bytes_match_c_across_modes_modifiers_and_backspace_options() {
         );
     }
     drop(oracle);
+    #[cfg(unix)]
     std::fs::remove_dir_all(directory).unwrap();
 }
 

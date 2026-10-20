@@ -1,30 +1,46 @@
 //! Clipboard replies and buffers from an isolated C process, not saved goldens.
-#![cfg(unix)]
+#[cfg(windows)]
+use common::remote_reference;
+#[cfg(unix)]
 use std::path::PathBuf;
-use std::process::{Command, Output};
+#[cfg(unix)]
+use std::process::Command;
+use std::process::Output;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tmuxx_core::{ClientContext, Effect, Engine};
 mod common;
 
 struct Reference {
+    #[cfg(unix)]
     binary: PathBuf,
+    #[cfg(unix)]
     directory: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl Reference {
     fn start(set: Option<&str>, get: Option<&str>, initial: bool, bytes: &[u8]) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let directory = PathBuf::from(format!(
-            "/tmp/txclip-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&directory).unwrap();
+        #[cfg(unix)]
+        let reference = {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let directory = PathBuf::from(format!(
+                "/tmp/txclip-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            Self {
+                binary: std::env::var_os("TMUXX_C_TMUX")
+                    .expect("set TMUXX_C_TMUX")
+                    .into(),
+                directory,
+            }
+        };
+        #[cfg(windows)]
         let reference = Self {
-            binary: std::env::var_os("TMUXX_C_TMUX")
-                .expect("set TMUXX_C_TMUX")
-                .into(),
-            directory,
+            remote: remote_reference::RemoteReference::new(),
         };
         let mut config = String::new();
         for (name, value) in [("set-clipboard", set), ("get-clipboard", get)] {
@@ -32,17 +48,23 @@ impl Reference {
                 config.push_str(&format!("set-option -s {name} {value}\n"));
             }
         }
-        std::fs::write(reference.directory.join("config"), config).unwrap();
+        #[cfg(unix)]
+        std::fs::write(reference.directory.join("config"), &config).unwrap();
+        #[cfg(windows)]
+        if !config.is_empty() {
+            let output = reference.remote.source(config.as_bytes());
+            assert!(output.status.success(), "{output:?}");
+        }
         let payload = bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let script = format!(
-            "import os,tty,re\ntty.setraw(0)\nopen('{}','wb').close()\nos.read(0,1)\nos.write(1,bytes.fromhex('{payload}')+b'\\x1b[c')\ndata=b''\nwhile not re.search(rb'\\x1b\\[\\?[0-9;]+c$',data): data+=os.read(0,1)\nopen('{}','wb').write(re.sub(rb'\\x1b\\[\\?[0-9;]+c$',''.encode(),data))\nos.read(0,1)\n",
-            reference.directory.join("ready").display(),
-            reference.directory.join("reply").display()
+            "import os,tty,re\nfrom pathlib import Path\ntty.setraw(0)\nopen('{}','wb').close()\nos.read(0,1)\nos.write(1,bytes.fromhex('{payload}')+b'\\x1b[c')\ndata=b''\nwhile not re.search(rb'\\x1b\\[\\?[0-9;]+c$',data): data+=os.read(0,1)\nreply=Path('{}')\ntemporary=reply.with_suffix('.tmp')\ntemporary.write_bytes(re.sub(rb'\\x1b\\[\\?[0-9;]+c$',''.encode(),data))\ntemporary.replace(reply)\nos.read(0,1)\n",
+            reference.path("ready"),
+            reference.path("reply")
         );
-        std::fs::write(reference.directory.join("child.py"), script).unwrap();
+        reference.write("child.py", script.as_bytes());
         let output = reference.command(&[
             "new-session",
             "-d",
@@ -52,11 +74,11 @@ impl Reference {
             "24",
             "python3",
             "-u",
-            reference.directory.join("child.py").to_str().unwrap(),
+            &reference.path("child.py"),
         ]);
         assert!(output.status.success(), "{output:?}");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !reference.directory.join("ready").exists() {
+        while !reference.exists("ready") {
             assert!(Instant::now() < deadline, "C child did not become ready");
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -79,7 +101,7 @@ impl Reference {
                 .status
                 .success()
         );
-        while !reference.directory.join("reply").exists() {
+        while !reference.exists("reply") {
             assert!(
                 Instant::now() < deadline,
                 "C did not answer DA barrier: {:?}",
@@ -90,6 +112,12 @@ impl Reference {
         reference
     }
     fn command(&self, args: &[&str]) -> Output {
+        #[cfg(windows)]
+        return self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        );
+        #[cfg(unix)]
         Command::new(&self.binary)
             .arg("-f")
             .arg(self.directory.join("config"))
@@ -101,7 +129,32 @@ impl Reference {
             .output()
             .unwrap()
     }
+    fn path(&self, leaf: &str) -> String {
+        #[cfg(unix)]
+        return self.directory.join(leaf).to_str().unwrap().to_owned();
+        #[cfg(windows)]
+        return String::from_utf8(self.remote.path(leaf.as_bytes())).unwrap();
+    }
+    fn write(&self, leaf: &str, bytes: &[u8]) {
+        #[cfg(unix)]
+        std::fs::write(self.directory.join(leaf), bytes).unwrap();
+        #[cfg(windows)]
+        self.remote.put(leaf.as_bytes(), bytes);
+    }
+    fn exists(&self, leaf: &str) -> bool {
+        #[cfg(unix)]
+        return self.directory.join(leaf).exists();
+        #[cfg(windows)]
+        return self.remote.exists(leaf.as_bytes());
+    }
+    fn read(&self, leaf: &str) -> Vec<u8> {
+        #[cfg(unix)]
+        return std::fs::read(self.directory.join(leaf)).unwrap();
+        #[cfg(windows)]
+        return self.remote.get(leaf.as_bytes());
+    }
 }
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         self.command(&["kill-server"]);
@@ -144,7 +197,7 @@ fn compare(set: Option<&str>, get: Option<&str>, initial: bool, bytes: &[u8]) {
         .collect::<Vec<_>>();
     assert_eq!(
         reply,
-        std::fs::read(c.directory.join("reply")).unwrap(),
+        c.read("reply"),
         "set={set:?} get={get:?} input={bytes:?}"
     );
     let names = c.command(&["list-buffers", "-F", "#{buffer_name}"]);

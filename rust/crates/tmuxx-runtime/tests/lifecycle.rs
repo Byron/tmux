@@ -387,16 +387,21 @@ fn exit_unattached_waits_for_background_jobs_before_terminating() {
     pair.run(&["set-option", "-s", "exit-empty", "on"]);
     drop(pair.admin.take());
     std::thread::sleep(Duration::from_millis(60));
-    assert!(pair.socket.exists());
-    assert!(pair.host.endpoint.exists());
+    // C marks -b jobs NOWAIT, sends SIGTERM and exits. Its stale socket inode
+    // can remain after exit; existence was never evidence of a live C owner.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(&pair.socket).is_ok() {
+        assert!(Instant::now() < deadline, "C NOWAIT owner did not exit");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Native owners deliberately preserve and drain their retained jobs.
+    assert!(std::os::unix::net::UnixStream::connect(&pair.host.endpoint).is_ok());
     std::fs::write(&release, b"").unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while pair.host.endpoint.exists()
-        || std::os::unix::net::UnixStream::connect(&pair.socket).is_ok()
-    {
+    while std::os::unix::net::UnixStream::connect(&pair.host.endpoint).is_ok() {
         assert!(
             Instant::now() < deadline,
-            "owners did not exit after jobs finished"
+            "native owner did not exit after jobs finished"
         );
         std::thread::sleep(Duration::from_millis(2));
     }

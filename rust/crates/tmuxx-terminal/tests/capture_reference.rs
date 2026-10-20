@@ -1,27 +1,46 @@
 //! Exact capture bytes from isolated stock tmux processes, never golden files.
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
+#[cfg(unix)]
 use std::path::PathBuf;
-use std::process::{Command, Output};
+#[cfg(unix)]
+use std::process::Command;
+use std::process::Output;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tmuxx_terminal::{CaptureOptions, Terminal};
 
+#[cfg(unix)]
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Reference {
+    #[cfg(unix)]
     binary: PathBuf,
+    #[cfg(unix)]
     directory: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl Reference {
     fn start(bytes: &[u8], cols: u16, rows: u16) -> Self {
-        let binary = std::env::var_os("TMUXX_C_TMUX")
-            .expect("set TMUXX_C_TMUX")
-            .into();
-        let directory = PathBuf::from(format!(
-            "/tmp/txcap-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&directory).unwrap();
-        let reference = Self { binary, directory };
+        #[cfg(unix)]
+        let reference = {
+            let binary = std::env::var_os("TMUXX_C_TMUX")
+                .expect("set TMUXX_C_TMUX")
+                .into();
+            let directory = PathBuf::from(format!(
+                "/tmp/txcap-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            Self { binary, directory }
+        };
+        #[cfg(windows)]
+        let reference = Self {
+            remote: remote_reference::RemoteReference::new(),
+        };
         let payload = bytes
             .iter()
             .map(|byte| format!("\\{byte:03o}"))
@@ -52,6 +71,12 @@ impl Reference {
         reference
     }
     fn command(&self, args: &[&str]) -> Output {
+        #[cfg(windows)]
+        return self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        );
+        #[cfg(unix)]
         Command::new(&self.binary)
             .args(["-f", "/dev/null", "-S"])
             .arg(self.directory.join("s"))
@@ -95,6 +120,7 @@ impl Reference {
         }
     }
 }
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         self.command(&["kill-server"]);

@@ -222,6 +222,7 @@ fn global_option_collections_and_hook_metadata_match_head() {
 #[test]
 #[ignore = "requires a C tmux oracle and socket access"]
 fn contextual_resource_bounds_are_an_explicit_reference_difference() {
+    #[cfg(unix)]
     use std::{
         path::PathBuf,
         process::Command,
@@ -229,11 +230,16 @@ fn contextual_resource_bounds_are_an_explicit_reference_difference() {
     };
     use tmuxx_core::{ClientContext, Engine};
     struct Oracle {
+        #[cfg(unix)]
         program: PathBuf,
+        #[cfg(unix)]
         socket: PathBuf,
+        #[cfg(windows)]
+        remote: common::remote_reference::RemoteReference,
     }
     impl Oracle {
         fn run(&self, args: &[&str]) -> Vec<u8> {
+            #[cfg(unix)]
             let output = Command::new(&self.program)
                 .arg("-S")
                 .arg(&self.socket)
@@ -241,6 +247,11 @@ fn contextual_resource_bounds_are_an_explicit_reference_difference() {
                 .args(args)
                 .output()
                 .unwrap();
+            #[cfg(windows)]
+            let output = self.remote.output(
+                &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+                &[],
+            );
             assert!(
                 output.status.success(),
                 "{args:?}: {}",
@@ -249,6 +260,7 @@ fn contextual_resource_bounds_are_an_explicit_reference_difference() {
             output.stdout
         }
     }
+    #[cfg(unix)]
     impl Drop for Oracle {
         fn drop(&mut self) {
             let _ = Command::new(&self.program)
@@ -258,6 +270,7 @@ fn contextual_resource_bounds_are_an_explicit_reference_difference() {
                 .output();
         }
     }
+    #[cfg(unix)]
     let oracle = Oracle {
         program: std::env::var_os("TMUXX_C_TMUX")
             .expect("set TMUXX_C_TMUX")
@@ -270,6 +283,10 @@ fn contextual_resource_bounds_are_an_explicit_reference_difference() {
                 .unwrap()
                 .as_nanos()
         )),
+    };
+    #[cfg(windows)]
+    let oracle = Oracle {
+        remote: common::remote_reference::RemoteReference::new(),
     };
     let mut engine = Engine::default();
     let mut context = ClientContext::default();

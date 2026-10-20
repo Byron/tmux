@@ -1,5 +1,6 @@
 [[suites]]
 id = "native-stdin-files"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone", "windows"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "scheduler::file_stdin_tests"]
 env = {}

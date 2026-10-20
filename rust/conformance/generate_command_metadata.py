@@ -54,9 +54,9 @@ def selector_flags(fields, flags, name):
 
 
 def generate(root=ROOT):
-    sources = {path.name: path.read_text() for path in sorted(root.glob("cmd-*.c"))}
+    sources = {path.name: path.read_text(encoding="utf-8") for path in sorted(root.glob("cmd-*.c"))}
     macros = {}
-    for source in [(root / "tmux.h").read_text(), *sources.values()]:
+    for source in [(root / "tmux.h").read_text(encoding="utf-8"), *sources.values()]:
         source = source.replace("\\\n", "")
         for name, value in re.findall(r"^#define\s+(\w+)[ \t]+([^\n]*)", source, re.M):
             macros[name] = value.strip()
@@ -78,7 +78,7 @@ def generate(root=ROOT):
                          starts_server="CMD_STARTSERVER" in fields["flags"], source=filename)
             entry["selector_flags"] = selector_flags(fields, entry["flags"], entry["name"])
             entries[identifier] = entry
-    table = (root / "cmd.c").read_text().split("const struct cmd_entry *cmd_table[] = {", 1)[1].split("};", 1)[0]
+    table = (root / "cmd.c").read_text(encoding="utf-8").split("const struct cmd_entry *cmd_table[] = {", 1)[1].split("};", 1)[0]
     ordered = [entries[name] for name in re.findall(r"&(\w+)", table)]
     if not ordered or len({entry["name"] for entry in ordered}) != len(ordered):
         raise ValueError("empty or duplicate command registry")
@@ -105,7 +105,7 @@ def main():
     args = parser.parse_args()
     generated = generate()
     if args.check:
-        if not OUTPUT.exists() or OUTPUT.read_text() != generated:
+        if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != generated:
             parser.exit(1, "C command metadata changed; regenerate and review metadata.rs and parity coverage.\n")
     else:
         OUTPUT.write_text(generated)

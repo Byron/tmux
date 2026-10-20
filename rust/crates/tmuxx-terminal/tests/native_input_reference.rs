@@ -1,21 +1,31 @@
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
 use rustty_vt::{MouseAction, MouseButton, MouseEncodeOptions, MouseEvent};
-use std::{collections::BTreeMap, path::PathBuf, process::Command};
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::{path::PathBuf, process::Command};
 use tmuxx_terminal::{Input, Modifiers, Terminal};
 
 #[test]
 #[ignore = "requires C tmux with attached PTY clients"]
 fn native_pointer_focus_and_paste_bytes_match_c_application_modes() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap()
-        .to_owned();
-    let result = Command::new("python3")
-        .arg("-B")
-        .arg(root.join("rust/conformance/native_input.py"))
-        .arg(std::env::var_os("TMUXX_C_TMUX").expect("set TMUXX_C_TMUX"))
-        .output()
-        .unwrap();
+    #[cfg(windows)]
+    let result = remote_reference::RemoteReference::new().observe("native_input", &[]);
+    #[cfg(unix)]
+    let result = {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_owned();
+        Command::new("python3")
+            .arg("-B")
+            .arg(root.join("rust/conformance/native_input.py"))
+            .arg(std::env::var_os("TMUXX_C_TMUX").expect("set TMUXX_C_TMUX"))
+            .output()
+            .unwrap()
+    };
     assert!(
         result.status.success(),
         "{}",

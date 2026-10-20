@@ -1,57 +1,85 @@
 //! History is observable state: rows, counters and resets follow the C grid.
-#![cfg(unix)]
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
+use std::time::{Duration, Instant};
+#[cfg(unix)]
 use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
 };
 use tmuxx_core::{ClientContext, Engine};
 
+#[cfg(unix)]
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Reference {
+    #[cfg(unix)]
     binary: PathBuf,
+    #[cfg(unix)]
     directory: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl Reference {
     fn run(&self, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
-        let mut child = Command::new(&self.binary)
-            .args(["-S"])
-            .arg(self.directory.join("s"))
-            .args(["-f"])
-            .arg(self.directory.join("conf"))
-            .args(args)
-            .env_remove("TMUX")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        if let Some(input) = input {
-            child.stdin.take().unwrap().write_all(input).unwrap();
-        }
-        let out = child.wait_with_output().unwrap();
+        #[cfg(windows)]
+        let out = self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            input.unwrap_or_default(),
+        );
+        #[cfg(unix)]
+        let out = {
+            let mut child = Command::new(&self.binary)
+                .args(["-S"])
+                .arg(self.directory.join("s"))
+                .args(["-f"])
+                .arg(self.directory.join("conf"))
+                .args(args)
+                .env_remove("TMUX")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            if let Some(input) = input {
+                child.stdin.take().unwrap().write_all(input).unwrap();
+            }
+            child.wait_with_output().unwrap()
+        };
         assert!(out.status.success(), "{args:?}: {out:?}");
         out.stdout
     }
     fn new(limit: usize) -> Self {
-        let this = Self {
-            binary: std::env::var_os("TMUXX_C_TMUX")
-                .expect("set TMUXX_C_TMUX")
-                .into(),
-            directory: PathBuf::from(format!(
-                "/tmp/txhistory-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )),
+        #[cfg(unix)]
+        let this = {
+            let this = Self {
+                binary: std::env::var_os("TMUXX_C_TMUX")
+                    .expect("set TMUXX_C_TMUX")
+                    .into(),
+                directory: PathBuf::from(format!(
+                    "/tmp/txhistory-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                )),
+            };
+            std::fs::create_dir(&this.directory).unwrap();
+            std::fs::write(
+                this.directory.join("conf"),
+                format!("set -g history-limit {limit}\nset -g status off\n"),
+            )
+            .unwrap();
+            this
         };
-        std::fs::create_dir(&this.directory).unwrap();
-        std::fs::write(
-            this.directory.join("conf"),
-            format!("set -g history-limit {limit}\nset -g status off\n"),
-        )
-        .unwrap();
+        #[cfg(windows)]
+        let this = {
+            let remote = remote_reference::RemoteReference::new();
+            let output = remote
+                .source(format!("set -g history-limit {limit}\nset -g status off\n").as_bytes());
+            assert!(output.status.success(), "{output:?}");
+            Self { remote }
+        };
         this.run(
             &["new-session", "-d", "-x", "40", "-y", "5", "sleep 30"],
             None,
@@ -83,6 +111,7 @@ impl Reference {
         self.wait_title(&title);
     }
 }
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         self.run(&["kill-server"], None);
@@ -173,11 +202,7 @@ fn check(limit: usize, counters: bool, steps: Vec<Step>) {
         }
         let actual = run(&mut engine, &mut context, &["display", "-p", format]);
         let expected = c.run(&["display", "-p", format], None);
-        assert_eq!(
-            String::from_utf8_lossy(&actual),
-            String::from_utf8_lossy(&expected),
-            "limit {limit} step {index}: {step:?}"
-        );
+        assert_eq!(actual, expected, "limit {limit} step {index}: {step:?}");
         let actual = run(
             &mut engine,
             &mut context,
@@ -185,8 +210,7 @@ fn check(limit: usize, counters: bool, steps: Vec<Step>) {
         );
         let expected = c.run(&["capture-pane", "-p", "-S", "-"], None);
         assert_eq!(
-            String::from_utf8_lossy(&actual),
-            String::from_utf8_lossy(&expected),
+            actual, expected,
             "capture limit {limit} step {index}: {step:?}"
         );
         let terminal = &engine.panes[&1].terminal;

@@ -1,5 +1,8 @@
 # Conformance evidence
 
+Native Windows suite mappings and desktop, cross-logon and real-IME
+prerequisites are documented in [WINDOWS.md](WINDOWS.md).
+
 The Python 3.11+ runner separates **smoke observations** from the release gate.
 The contract comes from the architecture and inspected upstream behavior, never
 from `Engine::SUPPORTED_COMMANDS` or the commands the first implementation happens
@@ -65,6 +68,15 @@ values, explicit reference roles and supported-version suites still require thei
 genuine C executable identities. Missing evidence remains required at the gate.
 Every listed libtest test must appear exactly once as `ok`
 and Cargo must exit successfully; ignored, filtered or zero-test runs fail.
+Suite execution platforms are explicit for shared Windows tests; unspecified
+suites retain the Unix default. `--suite all` selects every runnable counterpart
+for each applicable assertion. An unavailable variant is replaced only by an
+executable suite proving that same assertion; an explicit unavailable-suite
+request stays blocked. Reports retain the declared suite/scenario provenance,
+and every selected counterpart is required. Linux desktop obligations remain
+blocked when no supported client executable is available. Platform-specific
+owner-death proofs retain all common members and require the matching macOS
+watchdog, Linux broker or Windows Job Object test.
 The `windows_conpty` Rustty test uses a custom executable harness. Its declared
 `rustty-windows-conpty` adapter recognizes only the machine-readable
 `TMUXX_WINDOWS_CONPTY_RESULT` completion record after eight real ConPTY synchronized

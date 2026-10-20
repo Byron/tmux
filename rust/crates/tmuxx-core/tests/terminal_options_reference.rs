@@ -1,47 +1,75 @@
 //! Effective terminal behavior and replies are observed from a live C pane.
-#![cfg(unix)]
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
+#[cfg(unix)]
 use std::{
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
+};
+use std::{
+    process::Output,
     time::{Duration, Instant},
 };
 use tmuxx_core::{ClientContext, Effect, Engine};
+#[cfg(unix)]
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Reference {
+    #[cfg(unix)]
     binary: PathBuf,
+    #[cfg(unix)]
     directory: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl Reference {
     fn run(&self, args: &[&str]) -> Vec<u8> {
-        let out = Command::new(&self.binary)
+        let out = self.command(args);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        out.stdout
+    }
+    fn command(&self, args: &[&str]) -> Output {
+        #[cfg(windows)]
+        return self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        );
+        #[cfg(unix)]
+        Command::new(&self.binary)
             .args(["-f", "/dev/null", "-S"])
             .arg(self.directory.join("s"))
             .args(args)
             .env_remove("TMUX")
             .env("TERM", "screen")
             .output()
-            .unwrap();
-        assert!(out.status.success(), "{args:?}: {out:?}");
-        out.stdout
+            .unwrap()
     }
     fn new(options: &[(&str, &str)], bytes: &[u8]) -> Self {
         Self::new_pane(options, bytes, false)
     }
     fn new_pane(options: &[(&str, &str)], bytes: &[u8], inactive: bool) -> Self {
-        let c = Self {
-            binary: std::env::var_os("TMUXX_C_TMUX")
-                .expect("set TMUXX_C_TMUX")
-                .into(),
-            directory: PathBuf::from(format!(
-                "/tmp/txtopt-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )),
+        #[cfg(unix)]
+        let c = {
+            let c = Self {
+                binary: std::env::var_os("TMUXX_C_TMUX")
+                    .expect("set TMUXX_C_TMUX")
+                    .into(),
+                directory: PathBuf::from(format!(
+                    "/tmp/txtopt-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                )),
+            };
+            std::fs::create_dir(&c.directory).unwrap();
+            c
         };
-        std::fs::create_dir(&c.directory).unwrap();
-        std::fs::write(c.directory.join("input"), bytes).unwrap();
-        std::fs::write(c.directory.join("child.py"),"import os,sys,tty,time,re\nfrom pathlib import Path\ntty.setraw(0)\np=Path(sys.argv[1]);(p/'ready').touch()\nos.read(0,1)\ndata=(p/'input').read_bytes()+b'\\x1b[c'\nwhile data:data=data[os.write(1,data):]\nreply=b''\nwhile not re.search(rb'\\x1b\\[\\?[0-9;]+c$',reply):reply+=os.read(0,1)\n(p/'reply').write_bytes(re.sub(rb'\\x1b\\[\\?[0-9;]+c$',b'',reply))\ntime.sleep(30)\n").unwrap();
+        #[cfg(windows)]
+        let c = Self {
+            remote: remote_reference::RemoteReference::new(),
+        };
+        c.write("input", bytes);
+        c.write("child.py", b"import os,sys,tty,time,re\nfrom pathlib import Path\ntty.setraw(0)\np=Path(sys.argv[1]).parent;(p/'ready').touch()\nos.read(0,1)\ndata=(p/'input').read_bytes()+b'\\x1b[c'\nwhile data:data=data[os.write(1,data):]\nreply=b''\nwhile not re.search(rb'\\x1b\\[\\?[0-9;]+c$',reply):reply+=os.read(0,1)\n(p/'reply').write_bytes(re.sub(rb'\\x1b\\[\\?[0-9;]+c$',b'',reply))\ntime.sleep(30)\n");
         c.run(&[
             "new-session",
             "-d",
@@ -51,8 +79,8 @@ impl Reference {
             "24",
             "python3",
             "-B",
-            c.directory.join("child.py").to_str().unwrap(),
-            c.directory.to_str().unwrap(),
+            &c.path("child.py"),
+            &c.path("input"),
         ]);
         for (name, value) in options {
             c.run(&[
@@ -71,7 +99,7 @@ impl Reference {
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         for name in ["ready", "reply"] {
-            while !c.directory.join(name).exists() {
+            while !c.exists(name) {
                 assert!(Instant::now() < deadline, "missing C {name}");
                 std::thread::sleep(Duration::from_millis(3));
             }
@@ -81,7 +109,32 @@ impl Reference {
         }
         c
     }
+    fn path(&self, leaf: &str) -> String {
+        #[cfg(unix)]
+        return self.directory.join(leaf).to_str().unwrap().to_owned();
+        #[cfg(windows)]
+        return String::from_utf8(self.remote.path(leaf.as_bytes())).unwrap();
+    }
+    fn write(&self, leaf: &str, bytes: &[u8]) {
+        #[cfg(unix)]
+        std::fs::write(self.directory.join(leaf), bytes).unwrap();
+        #[cfg(windows)]
+        self.remote.put(leaf.as_bytes(), bytes);
+    }
+    fn exists(&self, leaf: &str) -> bool {
+        #[cfg(unix)]
+        return self.directory.join(leaf).exists();
+        #[cfg(windows)]
+        return self.remote.exists(leaf.as_bytes());
+    }
+    fn read(&self, leaf: &str) -> Vec<u8> {
+        #[cfg(unix)]
+        return std::fs::read(self.directory.join(leaf)).unwrap();
+        #[cfg(windows)]
+        return self.remote.get(leaf.as_bytes());
+    }
 }
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         self.run(&["kill-server"]);
@@ -138,11 +191,7 @@ fn compare_pane(options: &[(&str, &str)], bytes: &[u8], inactive: bool) {
         })
         .flatten()
         .collect::<Vec<_>>();
-    assert_eq!(
-        String::from_utf8_lossy(&reply),
-        String::from_utf8_lossy(&std::fs::read(c.directory.join("reply")).unwrap()),
-        "replies {options:?} input{bytes:?}"
-    );
+    assert_eq!(reply, c.read("reply"), "replies {options:?} input{bytes:?}");
     let state = engine.panes[&0].terminal.snapshot();
     let (screen, alternate) = if state.alternate_active {
         (state.alternate.as_ref().unwrap(), 1)
@@ -186,8 +235,8 @@ fn compare_pane(options: &[(&str, &str)], bytes: &[u8], inactive: bool) {
         .unwrap()
         .output;
     assert_eq!(
-        String::from_utf8_lossy(&actual),
-        String::from_utf8_lossy(&c.run(&["capture-pane", "-p", "-t", "%0", "-S", "-"])),
+        actual,
+        c.run(&["capture-pane", "-p", "-t", "%0", "-S", "-"]),
         "capture {options:?} input{bytes:?}"
     );
 }
@@ -267,12 +316,7 @@ fn head_unsupported_styles_preserve_inheritance_and_invalid_styles_match_c() {
         assert!(!engine.panes[&0].options.contains_key(name));
 
         let bad = ["set", "-p", name, "bg=nonesuch"];
-        let error = Command::new(&c.binary)
-            .arg("-S")
-            .arg(c.directory.join("s"))
-            .args(bad)
-            .output()
-            .unwrap();
+        let error = c.command(&bad);
         assert!(!error.status.success());
         assert_eq!(error.stderr, b"invalid style: bg=nonesuch\n");
         let command = tmuxx_command::parse_argv(bad.iter().map(|s| s.as_bytes())).unwrap();
@@ -581,8 +625,8 @@ fn head_shell_lifecycle_formats_match_c() {
             .unwrap()
             .output;
         assert_eq!(
-            String::from_utf8_lossy(&actual),
-            String::from_utf8_lossy(&c.run(&["display-message", "-p", format])),
+            actual,
+            c.run(&["display-message", "-p", format]),
             "{bytes:?}"
         );
     }

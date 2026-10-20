@@ -1,14 +1,22 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
+
+#[cfg(windows)]
+#[path = "support/windows_fixture.rs"]
+mod windows_fixture;
 
 use std::time::{Duration, Instant};
 use tmuxx_protocol::native::{Request, Response, ServerMessage};
 use tmuxx_runtime::{LocalClient, Options};
 
 fn run(client: &LocalClient, argv: &[&str]) -> Response {
+    #[cfg(unix)]
+    let args = argv.iter().map(|arg| arg.as_bytes().to_vec()).collect();
+    #[cfg(windows)]
+    let args = windows_fixture::argv(argv);
     client
         .send(Request {
             request_id: 1,
-            argv: argv.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+            argv: args,
             subscribe: false,
             control: false,
             stdin: None,
@@ -42,7 +50,10 @@ fn output_contains(client: &LocalClient, expected: &str) {
 
 #[test]
 fn pane_moves_keep_the_same_child_and_resize_its_pty() {
+    #[cfg(unix)]
     let path = std::env::temp_dir().join(format!("tmuxx-moves-{}.sock", std::process::id()));
+    #[cfg(windows)]
+    let path = tmuxx_runtime::windows::endpoint(&format!("moves-{}", std::process::id())).unwrap();
     let host = tmuxx_runtime::start(Options::new(&path)).unwrap();
     let client = host.connect().unwrap();
     let script = "import os,tty\ntty.setraw(0)\nos.write(1,b'READY')\ni=0\nwhile os.read(0,1):\n i+=1; s=os.get_terminal_size(0); os.write(1,f'\\r\\n{i}:{s.columns}x{s.lines}'.encode())";
@@ -96,7 +107,10 @@ fn pane_moves_keep_the_same_child_and_resize_its_pty() {
 
 #[test]
 fn reconnected_native_view_keeps_zoomed_child_and_modal_cancel_restores_focus() {
+    #[cfg(unix)]
     let path = std::env::temp_dir().join(format!("tmuxx-modal-{}.sock", std::process::id()));
+    #[cfg(windows)]
+    let path = tmuxx_runtime::windows::endpoint(&format!("modal-{}", std::process::id())).unwrap();
     let host = tmuxx_runtime::start(Options::new(path)).unwrap();
     let admin = host.connect().unwrap();
     run(

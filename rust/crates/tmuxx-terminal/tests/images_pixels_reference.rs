@@ -1,7 +1,12 @@
 //! C's real SIXEL redraw is compared with retained image pixels and placement geometry.
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
 use base64::Engine;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf, process::Command};
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::{path::PathBuf, process::Command};
 use tmuxx_terminal::Terminal;
 fn kitty(control: &str, pixels: &[u8]) -> Vec<u8> {
     format!(
@@ -77,34 +82,57 @@ fn pixels(terminal: &Terminal) -> BTreeMap<(i64, i64), [u8; 3]> {
     pixels
 }
 fn compare(name: &str, cols: u16, rows: u16, steps: Vec<Value>) {
-    let directory = PathBuf::from(format!("/tmp/txpixels-{}-{name}", std::process::id()));
-    std::fs::create_dir(&directory).unwrap();
-    let fixture = directory.join("fixture.json");
-    let output = directory.join("result.json");
-    std::fs::write(
-        &fixture,
-        serde_json::to_vec(&json!({"cols":cols,"rows":rows,"steps":steps})).unwrap(),
-    )
-    .unwrap();
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap()
-        .to_owned();
-    let status = Command::new("python3")
-        .arg("-B")
-        .arg(root.join("rust/conformance/image_pixels.py"))
-        .arg(std::env::var_os("TMUXX_C_TMUX").expect("set TMUXX_C_TMUX"))
-        .arg(&fixture)
-        .arg(&output)
-        .status()
+    #[cfg(windows)]
+    let (observations, fixture): (Vec<Value>, String) = {
+        let remote = remote_reference::RemoteReference::new();
+        let output = remote.observe(
+            "image_pixels",
+            &serde_json::to_vec(&json!({"cols":cols,"rows":rows,"steps":steps})).unwrap(),
+        );
+        assert!(
+            output.status.success(),
+            "remote C pixel observation failed: {output:?}"
+        );
+        (
+            serde_json::from_slice(&output.stdout).unwrap(),
+            format!("remote C pixel fixture {name}"),
+        )
+    };
+    #[cfg(unix)]
+    let (observations, fixture, directory): (Vec<Value>, String, PathBuf) = {
+        let directory = PathBuf::from(format!("/tmp/txpixels-{}-{name}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let fixture = directory.join("fixture.json");
+        let output = directory.join("result.json");
+        std::fs::write(
+            &fixture,
+            serde_json::to_vec(&json!({"cols":cols,"rows":rows,"steps":steps})).unwrap(),
+        )
         .unwrap();
-    assert!(
-        status.success(),
-        "C pixel observation failed; fixture {}",
-        fixture.display()
-    );
-    let observations: Vec<Value> = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_owned();
+        let status = Command::new("python3")
+            .arg("-B")
+            .arg(root.join("rust/conformance/image_pixels.py"))
+            .arg(std::env::var_os("TMUXX_C_TMUX").expect("set TMUXX_C_TMUX"))
+            .arg(&fixture)
+            .arg(&output)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "C pixel observation failed; fixture {}",
+            fixture.display()
+        );
+        (
+            serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap(),
+            fixture.display().to_string(),
+            directory,
+        )
+    };
     let mut terminal = Terminal::new(cols, rows, 2000);
     terminal.set_cell_size(8, 16);
     let mut failures = Vec::new();
@@ -204,8 +232,9 @@ fn compare(name: &str, cols: u16, rows: u16, steps: Vec<Value>) {
         failures.is_empty(),
         "{}; retained fixture {}",
         failures.join("\n"),
-        fixture.display()
+        fixture
     );
+    #[cfg(unix)]
     std::fs::remove_dir_all(directory).unwrap();
 }
 #[test]

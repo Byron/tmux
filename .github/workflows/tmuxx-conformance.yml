@@ -25,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         # GNU/Linux server evidence is distinct from the macOS desktop evidence.
-        # Windows execution remains deferred; no Linux desktop is introduced.
+        # Windows has its native job below; no Linux desktop is introduced.
         os: [macos-26, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -178,4 +178,106 @@ jobs:
           path: |
             sources/tmux/tmux/rust/conformance/artifacts/*.json
             sources/tmux/tmux/rust/conformance/artifacts/*-config.log
+          if-no-files-found: warn
+
+  windows-native:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: sources/tmux/tmux
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: sources/tmux/tmux
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Byron/rustty
+          ref: cb67824a77fc00bd20e811cce40012893f79b999
+          path: sources/ghostty-org/ghostty
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Native MSVC toolchain and integrated Rustty
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          rustup override set 1.95.0
+          cargo +1.95.0 fetch --manifest-path rust/Cargo.toml --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $rustty = (Resolve-Path ../../ghostty-org/ghostty).Path
+          $patch = (Resolve-Path rust/integration/rustty/rustty.patch).Path
+          git -C $rustty apply --check $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git -C $rustty apply $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:TMUXX_RUSTTY_ROOT = $rustty
+          python -c 'import sys; sys.path.insert(0,"rust/conformance"); import runner; runner.rustty_identity()'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +1.95.0 fetch --manifest-path "$rustty/Cargo.toml" --locked
+          exit $LASTEXITCODE
+      - name: Build shipped standalone and GUI resources
+        run: |
+          ./rust/windows/build.ps1
+          ../../ghostty-org/ghostty/crates/rustty-app/build.ps1
+      - name: MSVC workspace checks and cleanup regressions
+        run: |
+          $env:TMUXX_CONPTY_RESOURCES = (Resolve-Path rust/target/debug/tmuxx/resources).Path
+          $env:TMUXX_REMOTE_PYTHON = (& python -c 'import sys; print(sys.executable)').Trim()
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # File-type/endpoint vectors require actual Windows symlink access.
+          # A missing privilege is a prerequisite failure, never a skipped test.
+          python -c 'import pathlib,tempfile; t=tempfile.TemporaryDirectory(); p=pathlib.Path(t.name); (p/"target").write_bytes(b"fixture"); (p/"link").symlink_to(p/"target"); assert (p/"link").read_bytes()==b"fixture"; t.cleanup()'
+          if ($LASTEXITCODE) { throw 'Native file-type tests require Windows symlink privilege or Developer Mode.' }
+          cargo +1.95.0 fmt --manifest-path rust/Cargo.toml --all -- --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +1.95.0 test --manifest-path rust/Cargo.toml --locked --offline --workspace --all-targets
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +1.95.0 clippy --manifest-path rust/Cargo.toml --locked --offline --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s rust/conformance -p 'test_*.py'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python rust/conformance/runner.py inventory
+          exit $LASTEXITCODE
+      - name: Exact native suites without a fictitious C reference
+        run: |
+          $env:RUSTUP_TOOLCHAIN = '1.95.0-x86_64-pc-windows-msvc'
+          $env:TMUXX_RUSTTY_ROOT = (Resolve-Path ../../ghostty-org/ghostty).Path
+          $env:TMUXX_CONPTY_RESOURCES = (Resolve-Path rust/target/debug/tmuxx/resources).Path
+          $env:TMUXX_REMOTE_PYTHON = (& python -c 'import sys; print(sys.executable)').Trim()
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python rust/conformance/runner.py smoke --no-smoke `
+            --candidate rust/target/debug/tmuxx/tmuxx.exe `
+            --suite windows-runtime --suite windows-cli `
+            --suite command-unit --suite config-unit --suite format-unit --suite windows-format `
+            --suite windows-posix-regex --suite windows-core-formats --suite windows-path-formats `
+            --suite windows-native-admission --suite windows-source-admission `
+            --suite terminal --suite layout --suite control-codec `
+            --suite native-snapshot-framing --suite windows-conpty-synchronized-output `
+            --suite runtime-host --suite runtime-host-lifetimes --suite runtime-hooks `
+            --suite runtime-transactions --suite runtime-scheduler --suite runtime-native-views `
+            --suite runtime-native-ui-policy --suite runtime-pane-moves --suite runtime-endpoint-access `
+            --suite native-file-type-policy --suite native-stream-consistency --suite native-stdin-files `
+            --suite windows-process-native-stdin `
+            --suite buffer-native-clipboard-targets --suite native-color-report-restore `
+            --suite terminal-history-native-allocation --suite windows-control-pipe-eof `
+            --suite rustty-native-adapter --suite rustty-native-workspace `
+            --suite rustty-system-discovery-recovery `
+            --report rust/conformance/artifacts/windows-ci.json
+          exit $LASTEXITCODE
+      # Hosted CI has no authorized cross-logon fixture or guaranteed interactive
+      # desktop. This report is a required subset, never a Windows profile pass.
+      # Run windows_ssh.py and windows_native_views.py on the prepared desktop
+      # host, collect the complete profile, then invoke runner.py gate --profile
+      # windows. Missing desktop/C-reference obligations remain blocking.
+      - name: Preserve native evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tmuxx-evidence-windows-native
+          path: sources/tmux/tmux/rust/conformance/artifacts/**
           if-no-files-found: warn

@@ -4,7 +4,8 @@ Architecture and implementation contract, revised 2026-10-20. The Rust workspace
 implements the Unix engine, runtime, native client and C command/control
 transports. All six scoped macOS profiles passed the
 [conformance runner](conformance/README.md): 149 executable suites and 430 scoped
-assertions. Windows hosting remains a deferred part of the target architecture.
+assertions. Native Windows hosting is implemented and undergoing fresh
+qualification; historical macOS results do not qualify Windows.
 
 The inspected references are tmux `22f34d3fa984e03719b0a1b2ac4677aaf61cd53d`
 (`next-3.9`) and Rustty/Ghostty
@@ -13,9 +14,10 @@ The inspected references are tmux `22f34d3fa984e03719b0a1b2ac4677aaf61cd53d`
 against this tmux baseline and installed tmux 3.7c as separate executables;
 the exact named assertions determine coverage. Linux server execution is active;
 its GNU target, reference builds and independent evidence are documented in
-[LINUX.md](LINUX.md). Windows implementation/execution remains deferred. Historical
-macOS results do not qualify Linux; desktop obligations still require a supported
-macOS/Windows client host. Deferred platforms retain their requirements
+[LINUX.md](LINUX.md). Windows execution is authorized on the available Windows
+Server 2025 x64/MSVC host; implementation and executable qualification continue.
+Historical results do not qualify another platform; desktop obligations still
+require a supported macOS/Windows client host. Deferred platforms retain their requirements
 and are never counted as passing. This contract includes the requested
 app-owned server, smaller crates, and narrower compatibility scope.
 
@@ -93,7 +95,7 @@ becoming the execution/state layer rather than a catch-all package.
 | `tmuxx-protocol` | Standard control-mode byte codec and separate versioned native messages/snapshot DTOs | No engine; native serialization behind its own feature; no OS I/O |
 | `tmuxx-client` | Request tracking, discovery, capabilities, pane model, bootstrap/reconciliation and flow control | Command and protocol only; no layout, core, runtime or Unix IPC dependency |
 | `tmuxx-unix-ipc` | tmux's Unix command/control wire schema and descriptor transport, shared by CLI/runtime adapters | Unix-only Rust OS bindings; no core or terminal renderer; explicit schema/version support |
-| `tmuxx-runtime` | Host the core, schedule per-client command queues/hooks/jobs, perform effects, own processes/PTYs, timers, endpoints and shutdown | Core/command/config/format/terminal/protocol; native protocol enabled; Unix IPC on Unix; Windows ConPTY hosting remains deferred; no GUI or clap |
+| `tmuxx-runtime` | Host the core, schedule per-client command queues/hooks/jobs, perform effects, own processes/PTYs, timers, endpoints and shutdown | Core/command/config/format/terminal/protocol; native protocol enabled; Unix IPC on Unix; named pipes and bundled ConPTY on Windows; no GUI or clap |
 | `tmuxx-cli` | The `tmuxx` executable: clap startup flags, commands, stdio control bridge, standalone server startup | Runtime/command/protocol and Unix IPC on Unix; native protocol enabled; no client dependency or duplicate command execution logic |
 
 Configuration preparation and command execution are separate phases. Tmux
@@ -223,7 +225,7 @@ deliberately create a different OS session are outside this ownership boundary.
 The helper closes inherited descriptors and uses preallocated storage for at most
 16,384 owned sessions and 131,072 process IDs. A crash between spawning a child
 and registering it can escape this cleanup; atomic ownership during spawn needs
-a pre-exec spawn broker. Windows still needs its own ownership mechanism.
+a pre-exec spawn broker.
 
 On Linux, a spawn broker monitors the owner's process pidfd and ownership channel
 and is the parent of every PTY leader. A forked worker retaining a copy of the
@@ -249,9 +251,29 @@ spawn. These are implementation limits, not tested support for every kernel sinc
 its pending SIGKILL takes effect. No cgroup delegation or root privilege is
 required for normal hosting.
 
+Windows creates non-inheritable kill-on-close Job Objects before spawning. Both pane
+processes and shell/pipe/format jobs enter their jobs atomically through
+`PROC_THREAD_ATTRIBUTE_JOB_LIST` in `CreateProcessW`. ConPTY ownership remains
+after the initial process exits while background descendants run. Once the job
+is empty, closing the pseudoconsole produces actual output EOF before publishing
+the final pane exit. Closing an owner or pane terminates its entire owned job.
+Rustty native and system SSH helpers use the same atomic ownership path with
+binary stdio, separate diagnostics and no console window, including during the
+initial handshake and after abrupt viewer death.
+
 ## 4. Windows app-owned server and shared views
 
-The intended Windows path is:
+Windows format regex/glob evaluation uses a pure Rust POSIX matcher with an
+explicit [Unicode locale contract](vendor/posix-regex/WINDOWS.md), byte-exact
+captures and earliest/longest match preference. Private UCRT locale handles
+implement time/numeric formatting without changing the embedding GUI's locale.
+Pattern and work-budget errors propagate through pane-content format expansion;
+they are never successful negative matches. Unix retains its libc implementation.
+Windows `b`/`d` modifiers use byte-preserving native path-prefix rules documented
+in [WINDOWS-PATHS.md](crates/tmuxx-format/WINDOWS-PATHS.md).
+Native algorithm tests do not establish complete C-reference format parity.
+
+The Windows path is:
 
 ```mermaid
 flowchart LR
@@ -270,22 +292,55 @@ startup is a separate operation.
 Discovery records contain endpoint and server incarnation, not credentials.
 Pipe ACLs and peer identity authorize access; names alone do not. Permit the
 same Windows account's SSH login to reach its desktop instance across logon
-sessions. Reject direct network named-pipe clients: the SSH bridge connects
-locally. Use private directories/sockets and peer checks for Unix native
-endpoints. Multiple Rustty instances have distinct discoverable endpoints.
+sessions. Pipe names encode the account SID and the instance's UTF-8 bytes
+injectively, including case and Unicode spelling. Protected DACLs grant that SID
+access; server-side client-token impersonation and client-side server-process
+token checks verify both peers. `PIPE_REJECT_REMOTE_CLIENTS` rejects direct
+network named-pipe clients: the SSH bridge connects locally. Discovery enumerates
+the live local namespace; the native hello identifies the server incarnation.
+First-instance creation prevents replacing a live owner. Use private
+directories/sockets and peer checks for Unix native endpoints. Multiple Rustty
+instances have distinct discoverable endpoints.
 
-Prefer a fixed safe bridge invocation with instance/session selection sent
-through the established protocol. Windows OpenSSH may invoke `cmd.exe` or
-PowerShell, so POSIX quoting is insufficient. Test whichever shell-specific
-startup forms are supported. Keep stdin/stdout binary-safe and stderr separate;
-do not route this transport through a PTY or terminal parser.
+Native Windows client metadata uses the pipe's actual client PID and verified
+account SID/name. Client-supplied environment cannot replace those identities.
+Terminal name and negotiated feature bits remain client presentation metadata;
+the native protocol carries no Unix tty descriptors. The SID is exposed through
+the client UID format, matching the Windows owner's UID format representation.
 
-Current Rustty already uses `portable-pty` and Windows ConPTY. It deliberately
-preloads bundled `conpty.dll`/`OpenConsole.exe` before creating sessions to
-preserve synchronized-output ordering. The standalone runtime needs the same
-initialization/packaging contract; moving ownership out of the GUI must not
-silently switch to an incompatible ConPTY runtime. A named-pipe/SSH tmux bridge
-has not yet been implemented in the inspected Rustty.
+The native CLI applies ordered `-2`/`-T` feature changes through the same pinned
+registry used by the Unix client. Its hello negotiates terminal-feature identity
+before submitting commands. Unknown tokens and feature removal retain the C
+parsing order. Native command errors go directly to stderr with the command's
+status; transport errors retain the CLI prefix. File errors identify the exact
+path, and unavailable control stdin uses the protocol's `Bad file descriptor`
+diagnostic instead of interpreting POSIX errno values as Win32 error codes.
+
+The fixed `tmuxx --native-stdio` invocation receives instance selection in the
+first native hello. Without selection exactly one discovered owner is required.
+An optional expected incarnation rejects replacement owners before submitting
+commands. Windows OpenSSH may invoke `cmd.exe` or PowerShell; instance names are
+never interpolated into either shell. Stdin/stdout remain binary-safe and stderr
+separate. Named pipes use an explicit ordered input-EOF record because Windows
+has no duplex-pipe half-close. The bridge never uses a PTY or terminal parser.
+
+Rustty and standalone tmuxx share the vendored `portable-pty` implementation and
+one explicit process-wide ConPTY initialization contract. The pinned archive and
+both runtime member hashes live in `rust/windows/conpty.json`. Runtime startup
+verifies the member lengths/hashes and retains read handles denying replacement,
+then loads the DLL with restricted dependency search and checks its actual module
+path. Missing or incompatible resources fail before exposing an owner; there is
+no in-box fallback. `rust/windows/build.ps1` packages a standalone owner with
+static MSVC CRT and `resources/conpty`; `TMUXX_CONPTY_RESOURCES` explicitly selects
+a different directory containing the same verified package for tests/development.
+
+On Windows, `-D -L INSTANCE` starts the explicit foreground standalone owner.
+`-L INSTANCE COMMAND` and `--native-endpoint PIPE COMMAND` only attach to an
+existing owner, including for creation commands. App-owned instances use the same
+runtime API. Windows has no POSIX foreground process group: automatic command
+names reflect the pane's root process image, while terminal titles remain
+application-controlled. Live root-process cwd is read using the retained process
+handle; a dead or unreadable root yields no invented metadata or reused-PID data.
 
 ### Session/window mapping
 
@@ -511,9 +566,9 @@ there is no C structure/ABI exposed as a library interface.
 Reject unsupported ordinary terminal attachment with a clear error, including
 default non-detached `new-session` or empty-argv paths that would attach a tty.
 Do not signal readiness and leave a blank terminal. Detached creation and
-control attachment are supported separately. Future named-pipe/native CLI
-support would let programs control Windows Rustty; Unix imsg interoperability is
-an additional Unix profile, not a prerequisite for that deferred Windows path.
+control attachment are supported separately. The named-pipe/native CLI
+lets programs control Windows Rustty; Unix imsg interoperability is
+an additional Unix profile, not a prerequisite for the Windows native path.
 
 ## 7. CLI and command/configuration scope
 
@@ -710,7 +765,8 @@ embedded tmuxx runtimes. Linux GUI implementation is outside this task.
 |---|---|
 | Every PR/push | macOS and GNU/Linux Rust checks, metadata/inventory review, C/C calibration, current-C and 3.7c comparisons, exact suites/differences and all six scoped profile gates; desktop-dependent Linux gates remain blocked without client-host evidence |
 | Every rebase | New reference build; old-reference/new-reference/Rust comparison; all affected profiles and difference fixtures; complete discovered-test classification |
-| Future nightly/platform jobs | Differential fuzzing, reference sanitizers, sustained concurrent input/output/resize, SSH reconnect, graphics/width variants, additional Linux ABIs and Windows execution including ConPTY |
+| Native Windows checks | MSVC workspace and exact native suites, pinned ConPTY packaging, pipe/security and atomic process ownership; desktop and cross-logon fixtures run with their explicit prerequisites |
+| Future nightly/platform jobs | Differential fuzzing, reference sanitizers, sustained concurrent input/output/resize, SSH reconnect, graphics/width variants, and additional Linux ABIs |
 | Profile release | Every required assertion on supported platforms/versions, relevant client/server pairings, lifecycle/security/upgrade checks and measured resource budgets |
 
 Report counts by profile: required, passing, intentional differences, excluded,
@@ -724,7 +780,10 @@ to `tmux/tmux`. The additive `.github/workflows/tmuxx-conformance.yml` runs for
 relevant PRs/pushes and manual dispatch on this branch and its forks. It collects
 macOS and GNU/Linux evidence and gates all six scoped profiles. Linux suite
 selection uses equivalent Linux ownership proofs and records desktop-only suites
-as blocked; it never treats absent tests as passing. Windows remains deferred.
+as blocked; it never treats absent tests as passing. Native Windows CI builds and
+collects its executable backend/packaging subsets; a complete Windows gate also
+requires desktop, cross-logon and supported C-reference evidence. A passing
+subset does not qualify another platform or profile.
 
 ## 11. Maintaining the regularly rebased branch
 
@@ -819,7 +878,9 @@ every upstream regression script passed unchanged.
 
 Fresh Linux results, executable identities and remaining client-host prerequisites
 belong to `conformance/artifacts/linux-c-rust.json` and its six profile gates;
-see [Linux reproduction](LINUX.md). Windows ownership/ConPTY implementation and
-execution remain deferred. Stock tmux's state-export limits remain distinct from tmuxx's atomic
+see [Linux reproduction](LINUX.md). Windows ownership, named-pipe transport and
+bundled ConPTY are implemented; fresh native qualification remains governed by
+the Windows profile, including all four native obligations and shared contracts.
+Stock tmux's state-export limits remain distinct from tmuxx's atomic
 native checkpoints. Ordinary tty presentation and live PTY migration remain
 outside the product contract; persistence requires a surviving process owner.

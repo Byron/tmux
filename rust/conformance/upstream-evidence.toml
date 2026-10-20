@@ -2,6 +2,7 @@
 # sockets and a timeout. No script/command/output rewrite is applied.
 [[suites]]
 id = "upstream-harness-cleanup"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "harness_cleans_flooding_owners_after_script_exit_and_timeout", "--", "--ignored", "--exact"]
 env = {}
@@ -13,6 +14,7 @@ description = "Synthetic scripts leave a real Rust pane flooding after success, 
 
 [[suites]]
 id = "upstream-layout-nesting"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_layout_nesting_limit", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -24,6 +26,7 @@ description = "Original layout-nesting-limit.sh runs on C and Rust: both legacy 
 
 [[suites]]
 id = "layout-depth-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views", "system-client"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "layout_nesting_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -35,6 +38,7 @@ description = "Both1000-deep legacy split types preserve exact C pane geometry a
 
 [[suites]]
 id = "layout-depth-decoder"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "system-client"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-layout", "--lib", "tests::legacy_nesting_limit_preserves_unary_groups_without_recursive_parsing", "--", "--exact"]
 env = {}
@@ -46,6 +50,7 @@ description = "Iterative legacy/JSON parsing retains1000 unary levels, IDs and g
 
 [[suites]]
 id = "upstream-terminal-scripts"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_input", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -62,6 +67,7 @@ description = "Unchanged malformed/SGR/Unicode/OSC scripts pass against both C a
 
 [[suites]]
 id = "upstream-format-scripts"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_format", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -83,6 +89,7 @@ description = "Original format-strings passes C and fails Rust with exact copy-m
 
 [[suites]]
 id = "upstream-control-exit-scripts"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_control", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -99,6 +106,7 @@ description = "Unchanged C/R scripts verify notifications outside exact command 
 
 [[suites]]
 id = "upstream-raw-storage-differences"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_raw_diagnostic_differences_remain_explicit", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -110,8 +118,9 @@ description = "Original input-raw-controls and input-nowrap-collect pass C; Rust
 
 [[suites]]
 id = "cli-combined-global-options"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "unix-ipc"]
-args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--bin", "tmuxx", "arguments_tests::combined_global_options_leave_command_flags_and_shell_arguments_intact", "--", "--exact"]
+args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--lib", "arguments_tests::combined_global_options_leave_command_flags_and_shell_arguments_intact", "--", "--exact"]
 env = {}
 
 [[suites.assertions]]
@@ -121,6 +130,7 @@ description = "Combined/split -L and -f and -CC parse as global flags while comm
 
 [[suites]]
 id = "upstream-json-script"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_json", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -132,6 +142,7 @@ description = "Original json.sh passes C and Rust: sorted keys, retained escapes
 
 [[suites]]
 id = "upstream-buffers-script"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_buffers", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -143,6 +154,7 @@ description = "Original buffers.sh passes C and Rust: automatic/named ordering, 
 
 [[suites]]
 id = "upstream-set-hook-b-script"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_set_hook_b", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -154,6 +166,7 @@ description = "Original set-hook-B.sh passes C and Rust: initial suppression, re
 
 [[suites]]
 id = "upstream-target-scripts"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "upstream_regressions", "upstream_targets", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }

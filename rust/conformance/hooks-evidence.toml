@@ -2,6 +2,7 @@
 
 [[suites]]
 id = "runtime-hooks"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks"]
 env = {}
@@ -31,8 +32,14 @@ id = "command.readonly-attach-and-explicit-toggle"
 tests = ["readonly_attach_blocks_commands_and_input_until_switch_toggle"]
 description = "Read-only attach denies commands and raw input; switch-client -r explicitly restores mutation rights; attach -f read-only remains sticky."
 
+[[suites.assertions]]
+id = "control.embedded-source-argv-admission"
+tests = ["embedded_control_rejects_ambiguous_source_before_owner_mutation"]
+description = "The embedded native control API rejects a request carrying both source and argv before any owner mutation; its global option retains the original value."
+
 [[suites]]
 id = "hooks-after-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks", "after_hook", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -44,6 +51,7 @@ description = "Separate C executable matches afterhook spelling, context/flags, 
 
 [[suites]]
 id = "hooks-navigation-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks", "window_navigation_hooks_use_selected_targets_and_aliases_match_c", "--", "--ignored", "--exact"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -55,6 +63,7 @@ description = "Equivalent one-shot C/R clients compare after-select-window hooks
 
 [[suites]]
 id = "hooks-metadata-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks", "hook_option_metadata_keys_and_firing_counts_match_c", "--", "--ignored", "--exact"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -66,6 +75,7 @@ description = "Current C default/scoped/user hook listings preserve option array
 
 [[suites]]
 id = "hooks-monitors-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks", "monitor_hook_truth_filters_link_targets_and_option_lifetime_match_c", "--", "--ignored", "--exact"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -77,6 +87,7 @@ description = "Real C/R timers suppress initial values, retain false transitions
 
 [[suites]]
 id = "hooks-lifecycle-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks", "lifecycle", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -88,6 +99,7 @@ description = "Current C process/lifecycle/client hook payloads and order. C3.7c
 
 [[suites]]
 id = "command-blocks-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "scheduler", "command_blocks_keep_parse_time_aliases_and_delayed_formats_like_c", "--", "--ignored", "--exact"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -99,6 +111,7 @@ description = "C/R source execution distinguishes parsed braces from strings: de
 
 [[suites]]
 id = "source-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "scheduler", "source_", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -115,6 +128,7 @@ description = "Exact C source stdout/status for dry-run registration, skipped br
 
 [[suites]]
 id = "events-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "scheduler", "event_wait_filter_nojobs_verbose_listing_and_wake_match_c", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -126,6 +140,7 @@ description = "Current C event waits agree on raw payload verbosity, no-job filt
 
 [[suites]]
 id = "client-format-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks", "client_format_loops", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -137,6 +152,7 @@ description = "Two real C control clients agree with native owner clients on L i
 
 [[suites]]
 id = "hook-format-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "hooks", "option_format_loops_reflect_scoped_hook_array_updates", "--", "--ignored", "--exact"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -148,6 +164,7 @@ description = "Current C live O hook arrays match global/session/window/pane upd
 
 [[suites]]
 id = "source-stdin-client-matrix"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "source_stdin", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -159,6 +176,7 @@ description = "Thirteen source scenarios cross all four C/R command pairings: st
 
 [[suites]]
 id = "scheduler-job-flags-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "scheduler", "job_", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}

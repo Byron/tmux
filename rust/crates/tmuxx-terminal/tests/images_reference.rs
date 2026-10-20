@@ -1,32 +1,23 @@
 //! Kitty protocol observations from a live isolated C server.
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
+#[cfg(windows)]
+use std::cell::Cell;
+#[cfg(unix)]
 use std::{
     path::PathBuf,
-    process::{Command, Output},
+    process::Command,
     sync::atomic::{AtomicU64, Ordering},
+};
+use std::{
+    process::Output,
     time::{Duration, Instant},
 };
 use tmuxx_terminal::{Effect, Terminal};
+#[cfg(unix)]
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Reference {
-    binary: PathBuf,
-    directory: PathBuf,
-}
-impl Reference {
-    fn new() -> Self {
-        let reference = Self {
-            binary: std::env::var_os("TMUXX_C_TMUX")
-                .expect("set TMUXX_C_TMUX")
-                .into(),
-            directory: PathBuf::from(format!(
-                "/tmp/tximg-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )),
-        };
-        std::fs::create_dir(&reference.directory).unwrap();
-        std::fs::write(
-            reference.directory.join("reader.py"),
-            r#"import os,select,sys,time,tty
+const READER_SCRIPT: &str = r#"import os,select,sys,time,tty
 tty.setraw(0)
 data=open(sys.argv[1], 'rb').read()+b'\x1b[c'
 while data:
@@ -43,9 +34,44 @@ while time.monotonic()<deadline:
             break
 else:
     raise SystemExit('missing DA barrier')
-"#,
-        )
-        .unwrap();
+"#;
+struct Reference {
+    #[cfg(unix)]
+    binary: PathBuf,
+    #[cfg(unix)]
+    directory: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
+    #[cfg(windows)]
+    next: Cell<u64>,
+}
+impl Reference {
+    fn new() -> Self {
+        #[cfg(unix)]
+        let reference = {
+            let reference = Self {
+                binary: std::env::var_os("TMUXX_C_TMUX")
+                    .expect("set TMUXX_C_TMUX")
+                    .into(),
+                directory: PathBuf::from(format!(
+                    "/tmp/tximg-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                )),
+            };
+            std::fs::create_dir(&reference.directory).unwrap();
+            std::fs::write(reference.directory.join("reader.py"), READER_SCRIPT).unwrap();
+            reference
+        };
+        #[cfg(windows)]
+        let reference = {
+            let remote = remote_reference::RemoteReference::new();
+            remote.put(b"reader.py", READER_SCRIPT.as_bytes());
+            Self {
+                remote,
+                next: Cell::new(0),
+            }
+        };
         let output = reference.command(&["new-session", "-d", "-x", "40", "-y", "12", "sleep 60"]);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
@@ -59,6 +85,12 @@ else:
         reference
     }
     fn command(&self, args: &[&str]) -> Output {
+        #[cfg(windows)]
+        return self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        );
+        #[cfg(unix)]
         Command::new(&self.binary)
             .args(["-f", "/dev/null", "-S"])
             .arg(self.directory.join("s"))
@@ -70,26 +102,68 @@ else:
             .unwrap()
     }
     fn observe(&self, bytes: &[u8]) -> (Vec<u8>, (usize, usize)) {
-        let input = self.directory.join("input");
-        let output = self.directory.join("output");
-        let _ = std::fs::remove_file(&output);
-        std::fs::write(&input, bytes).unwrap();
-        let child = format!(
-            "/usr/bin/python3 -B {} {} {}",
-            self.directory.join("reader.py").display(),
-            input.display(),
-            output.display()
-        );
-        let created = self.command(&["new-window", "-d", "-P", "-F", "#{pane_id}", &child]);
+        #[cfg(unix)]
+        let (created, output) = {
+            let input = self.directory.join("input");
+            let output = self.directory.join("output");
+            let _ = std::fs::remove_file(&output);
+            std::fs::write(&input, bytes).unwrap();
+            let child = format!(
+                "/usr/bin/python3 -B {} {} {}",
+                self.directory.join("reader.py").display(),
+                input.display(),
+                output.display()
+            );
+            (
+                self.command(&["new-window", "-d", "-P", "-F", "#{pane_id}", &child]),
+                output,
+            )
+        };
+        #[cfg(windows)]
+        let (created, output_leaf) = {
+            let serial = self.next.get();
+            self.next.set(serial + 1);
+            let input =
+                String::from_utf8(self.remote.put(format!("input-{serial}").as_bytes(), bytes))
+                    .unwrap();
+            let output_leaf = format!("output-{serial}").into_bytes();
+            let output = String::from_utf8(self.remote.path(&output_leaf)).unwrap();
+            let reader = String::from_utf8(self.remote.path(b"reader.py")).unwrap();
+            (
+                self.command(&[
+                    "new-window",
+                    "-d",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "python3",
+                    "-B",
+                    &reader,
+                    &input,
+                    &output,
+                ]),
+                output_leaf,
+            )
+        };
         assert!(created.status.success(), "{created:?}");
         let pane = String::from_utf8(created.stdout).unwrap();
         let pane = pane.trim();
         let deadline = Instant::now() + Duration::from_secs(12);
-        while !output.exists() {
+        loop {
+            #[cfg(unix)]
+            let ready = output.exists();
+            #[cfg(windows)]
+            let ready = self.remote.exists(&output_leaf);
+            if ready {
+                break;
+            }
             assert!(Instant::now() < deadline, "missing reference replies");
             std::thread::sleep(Duration::from_millis(5));
         }
+        #[cfg(unix)]
         let reply = std::fs::read(output).unwrap();
+        #[cfg(windows)]
+        let reply = self.remote.get(&output_leaf);
         let cursor = self.command(&[
             "display-message",
             "-p",
@@ -114,6 +188,7 @@ else:
         (reply, (x.parse().unwrap(), y.parse().unwrap()))
     }
 }
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         self.command(&["kill-server"]);

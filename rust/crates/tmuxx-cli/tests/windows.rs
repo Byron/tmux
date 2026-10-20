@@ -45,11 +45,19 @@ impl Drop for Fixture {
 }
 
 fn bounded(command: &mut Command) -> Output {
+    bounded_input(command, None)
+}
+
+fn bounded_input(command: &mut Command, input: Option<&[u8]>) -> Output {
     let mut child = OwnedChild(
         command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .spawn()
             .unwrap(),
     );
@@ -65,6 +73,9 @@ fn bounded(command: &mut Command) -> Output {
         stderr.read_to_end(&mut b).unwrap();
         b
     });
+    if let Some(input) = input {
+        child.0.stdin.take().unwrap().write_all(input).unwrap();
+    }
     let deadline = Instant::now() + Duration::from_secs(8);
     let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() {
@@ -560,4 +571,58 @@ fn snapshot_stream_reconnect_preserves_shared_graph_and_live_processes() {
     }
     assert!(incarnations.iter().all(|id| *id == incarnations[0]));
     assert!(alive(pid));
+}
+
+#[test]
+fn native_control_and_binary_stdin_preserve_framing_and_shared_owner() {
+    let fixture = Fixture::new();
+    let (pid, descendant) = fixture.pane();
+    let bytes: Vec<u8> = (0..=255).collect();
+    let loaded = bounded_input(
+        Command::new(EXE).args(["-L", &fixture.label, "load-buffer", "-b", "binary", "-"]),
+        Some(&bytes),
+    );
+    assert!(
+        loaded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&loaded.stderr)
+    );
+    assert!(loaded.stdout.is_empty());
+    assert_eq!(
+        fixture.command(&["save-buffer", "-b", "binary", "-"]),
+        bytes
+    );
+    let control = bounded_input(
+        Command::new(EXE).args([
+            "-L",
+            &fixture.label,
+            "-C",
+            "attach-session",
+            "-t",
+            "session 雪 &; value",
+        ]),
+        Some(
+            "display-message -p 'snow 雪 & |; value'\ndisplay-message -p '#{pane_pid}'\n"
+                .as_bytes(),
+        ),
+    );
+    assert!(
+        control.status.success(),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(control.stderr.is_empty());
+    let mut parser = tmuxx_protocol::Decoder::default();
+    // Parse actual CLI stdout through the shared C control codec, one byte at
+    // a time. JSON, diagnostics, CRLF conversion or partial guards cannot pass.
+    let mut events = Vec::new();
+    for byte in &control.stdout {
+        events.extend(parser.feed(&[*byte]).unwrap());
+    }
+    parser.finish().unwrap();
+    assert!(!events.is_empty());
+    let text = String::from_utf8(control.stdout).unwrap();
+    assert!(text.contains("\nsnow 雪 & |; value\n"), "{text}");
+    assert!(text.contains(&format!("\n{pid}\n")), "{text}");
+    assert!(alive(pid) && alive(descendant));
 }

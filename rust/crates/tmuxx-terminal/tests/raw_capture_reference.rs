@@ -1,32 +1,49 @@
 //! Raw grid diagnostics compare common fields and preserve separate exact
 //! examples for native storage differences; no transcript normalization.
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
 use std::{
     collections::BTreeMap,
+    time::{Duration, Instant},
+};
+#[cfg(unix)]
+use std::{
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
 };
 use tmuxx_terminal::{CaptureOptions, Terminal};
 
 struct Reference {
+    #[cfg(unix)]
     binary: PathBuf,
+    #[cfg(unix)]
     directory: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl Reference {
     fn start(bytes: &[u8], columns: u16, rows: u16) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "tx-raw-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&directory).unwrap();
+        #[cfg(unix)]
+        let reference = {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "tx-raw-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            Self {
+                binary: std::env::var_os("TMUXX_C_TMUX")
+                    .expect("set TMUXX_C_TMUX")
+                    .into(),
+                directory,
+            }
+        };
+        #[cfg(windows)]
         let reference = Self {
-            binary: std::env::var_os("TMUXX_C_TMUX")
-                .expect("set TMUXX_C_TMUX")
-                .into(),
-            directory,
+            remote: remote_reference::RemoteReference::new(),
         };
         let payload = bytes
             .iter()
@@ -53,6 +70,15 @@ impl Reference {
         reference
     }
     fn command(&self, arguments: &[&str]) -> Vec<u8> {
+        #[cfg(windows)]
+        let output = self.remote.output(
+            &arguments
+                .iter()
+                .map(|arg| arg.as_bytes())
+                .collect::<Vec<_>>(),
+            &[],
+        );
+        #[cfg(unix)]
         let output = Command::new(&self.binary)
             .args(["-f", "/dev/null", "-S"])
             .arg(self.directory.join("s"))
@@ -69,6 +95,7 @@ impl Reference {
         String::from_utf8(self.command(&["capture-pane", "-pR"])).unwrap()
     }
 }
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         let _ = Command::new(&self.binary)

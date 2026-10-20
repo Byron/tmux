@@ -1,5 +1,6 @@
 [[suites]]
 id = "cli-default-sockets"
+platforms = ["darwin", "linux"]
 profiles = ["unix-ipc", "command-control", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "socket_defaults"]
 env = {}
@@ -41,6 +42,7 @@ description = "Unique-prefix list-commands starts an absent server; a command gr
 
 [[suites]]
 id = "cli-socket-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["unix-ipc", "command-control", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "socket_defaults", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -52,6 +54,7 @@ description = "Unmodified C client discovers default Rust server and Rust client
 
 [[suites]]
 id = "cli-runtime-defaults-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "runtime_defaults", "startup_shell_", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -63,6 +66,7 @@ description = "Separate C and Rust executables agree on supplied/missing/invalid
 
 [[suites]]
 id = "cli-client-env-format-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "runtime_defaults", "client_environment_", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -74,6 +78,7 @@ description = "Separate C/R command clients expose their individual request envi
 
 [[suites]]
 id = "cli-config-lifetime-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "standalone", "app-owned", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "config_lifetime", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -85,6 +90,7 @@ description = "Real C/R daemons load configuration once while two successive sta
 
 [[suites]]
 id = "cli-child-environment-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "runtime_defaults", "child_environment_overrides_and_attach_updates_match_c", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -95,6 +101,7 @@ tests = ["child_environment_overrides_and_attach_updates_match_c"]
 description = "Real C/R children from new-window/split/respawn preserve global inheritance and cleared/hidden masks, ordered repeated -e and ignored bare names, explicit TERM, default-shell and unattached caller PATH precedence. Direct env children distinguish absent PATH fallback from hidden/cleared PATH and explicit/caller overrides. Control attach -E skips imports; ordinary attach imports exact/glob values and clears absent names."
 [[suites]]
 id = "implementation-identity"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "runtime_defaults", "implementation_identity_is_explicit_and_pane_overrides_take_precedence", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -107,6 +114,7 @@ description = "Explicit implementation difference: C reports its selected execut
 
 [[suites]]
 id = "cli-file-and-arguments-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -188,6 +196,7 @@ description = "C/R show-messages compare empty headless tty/job lists, optional 
 
 [[suites]]
 id = "cli-control-environment-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "runtime_defaults", "control_transport_path_override_depends_on_attachment_like_c", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -199,6 +208,7 @@ description = "Real control clients creating initial detached/attached session c
 
 [[suites]]
 id = "cli-selector-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "system-client", "unix-ipc", "native-views", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "selectors", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }

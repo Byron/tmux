@@ -1,14 +1,53 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::io::{BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tmuxx_protocol::native::{Request, Response, ServerMessage};
+
+fn fixture_argv(args: &[&str]) -> Vec<Vec<u8>> {
+    let values = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    #[cfg(windows)]
+    let mut values = values;
+    #[cfg(windows)]
+    if let Some(index) = values.iter().position(|arg| arg == "/bin/sh") {
+        let source = match values.last().unwrap().as_str() {
+            "printf READY; sleep 30" => "import time; print('READY',flush=True); time.sleep(30)",
+            "printf 'READY\\n'; read value; printf 'DONE:%s\\n' \"$value\"; sleep 30" => {
+                "import time; print('READY',flush=True); value=input(); print('DONE:'+value,flush=True); time.sleep(30)"
+            }
+            source => panic!("missing native counterpart for fixture source: {source}"),
+        };
+        values[index] = std::env::var("TMUXX_REMOTE_PYTHON").unwrap_or_else(|_| "python".into());
+        *values.last_mut().unwrap() = source.into();
+    }
+    values.iter().map(|arg| arg.as_bytes().to_vec()).collect()
+}
+
+#[cfg(unix)]
+fn connect(path: &std::path::Path) -> std::io::Result<UnixStream> {
+    UnixStream::connect(path)
+}
+#[cfg(windows)]
+fn connect(path: &std::path::Path) -> std::io::Result<tmuxx_runtime::windows::PipeStream> {
+    tmuxx_runtime::windows::connect(path)
+}
 
 fn endpoint() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(windows)]
+    return tmuxx_runtime::windows::endpoint(&format!(
+        "host-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    #[cfg(unix)]
     std::env::temp_dir().join(format!(
         "tmuxx-{}-{}-{}.native",
         std::process::id(),
@@ -20,8 +59,8 @@ fn endpoint() -> PathBuf {
     ))
 }
 
-fn command(endpoint: &PathBuf, args: &[&str]) -> Response {
-    let mut stream = UnixStream::connect(endpoint).unwrap();
+fn command(endpoint: &Path, args: &[&str]) -> Response {
+    let mut stream = connect(endpoint).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -29,7 +68,7 @@ fn command(endpoint: &PathBuf, args: &[&str]) -> Response {
     let request = Request {
         request_id: 1,
         stdin: None,
-        argv: args.iter().map(|s| s.as_bytes().to_vec()).collect(),
+        argv: fixture_argv(args),
         subscribe: false,
         control: false,
     };
@@ -95,10 +134,10 @@ fn dropping_app_host_stops_the_server() {
     let path = endpoint();
     {
         let _host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
-        assert!(UnixStream::connect(&path).is_ok());
+        assert!(connect(&path).is_ok());
     }
     assert!(!path.exists());
-    assert!(UnixStream::connect(&path).is_err());
+    assert!(connect(&path).is_err());
 }
 
 #[test]
@@ -106,11 +145,12 @@ fn refuses_to_replace_existing_endpoint() {
     let path = endpoint();
     let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
     assert!(tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).is_err());
-    assert!(UnixStream::connect(&path).is_ok());
+    assert!(connect(&path).is_ok());
     host.shutdown().unwrap();
 }
 
 #[test]
+#[cfg(unix)]
 fn cleanup_does_not_remove_a_replacement_endpoint() {
     let path = endpoint();
     let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
@@ -122,11 +162,12 @@ fn cleanup_does_not_remove_a_replacement_endpoint() {
 }
 
 #[test]
+#[cfg(unix)]
 fn stale_owned_socket_is_recovered_but_regular_files_are_preserved() {
     let path = endpoint();
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
     let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
-    assert!(UnixStream::connect(&path).is_ok());
+    assert!(connect(&path).is_ok());
     host.shutdown().unwrap();
     std::fs::write(&path, b"not a socket").unwrap();
     assert!(tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).is_err());
@@ -139,7 +180,7 @@ fn native_handshake_rejects_mismatched_versions_before_requests() {
     use std::io::Read;
     let path = endpoint();
     let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
-    let mut stream = UnixStream::connect(&path).unwrap();
+    let mut stream = connect(&path).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -148,9 +189,25 @@ fn native_handshake_rejects_mismatched_versions_before_requests() {
         .unwrap();
     let mut data = Vec::new();
     stream.read_to_end(&mut data).unwrap();
+    let hello = serde_json::from_slice::<tmuxx_protocol::native::Hello>(&data).unwrap();
+    #[cfg(windows)]
+    let hello = {
+        let mut hello = hello;
+        assert!(
+            hello
+                .instance_id
+                .take()
+                .is_some_and(|value| !value.is_empty())
+        );
+        hello
+    };
     assert_eq!(
-        serde_json::from_slice::<tmuxx_protocol::native::Hello>(&data).unwrap(),
-        tmuxx_protocol::native::Hello::default()
+        hello,
+        tmuxx_protocol::native::Hello {
+            stdin_file_stream: true,
+            client_features: Some(0),
+            ..Default::default()
+        }
     );
     assert!(command(&path, &["has-session"]).error.is_some());
     host.shutdown().unwrap();
@@ -207,7 +264,7 @@ fn native_socket_streams_snapshots_and_cap_rejection_keeps_the_process() {
             None
         );
         let pid = command(&path, &["display-message", "-p", "#{pane_pid}"]).output;
-        let mut stream = UnixStream::connect(&path).unwrap();
+        let mut stream = connect(&path).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -265,6 +322,7 @@ fn native_socket_streams_snapshots_and_cap_rejection_keeps_the_process() {
 }
 
 #[test]
+#[cfg(unix)]
 fn second_endpoint_failure_removes_only_owned_bindings() {
     use std::os::unix::net::UnixListener;
     let native = endpoint();
@@ -274,12 +332,13 @@ fn second_endpoint_failure_removes_only_owned_bindings() {
     options.tmux_endpoint = Some(ipc.clone());
     assert!(tmuxx_runtime::start(options).is_err());
     assert!(!native.exists());
-    assert!(UnixStream::connect(&ipc).is_ok());
+    assert!(connect(&ipc).is_ok());
     drop(listener);
     std::fs::remove_file(ipc).unwrap();
 }
 
 #[test]
+#[cfg(unix)]
 fn shutdown_terminates_pty_descendants_after_the_leader_exits() {
     let other_path = endpoint();
     let other = tmuxx_runtime::start(tmuxx_runtime::Options::new(&other_path)).unwrap();
@@ -344,14 +403,14 @@ fn socket_clients_are_bounded_and_shutdown_closes_idle_peers() {
     let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
     let mut clients = Vec::new();
     for _ in 0..tmuxx_runtime::MAX_SOCKET_CLIENTS {
-        let mut stream = UnixStream::connect(&path).unwrap();
+        let mut stream = connect(&path).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         tmuxx_runtime::native_handshake(&mut stream).unwrap();
         clients.push(stream);
     }
-    let mut excess = UnixStream::connect(&path).unwrap();
+    let mut excess = connect(&path).unwrap();
     excess
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -359,7 +418,7 @@ fn socket_clients_are_bounded_and_shutdown_closes_idle_peers() {
     drop(clients.pop());
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let mut stream = UnixStream::connect(&path).unwrap();
+        let mut stream = connect(&path).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -382,6 +441,7 @@ fn socket_clients_are_bounded_and_shutdown_closes_idle_peers() {
 
 #[test]
 #[ignore = "requires C reference in TMUXX_C_TMUX"]
+#[cfg(unix)]
 fn pty_descendant_cleanup_difference_matches_c() {
     use std::process::Command;
     struct Descendant(libc::pid_t);
@@ -466,6 +526,17 @@ fn pty_descendant_cleanup_difference_matches_c() {
     }
 }
 
+#[cfg(windows)]
+#[path = "host/windows.rs"]
+mod windows;
+
+#[test]
+#[ignore = "requires pinned remote C reference in TMUXX_REMOTE_C_CONFIG"]
+#[cfg(windows)]
+fn pty_descendant_cleanup_difference_matches_c() {
+    windows::pty_descendant_cleanup_difference_matches_c();
+}
+
 #[test]
 fn native_stdin_detection_uses_command_flags_and_positional_paths() {
     for (argv, expected) in [
@@ -488,4 +559,152 @@ fn native_stdin_detection_uses_command_flags_and_positional_paths() {
             "{argv:?}"
         );
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn cleanup_does_not_remove_a_replacement_endpoint() {
+    let path = endpoint();
+    let owner = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
+    let old_peer = connect(&path).unwrap();
+    owner.shutdown().unwrap();
+    let replacement = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
+    drop(old_peer);
+    assert_eq!(
+        command(&path, &["display", "-p", "replacement"]).output,
+        b"replacement\n"
+    );
+    replacement.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn stale_owned_socket_is_recovered_but_regular_files_are_preserved() {
+    use std::os::windows::{
+        ffi::OsStrExt,
+        io::{FromRawHandle, OwnedHandle},
+    };
+    use windows_sys::Win32::{Foundation::INVALID_HANDLE_VALUE, System::Pipes::*};
+    let path = endpoint();
+    let name = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let stale = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            3,
+            PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            4096,
+            4096,
+            0,
+            std::ptr::null(),
+        )
+    };
+    assert_ne!(stale, INVALID_HANDLE_VALUE);
+    // Closing the abandoned owner's kernel handle removes stale pipe discovery.
+    drop(unsafe { OwnedHandle::from_raw_handle(stale) });
+    let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
+    assert!(connect(&path).is_ok());
+    host.shutdown().unwrap();
+    let file = std::env::temp_dir().join(format!("host-preserved-{}.txt", std::process::id()));
+    std::fs::write(&file, b"not a pipe").unwrap();
+    assert!(tmuxx_runtime::start(tmuxx_runtime::Options::new(&file)).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), b"not a pipe");
+    std::fs::remove_file(file).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn second_endpoint_failure_removes_only_owned_bindings() {
+    let native = endpoint();
+    let existing = endpoint();
+    let owner = tmuxx_runtime::start(tmuxx_runtime::Options::new(&existing)).unwrap();
+    let mut options = tmuxx_runtime::Options::new(&native);
+    options.tmux_endpoint = Some(existing.clone());
+    assert!(tmuxx_runtime::start(options).is_err());
+    assert!(connect(&native).is_err());
+    assert_eq!(
+        command(&existing, &["display", "-p", "independent"]).output,
+        b"independent\n"
+    );
+    owner.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn shutdown_terminates_pty_descendants_after_the_leader_exits() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::*;
+    let other_path = endpoint();
+    let other = tmuxx_runtime::start(tmuxx_runtime::Options::new(&other_path)).unwrap();
+    assert_eq!(
+        command(
+            &other_path,
+            &[
+                "new-session",
+                "-d",
+                "python",
+                "-c",
+                "import time; time.sleep(30)"
+            ]
+        )
+        .error,
+        None
+    );
+    let other_pid = command(&other_path, &["display-message", "-p", "#{pane_pid}"]).output;
+    let path = endpoint();
+    let pidfile = std::env::temp_dir().join(format!("host-descendant-{}.pid", std::process::id()));
+    let release = pidfile.with_extension("release");
+    let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(&path)).unwrap();
+    let script = "import pathlib,subprocess,sys,time\nchild=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); signal.signal(signal.SIGBREAK,signal.SIG_IGN); time.sleep(60)'],creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)\npathlib.Path(sys.argv[1]).write_text(str(child.pid))\nwhile not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)";
+    assert_eq!(
+        command(
+            &path,
+            &[
+                "new-session",
+                "-d",
+                "python",
+                "-c",
+                script,
+                pidfile.to_str().unwrap(),
+                release.to_str().unwrap()
+            ]
+        )
+        .error,
+        None
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = text.parse::<u32>()
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(!handle.is_null());
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) },
+        258
+    );
+    std::fs::write(&release, b"exit").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    host.shutdown().unwrap();
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle(), 3000) },
+        0
+    );
+    assert_eq!(
+        command(&other_path, &["display-message", "-p", "#{pane_pid}"]).output,
+        other_pid
+    );
+    other.shutdown().unwrap();
+    std::fs::remove_file(pidfile).unwrap();
+    std::fs::remove_file(release).unwrap();
 }

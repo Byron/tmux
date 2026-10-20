@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::time::{Duration, Instant};
 use tmuxx_protocol::native::{Request, Response, ServerMessage};
@@ -26,7 +26,11 @@ fn run(client: &LocalClient, argv: &[&str]) -> Response {
 
 #[test]
 fn failed_spawn_does_not_leave_a_session_or_poison_next_process() {
+    #[cfg(unix)]
     let path = std::env::temp_dir().join(format!("tmuxx-transaction-{}.sock", std::process::id()));
+    #[cfg(windows)]
+    let path =
+        tmuxx_runtime::windows::endpoint(&format!("transaction-{}", std::process::id())).unwrap();
     let host = tmuxx_runtime::start(Options::new(&path)).unwrap();
     let client = host.connect().unwrap();
     let reply = run(
@@ -54,9 +58,13 @@ fn failed_spawn_does_not_leave_a_session_or_poison_next_process() {
                 "-d",
                 "-s",
                 "working",
-                "/bin/sh",
+                if cfg!(windows) { "python" } else { "/bin/sh" },
                 "-c",
-                "printf READY; sleep 30"
+                if cfg!(windows) {
+                    "import time; print('READY',flush=True); time.sleep(30)"
+                } else {
+                    "printf READY; sleep 30"
+                }
             ]
         )
         .error,
@@ -115,11 +123,19 @@ fn nested_source_keeps_preparation_before_execution_and_group_errors_stop_queue(
         &outer,
         format!(
             "source-file {}\ndisplay -p '#{{@value}}'\n",
-            inner.display()
+            String::from_utf8(tmuxx_command::quote_argument(
+                inner.to_str().unwrap().as_bytes()
+            ))
+            .unwrap()
         ),
     )
     .unwrap();
-    let host = tmuxx_runtime::start(Options::new(dir.join("socket"))).unwrap();
+    #[cfg(unix)]
+    let endpoint = dir.join("socket");
+    #[cfg(windows)]
+    let endpoint =
+        tmuxx_runtime::windows::endpoint(&format!("source-{}", std::process::id())).unwrap();
+    let host = tmuxx_runtime::start(Options::new(endpoint)).unwrap();
     let client = host.connect().unwrap();
     assert_eq!(
         run(&client, &["source-file", outer.to_str().unwrap()]).output,

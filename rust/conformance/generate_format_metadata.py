@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / 'rust/crates/tmuxx-core/src/format_metadata.rs'
 def generate(root=ROOT):
-    table = (root / 'format.c').read_text().split('static const struct format_table_entry format_table[] = {', 1)[1].split('\n};', 1)[0]
+    table = (root / 'format.c').read_text(encoding="utf-8").split('static const struct format_table_entry format_table[] = {', 1)[1].split('\n};', 1)[0]
     keys = re.findall(r'\{\s*"([^"]+)",\s*FORMAT_TABLE_(?:STRING|TIME)', table)
     if not keys or keys != sorted(set(keys)):
         raise ValueError('format callback registry must be nonempty, sorted and unique')
@@ -18,7 +18,7 @@ def main():
     args = parser.parse_args()
     result = generate()
     if args.check:
-        if OUTPUT.read_text() != result:
+        if OUTPUT.read_text(encoding="utf-8") != result:
             parser.exit(1, 'C format callbacks changed; regenerate and review format metadata and conformance.\n')
     else:
         OUTPUT.write_text(result)

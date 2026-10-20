@@ -1,8 +1,10 @@
-#![cfg(unix)]
-//! Opt-in actual SSH: temporary loopback sshd, test keys, and a stock C tmux.
+#![cfg(any(unix, windows))]
+//! Opt-in actual SSH to a pinned stock C tmux, with owned private fixtures.
 use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::net::TcpListener;
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
@@ -16,6 +18,11 @@ use tmuxx_command::Command as TmuxCommand;
 #[path = "../../../test-support/socket_owner.rs"]
 mod socket_owner;
 
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote;
+
+#[cfg(unix)]
 struct Fixture {
     directory: PathBuf,
     tmux: PathBuf,
@@ -27,6 +34,7 @@ struct Fixture {
     #[cfg(target_os = "linux")]
     owner: Option<socket_owner::SocketOwner>,
 }
+#[cfg(unix)]
 impl Fixture {
     fn start() -> Self {
         let directory = std::env::temp_dir().join(format!("tmuxx-ssh-{}", std::process::id()));
@@ -192,39 +200,168 @@ impl Fixture {
             "control-{}.stderr",
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let mut child = self
-            .ssh_command(&self.command_text(&["-C", "attach-session", "-t", "test"], true))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(fs::File::create(&stderr_path).unwrap())
-            .spawn()
-            .unwrap();
-        let input = child.stdin.take().unwrap();
-        let mut output = child.stdout.take().unwrap();
-        let (tx, rx) = mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let mut chunk = [0; 8192];
-            while let Ok(n) = output.read(&mut chunk) {
-                if n == 0 {
-                    break;
-                }
-                if tx.send(chunk[..n].to_vec()).is_err() {
-                    break;
-                }
-            }
-        });
-        let mut model = SystemClient::new(nonce.to_vec()).unwrap();
-        model.bootstrap().unwrap();
-        Remote {
-            child: Some(child),
-            input: Some(input),
-            reader: Some(reader),
-            rx,
-            model,
+        connect_command(
+            self.ssh_command(&self.command_text(&["-C", "attach-session", "-t", "test"], true)),
+            nonce,
             stderr_path,
+        )
+    }
+}
+
+#[cfg(windows)]
+struct Fixture {
+    reference: remote::RemoteReference,
+    selection: PathBuf,
+    directory: PathBuf,
+}
+
+#[cfg(windows)]
+impl Fixture {
+    fn start() -> Self {
+        let reference = remote::RemoteReference::new();
+        let selection = std::env::var_os("TMUXX_SYSTEM_C_SELECTION")
+            .expect("set TMUXX_SYSTEM_C_SELECTION to the private fixed SSH selection file")
+            .into();
+        let directory = std::env::temp_dir().join(format!(
+            "tmuxx-ssh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let fixture = Self {
+            directory,
+            reference,
+            selection,
+        };
+        // The forced SSH entry independently validates the selected binary,
+        // socket, owner, server start ticks and short lease. It never starts C.
+        fs::write(&fixture.selection, fixture.reference.identity()).unwrap();
+        let result = fixture.run(&["new-session", "-d", "-s", "test", "-x", "80", "-y", "24", "/bin/sh", "-c", "printf 'READY\\n'; while IFS= read -r value; do printf '\\001\\377:%s\\n' \"$value\"; done"]);
+        assert!(
+            result.status.success(),
+            "remote C fixture start: {result:?}"
+        );
+        fixture
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.reference.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        )
+    }
+
+    fn ssh_command(&self, source: &str) -> Command {
+        let ssh = std::env::var_os("TMUXX_SYSTEM_C_SSH")
+            .expect("set TMUXX_SYSTEM_C_SSH to the identified native Windows SSH executable");
+        let config = std::env::var_os("TMUXX_SYSTEM_C_SSH_CONFIG")
+            .expect("set TMUXX_SYSTEM_C_SSH_CONFIG to the restricted SSH fixture config");
+        let host = std::env::var_os("TMUXX_SYSTEM_C_SSH_HOST")
+            .expect("set TMUXX_SYSTEM_C_SSH_HOST to the explicit fixture alias");
+        let mut command = Command::new(ssh);
+        command
+            .args(["-T", "-F"])
+            .arg(config)
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "ControlMaster=no",
+                "--",
+            ])
+            .arg(host)
+            .arg(source);
+        command
+    }
+
+    fn run_unchecked(&self, args: &[&str], no_start: bool) -> Output {
+        assert!(
+            no_start,
+            "the fixed Windows SSH entry cannot start an owner"
+        );
+        let source = if args == ["-C", "attach-session", "-t", "test"] {
+            "exec tmux -C attach-session -f new-layouts -t '$0'".to_owned()
+        } else {
+            // Startup requests deliberately reach the fixed entry's deny path.
+            // Selection and the supported attachment form remain protocol data.
+            format!(
+                "exec tmux {}",
+                args.iter()
+                    .map(|arg| quote(arg))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
+        self.ssh_command(&source).output().unwrap()
+    }
+
+    fn connect(&self, nonce: &[u8]) -> Remote {
+        let command = self.ssh_command("exec tmux -C attach-session -f new-layouts -t '$0'");
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let stderr_path = self.directory.join(format!(
+            "control-{}.stderr",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        connect_command(command, nonce, stderr_path)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if fs::read(&self.selection).ok().as_deref() == Some(self.reference.identity().as_slice()) {
+            let _ = fs::remove_file(&self.selection);
+        }
+        if std::thread::panicking() {
+            eprintln!("Preserved SSH transcripts: {}", self.directory.display());
+        } else {
+            let _ = fs::remove_dir_all(&self.directory);
         }
     }
 }
+
+fn connect_command(mut command: Command, nonce: &[u8], stderr_path: PathBuf) -> Remote {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(&stderr_path).unwrap())
+        .spawn()
+        .unwrap();
+    let input = child.stdin.take().unwrap();
+    let mut output = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut chunk = [0; 8192];
+        while let Ok(n) = output.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            if tx.send(chunk[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut model = SystemClient::new(nonce.to_vec()).unwrap();
+    model.bootstrap().unwrap();
+    Remote {
+        child: Some(child),
+        input: Some(input),
+        reader: Some(reader),
+        rx,
+        model,
+        stderr_path,
+    }
+}
+#[cfg(unix)]
 impl Drop for Fixture {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
@@ -431,8 +568,11 @@ fn ssh_stock_tmux_discovery_bytes_reconnect_and_ambiguous_mutation() {
         );
         // C may leave a stale socket pathname after exit. No live replacement
         // may appear, and Linux additionally checks the pinned socket inode.
+        #[cfg(unix)]
         assert!(std::os::unix::net::UnixStream::connect(&fixture.socket).is_err());
         #[cfg(target_os = "linux")]
         assert!(!fixture.owner.as_ref().unwrap().endpoint_replaced().unwrap());
+        #[cfg(windows)]
+        assert!(!fixture.reference.server_alive());
     }
 }

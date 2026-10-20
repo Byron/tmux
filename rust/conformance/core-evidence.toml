@@ -2,6 +2,7 @@
 
 [[suites]]
 id = "command-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-command", "--lib"]
 env = {}
@@ -33,6 +34,7 @@ description = "C source/target/client-role metadata plus the four manually resol
 
 [[suites]]
 id = "format-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-format", "--lib"]
 env = {}
@@ -50,10 +52,11 @@ description = "Short-circuit booleans, disabled preparation jobs, explicit unsup
 [[suites.assertions]]
 id = "format.posix-regex-captures-and-empty-matches"
 tests = ["tests::posix_regex_longest_match_captures_and_empty_matches", "tests::unicode_posix_matching_preserves_embedding_thread_locale"]
-description = "POSIX longest match, capture substitution, anchored/empty matches, invalid patterns and UTF8 glob/regex semantics. Concurrent matching restores each embedding thread's locale. Platform POSIX functions are used; no tmux C code is linked."
+description = "POSIX longest match, capture substitution, anchored/empty matches, invalid patterns and UTF8 glob/regex semantics. Concurrent matching restores each embedding thread's locale. Unix uses platform POSIX functions; Windows uses its explicitly documented Unicode locale. No tmux C code is linked."
 
 [[suites]]
 id = "config-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-config", "--lib"]
 env = {}
@@ -65,6 +68,7 @@ description = "Source-order assignments, hidden variables, nested/inline/elif di
 
 [[suites]]
 id = "config-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-config", "--test", "c_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_ORACLE = "$reference"}
@@ -131,6 +135,7 @@ description = "Both tested outcomes of reject-nul-and-unclosed-quotes: C accepts
 
 [[suites]]
 id = "runtime-host"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["standalone", "app-owned", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "host"]
 env = {}
@@ -148,7 +153,7 @@ description = "Dropping ServerHandle stops acceptance and removes the owned nati
 [[suites.assertions]]
 id = "runtime.endpoint-collision-rollback"
 tests = ["refuses_to_replace_existing_endpoint", "second_endpoint_failure_removes_only_owned_bindings"]
-description = "Existing endpoints remain usable on collision; failure binding the second endpoint removes only bindings acquired by that startup."
+description = "Existing endpoints remain usable on collision; a failing multi-endpoint startup leaves no new binding and preserves the existing owner. Unix tests second-bind rollback; Windows rejects the Unix IPC option before publishing a pipe."
 
 [[suites.assertions]]
 id = "runtime.native-version-rejection"
@@ -162,6 +167,7 @@ description = "Tokenized command serialization retains literal/trailing semicolo
 
 [[suites]]
 id = "runtime-transactions"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "transactions"]
 env = {}
@@ -178,6 +184,7 @@ description = "Nested source-file effects precede the following command; an erro
 
 [[suites]]
 id = "control-codec"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["system-client", "command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-protocol", "--all-features", "--test", "control"]
 env = {}
@@ -209,6 +216,7 @@ description = "Malformed input poisons decoder state, EOF checks incomplete reco
 
 [[suites]]
 id = "control-client"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["system-client"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-client", "--test", "client"]
 env = {}
@@ -295,6 +303,7 @@ description = "Unmodified C and Rust ordinary command clients receive the exact 
 
 [[suites]]
 id = "runtime-scheduler"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "scheduler"]
 env = {}
@@ -306,7 +315,7 @@ description = "Wait/signal and lock/unlock preserve per-client request order, wa
 
 [[suites.assertions]]
 id = "command.async-shell-status-and-group-boundaries"
-tests = ["foreground_jobs_keep_owner_responsive_and_status_does_not_cancel_group", "conditional_and_delayed_commands_share_queue_context_and_explicit_errors"]
+tests = ["foreground_jobs_keep_owner_responsive_and_status_does_not_cancel_group", "conditional_and_delayed_commands_share_queue_context_and_explicit_errors", "command_only_job_target_formats_survive_preparation"]
 description = "Foreground jobs leave owner responsive, preserve same-client order and separate process status from group errors; shell/format conditions, delay, -C, positional formats and stderr flags execute with explicit unsupported-flag errors."
 
 [[suites.assertions]]
@@ -317,7 +326,7 @@ description = "Started background shell jobs survive client loss; async conditio
 [[suites.assertions]]
 id = "runtime.job-descendant-owner-shutdown"
 tests = ["shutdown_reaps_shell_descendants_that_keep_stdout_open"]
-description = "Owner shutdown kills a job's process group and returns even after the shell exits while a descendant keeps stdout open; PTY abrupt owner-death cleanup is separate."
+description = "Owner shutdown kills a job's owned descendants and returns even after the shell exits while a descendant keeps stdout open. Unix uses process groups and Windows uses Job Objects with exact process-handle death checks; PTY abrupt owner-death cleanup is separate."
 
 [[suites.assertions]]
 id = "config.relative-include-hidden-job-environment"
@@ -341,6 +350,7 @@ description = "Dry-run validates registered syntax, aliases/prefixes/arity and a
 
 [[suites]]
 id = "scheduler-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "scheduler", "shell_condition_wait_and_exit_status_match_c_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -352,6 +362,7 @@ description = "Separate C executable agrees on 15 shell/wait/conditional scenari
 
 [[suites]]
 id = "runtime-native-views"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["native-views", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "native_views"]
 env = {}
@@ -359,7 +370,7 @@ env = {}
 [[suites.assertions]]
 id = "native.elected-clipboard-reply-and-replay-rejection"
 tests = ["one_view_handles_clipboard_and_reply_cannot_be_replayed"]
-description = "Two real native views elect one OSC52 handler; wrong-client/duplicate replies fail and the child receives exactly one denial response."
+description = "Two real native views elect one OSC52 handler; wrong-client/duplicate replies fail and the child receives exactly one successful byte-exact OSC52 response."
 
 [[suites.assertions]]
 id = "native.two-view-smallest-size-pid-stability"
@@ -387,12 +398,18 @@ tests = ["native_style_theme_and_active_pane_survive_view_reconnect"]
 description = "Native host theme changes update color-token defaults and client_theme queries; pane activation and GUI reconnection preserve colors, reported theme and the same process PID."
 
 [[suites.assertions]]
+id = "native.retained-agent-status-without-views"
+tests = ["agent_status_is_retained_without_views_and_reconnect_keeps_the_process"]
+description = "A real PTY or bundled ConPTY application publishes agent status while every native view is detached. Reattachment restores retained status and the same running process without replaying its input or host effects."
+
+[[suites.assertions]]
 id = "native.client-cell-dimensions-theme-context"
 tests = ["native_cell_geometry_updates_terminal_queries_pty_and_pairwise_arbitration", "native_style_theme_and_active_pane_survive_view_reconnect"]
-description = "Native view dimensions and cell pixels reach PTY/query size arbitration and remain available as client fields. First child ioctl observes default pixels before any client resize; new windows/sessions start with selected client pixels, and both respawn variants retain negotiated ioctl/query dimensions. Native views report client_control_mode=0; host state supplies client_theme without inventing a physical tty."
+description = "Native view dimensions and cell pixels reach PTY/query size arbitration and remain available as client fields. Unix child ioctl observes cell/pixel dimensions; Windows child GetConsoleScreenBufferInfo observes actual ConPTY cells and CSI14t queries actual terminal pixels. Defaults precede client resize, new windows/sessions start with selected client pixels, and both respawn variants retain negotiated dimensions and CSI16t replies. Native views report client_control_mode=0; host state supplies client_theme without inventing a physical tty."
 
 [[suites]]
 id = "system-client"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["system-client"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-client", "--test", "system"]
 env = {}
@@ -404,11 +421,12 @@ description = "Control bootstrap preserves names, graph and visible capture befo
 
 [[suites.assertions]]
 id = "system.discovery-retry-budget"
-tests = ["disappearing_pane_during_capture_restarts_discovery_without_losing_user_commands", "repeated_bootstrap_failures_stop_with_the_failed_command_and_server_diagnostic", "continuous_graph_churn_exhausts_retries_until_explicit_bootstrap"]
-description = "Pane disappearance restarts discovery while preserving user commands; repeated failures and graph churn exhaust a bounded retry budget until explicit bootstrap resets it."
+tests = ["disappearing_pane_during_capture_restarts_discovery_without_losing_user_commands", "repeated_bootstrap_failures_stop_with_the_failed_command_and_server_diagnostic", "continuous_graph_churn_exhausts_retries_until_explicit_bootstrap", "deferred_discovery_resumes_without_replaying_a_user_command", "stale_cross_list_rows_are_discarded_before_current_snapshot_validation"]
+description = "Pane disappearance and known stale cross-list snapshots restart discovery while preserving user commands; current malformed snapshots remain fatal. Failed bootstrap commands retain exact fatal diagnostics; structural churn exhausts the same three-attempt budget and emits typed deferral until explicit read-only bootstrap resumes, preserving active user identity and never replaying the mutation."
 
 [[suites]]
 id = "ssh-c-reference"
+platforms = ["darwin", "linux"]
 reference_version = "tmux next-3.9"
 profiles = ["system-client"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-client", "--test", "ssh_reference", "--", "--ignored", "--test-threads=1"]
@@ -421,6 +439,7 @@ description = "Isolated loopback SSH to stock C tmux discovers graph/captures, r
 
 [[suites]]
 id = "config-preparation-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-config", "--test", "c_reference", "preparation_", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_ORACLE = "$reference"}
@@ -432,6 +451,7 @@ description = "C preparation ordering and no-job conditional behavior shared wit
 
 [[suites]]
 id = "parser-text-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-config", "--test", "c_reference", "text_parser_and_argv_match_c_execution", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_ORACLE = "$reference"}
@@ -443,6 +463,7 @@ description = "C executable text/argv parser observations shared with3.7c."
 
 [[suites]]
 id = "regex-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-config", "--test", "c_reference", "regex_and_substitution_observations_match_c", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_ORACLE = "$reference"}
@@ -454,6 +475,7 @@ description = "Selected POSIX/compound format observations shared with3.7c."
 
 [[suites]]
 id = "commands-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "commands_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -465,6 +487,7 @@ description = "Current C exact list-commands default/help/verbose/custom bytes a
 
 [[suites]]
 id = "format-context-bounds-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--lib", "formats::tests::context_recursion_and_loop_output_are_bounded"]
 env = {}
@@ -477,6 +500,7 @@ description = "Recursive contextual option expansion and excessive loop output r
 
 [[suites]]
 id = "command-json-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "commands_reference", "display_json_canonical_bytes_errors_and_flag_precedence_match_c", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -488,6 +512,7 @@ description = "Restricted JSON preserves escapes, sorts keys, validates signed64
 
 [[suites]]
 id = "buffer-name-trust-boundary"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "buffer_names"]
 env = {}

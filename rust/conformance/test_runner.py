@@ -206,7 +206,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_reviewed_proofs_require_every_fine_assertion(self):
         config = self.proof_config()
-        entries = runner.inventory(config)
+        entries = runner.platform_inventory(runner.inventory(config), runner.suites(), "darwin")
         target = next(entry for entry in entries if entry["id"] == config["coverage"][0]["obligation"])
         self.assertEqual(target["status"], "pending")
         runner.apply_observations(entries, [{"assertion": "graph.create-split-rename", "scenario": "graph", "status": "pass"}])
@@ -241,6 +241,44 @@ class InventoryTests(unittest.TestCase):
         runner.apply_observations(entries, [{"assertion": "fine", "scenario": "suite:one", "status": "failure"},
                                              {"assertion": "fine", "scenario": "suite:two", "status": "pass"}])
         self.assertEqual(entries[0]["status"], "failure")
+
+    def test_platform_counterparts_keep_missing_work_pending_and_all_macos_proofs_required(self):
+        available = {name: {"platforms": platforms} for name, platforms in (
+            ("unix-one", ["darwin", "linux"]), ("unix-two", ["darwin", "linux"]),
+            ("windows", ["win32"]), ("unported", ["darwin", "linux"]))}
+        original = [{"id": "exact", "requirement": "required", "status": "pending",
+                     "suites": ["unix-one", "unix-two", "windows"]},
+                    {"id": "missing", "requirement": "required", "status": "pending", "suites": ["unported"]}]
+        windows = runner.platform_inventory(copy.deepcopy(original), available, "win32")
+        self.assertEqual(windows[0]["suites"], ["windows"])
+        self.assertEqual(windows[1]["suites"], [])
+        runner.apply_observations(windows, [{"assertion": "exact", "scenario": "suite:unix-one", "status": "pass"},
+                                           {"assertion": "missing", "scenario": "suite:unported", "status": "pass"}])
+        self.assertEqual([entry["status"] for entry in windows], ["pending", "pending"])
+        runner.apply_observations(windows, [{"assertion": "exact", "scenario": "suite:windows", "status": "pass"}])
+        self.assertEqual([entry["status"] for entry in windows], ["pass", "pending"])
+        macos = runner.platform_inventory(copy.deepcopy(original), available, "darwin")
+        self.assertEqual(macos[0]["suites"], ["unix-one", "unix-two"])
+        runner.apply_observations(macos, [{"assertion": "exact", "scenario": "suite:unix-one", "status": "pass"}])
+        self.assertEqual(macos[0]["status"], "pending")
+        runner.apply_observations(macos, [{"assertion": "exact", "scenario": "suite:unix-two", "status": "pass"}])
+        self.assertEqual(macos[0]["status"], "pass")
+
+    def test_remote_counterparts_preserve_exact_named_test_sets(self):
+        available = runner.suites()
+        pairs = [("windows-remote-c-formats", "config-c-reference"),
+                 ("windows-remote-c-unicode", "unicode-cells-c-reference")]
+        for windows_name, unix_name in pairs:
+            windows, unix = available[windows_name], available[unix_name]
+            self.assertEqual(windows["platforms"], ["win32"])
+            self.assertEqual(set(unix["platforms"]), {"darwin", "linux"})
+            original = {assertion["id"]: assertion["tests"] for assertion in unix["assertions"]}
+            for assertion in windows["assertions"]:
+                self.assertEqual(assertion["tests"], original[assertion["id"]])
+            output = "\n".join("test " + name + " ... ok" for assertion in windows["assertions"] for name in assertion["tests"])
+            self.assertTrue(all(value["status"] == "pass" for value in runner.suite_observations(windows, 0, output)[0]))
+            self.assertTrue(all(value["status"] == "failure" for value in runner.suite_observations(windows, 0, "running 0 tests\n")[0]))
+        self.assertIsNone(runner.suite_reference(available["windows-remote-c-formats"], {}))
 
     def test_gate_rederives_proofs_and_rejects_stale_reports(self):
         config = self.proof_config()
@@ -298,7 +336,8 @@ class InventoryTests(unittest.TestCase):
             runner.apply_observations(entries, [{"assertion": identifier, "scenario": "graph", "status": "pass"}])
 
     def test_smoke_evidence_covers_only_its_exact_assertion(self):
-        entries = runner.apply_observations(runner.inventory(), [{"assertion": "graph.create-split-rename", "scenario": "graph", "status": "pass"}])
+        entries = runner.platform_inventory(runner.inventory(), runner.suites(), "darwin")
+        runner.apply_observations(entries, [{"assertion": "graph.create-split-rename", "scenario": "graph", "status": "pass"}])
         by_id = {entry["id"]: entry for entry in entries}
         self.assertEqual(by_id["graph.create-split-rename"]["status"], "pass")
         self.assertEqual(by_id["scope:sessions-windows-targets:1"]["status"], "pending")
@@ -409,6 +448,178 @@ class InventoryTests(unittest.TestCase):
         output = "test windows_conpty::synchronized_redraws ... FAILED\ntest windows_conpty::synchronized_redraws ... ok\n"
         self.assertEqual(runner.suite_observations(suite, 0, output)[0][0]["status"], "failure")
 
+    def test_external_windows_json_requires_exact_names_cleanup_and_one_record(self):
+        suite = {"id": "native", "kind": "windows-native-views", "harness": "windows-external-json", "platforms": [sys.platform],
+                 "assertions": [{"id": "native", "tests": ["views::one", "views::two"]}]}
+        record = {"schema": 1, "kind": "windows-native-views", "passed": True, "tests": ["views::one", "views::two"],
+                  "failures": [], "cleanup_remaining": [], "gui_sha256": "a" * 64, "candidate_sha256": "b" * 64}
+        self.assertEqual(runner.suite_observations(suite, 0, json.dumps(record))[0][0]["status"], "pass")
+        self.assertEqual(runner.suite_observations(suite, 1, json.dumps(record))[0][0]["status"], "failure")
+        for change in [{"schema": True}, {"passed": 1}, {"kind": "windows-ssh"}, {"tests": []},
+                       {"tests": ["views::one"]}, {"tests": ["views::one", "views::two", "unrequested"]},
+                       {"tests": ["views::one", "views::two", "views::two"]}, {"tests": [1, "views::two"]},
+                       {"failures": ["failed"]}, {"cleanup_remaining": [123]}, {"cleanup_remaining": None},
+                       {"gui_sha256": "wrong"}, {"candidate_sha256": None}]:
+            with self.subTest(change=change):
+                self.assertEqual(runner.suite_observations(suite, 0, json.dumps(record | change))[0][0]["status"], "failure")
+        for output in ["", "test views::one ... ok\ntest views::two ... ok", "{broken}",
+                       json.dumps(record) + "\n" + json.dumps(record)]:
+            with self.subTest(output=output):
+                self.assertEqual(runner.suite_observations(suite, 0, output)[0][0]["status"], "failure")
+
+    def test_external_windows_suite_binds_report_file_and_executable_bytes(self):
+        suite = {"id": "native", "kind": "windows-native-views", "harness": "windows-external-json", "platforms": [sys.platform],
+                 "assertions": [{"id": "native", "tests": ["views::one"]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gui, binary = root / "gui.exe", root / "tmuxx.exe"
+            gui.write_bytes(b"gui")
+            binary.write_bytes(b"candidate")
+            identity = {"root": str(root), "sources": {"lib.rs": "source"}}
+            for failure in [None, "reported-hash", "changed-binary", "result-file"]:
+                binary.write_bytes(b"candidate")
+                def execute(command, **kwargs):
+                    record = {"schema": 1, "kind": "windows-native-views", "passed": True, "tests": ["views::one"],
+                              "failures": [], "cleanup_remaining": [], "gui_sha256": runner.digest(gui),
+                              "candidate_sha256": runner.digest(binary)}
+                    if failure == "reported-hash":
+                        record["candidate_sha256"] = "c" * 64
+                    if failure == "changed-binary":
+                        binary.write_bytes(b"replacement")
+                    report = Path(command[command.index("--report") + 1])
+                    report.write_text(json.dumps(record if failure != "result-file" else {}), encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0, json.dumps(record).encode(), b"")
+                with self.subTest(failure=failure), patch.dict(runner.os.environ, {"TMUXX_WINDOWS_GUI": str(gui)}), \
+                     patch.object(runner, "rustty_identity", return_value=identity), \
+                     patch.object(runner, "run_suite_process", side_effect=execute):
+                    observations, details = runner.run_suite(suite, None, candidate=str(binary))
+                    self.assertEqual(observations[0]["status"], "pass" if failure is None else "failure")
+                    if failure is None:
+                        self.assertEqual(details["native_binaries"]["candidate"]["sha256"], runner.digest(binary))
+                    else:
+                        self.assertIn("error", details)
+
+    def test_collection_freezes_candidate_and_revision_before_running_suites(self):
+        suite = {"id": "unit", "args": ["test"], "profiles": ["windows"], "platforms": [sys.platform],
+                 "assertions": [{"id": "unit.exact", "tests": ["one"]}]}
+        for change in (None, "candidate", "missing-candidate", "revision"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                binary = Path(directory) / "tmuxx.exe"
+                binary.write_bytes(b"original")
+                identity = {"path": str(binary), "sha256": runner.digest(binary), "version": "tmuxx 0.1.0"}
+                entries = [{"id": "unit.exact", "requirement": "required", "status": "pending", "suites": ["unit"]}]
+                events = []
+                def identify(path):
+                    events.append("identify")
+                    return identity
+                def execute(*args, **kwargs):
+                    self.assertEqual(events, ["identify"])
+                    events.append("execute")
+                    if change == "candidate":
+                        binary.write_bytes(b"replaced")
+                    elif change == "missing-candidate":
+                        binary.unlink()
+                    observations, _ = runner.suite_observations(suite, 0, "test one ... ok\n")
+                    return observations, {"status": 0, "stdout_base64": runner.b64(b"test one ... ok\n")}
+                args = SimpleNamespace(reference=None, older_reference=None, candidate=str(binary), candidate_kind="rust",
+                    suite=["unit"], no_smoke=True, scenario=None, report=str(Path(directory) / "report.json"))
+                with patch.object(runner, "suites", return_value={"unit": suite}), \
+                     patch.object(runner, "inventory", return_value=entries), \
+                     patch.object(runner, "implementation_fingerprint", return_value="sources"), \
+                     patch.object(runner, "source_revision", side_effect=["before", "after" if change == "revision" else "before"]), \
+                     patch.object(runner, "executable_identity", side_effect=identify), \
+                     patch.object(runner, "run_suite", side_effect=execute):
+                    self.assertEqual(runner.smoke(args), int(change is not None))
+                report = json.loads(Path(args.report).read_text())
+                self.assertEqual(report["candidate"], identity)
+                self.assertEqual(report["checkout_revision"], "before")
+                self.assertEqual(report["candidate_changed_during_run"], change in ("candidate", "missing-candidate"))
+                self.assertEqual(report["checkout_changed_during_run"], change == "revision")
+
+    def test_native_suite_rejects_replacement_before_executing_any_fixture(self):
+        suite = {"id": "native", "kind": "windows-native-views", "harness": "windows-external-json", "platforms": [sys.platform],
+                 "assertions": [{"id": "native", "tests": ["views::one"]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gui, candidate = root / "gui.exe", root / "candidate.exe"
+            gui.write_bytes(b"gui")
+            candidate.write_bytes(b"candidate")
+            identities = {name: {"path": str(path), "sha256": runner.digest(path)}
+                          for name, path in (("gui", gui), ("candidate", candidate))}
+            for name in ("candidate", "gui"):
+                frozen = copy.deepcopy(identities)
+                frozen[name]["sha256"] = "0" * 64
+                with self.subTest(name=name), patch.dict(runner.os.environ, {"TMUXX_WINDOWS_GUI": str(gui)}), \
+                     patch.object(runner, "rustty_identity", return_value={"root": str(root)}), \
+                     patch.object(runner, "run_suite_process") as execute:
+                    observations, details = runner.run_suite(suite, None, candidate=str(candidate),
+                        candidate_identity=frozen["candidate"], gui_identity=frozen["gui"])
+                    self.assertEqual(observations[0]["status"], "failure")
+                    self.assertIn(f"native {name} executable changed before", details["error"])
+                    execute.assert_not_called()
+
+    def test_native_gate_rechecks_gui_candidate_and_each_exact_result_file(self):
+        suites = {name: {"id": name, "kind": "windows-native-views", "harness": "windows-external-json", "platforms": ["win32"],
+                        "profiles": ["windows"], "assertions": [{"id": name + ".exact", "tests": ["views::one"]}]}
+                  for name in ("first", "second")}
+        entries = [{"id": name + ".exact", "profiles": ["windows"], "requirement": "required",
+                    "status": "pending", "suites": [name]} for name in suites]
+        config = {"profiles": {"windows": {"platforms": ["win32"]}}, "reference_revision": "baseline"}
+        changes = [None, "gui-bytes", "gui-missing", "candidate-bytes", "result-file", "result-missing",
+                   "recorded-result", "stdout-hash", "other-suite-candidate", "other-suite-gui",
+                   "missing-identities", "missing-frozen-gui", "candidate-changed-flag", "gui-changed-flag"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {name: root / (name + ".exe") for name in ("gui", "candidate", "other")}
+            for change in changes:
+                for name, path in paths.items():
+                    path.write_bytes(name.encode())
+                identities = {name: {"path": str(path), "sha256": runner.digest(path)} for name, path in paths.items()}
+                record = {"schema": 1, "kind": "windows-native-views", "passed": True, "tests": ["views::one"],
+                          "failures": [], "cleanup_remaining": [], "gui_sha256": identities["gui"]["sha256"],
+                          "candidate_sha256": identities["candidate"]["sha256"]}
+                details = {}
+                for name in suites:
+                    result_file = root / (name + ".json")
+                    result_file.write_text(json.dumps(record), encoding="utf-8")
+                    details[name] = {"platform": "win32", "reference": None, "status": 0, "stdout_base64": runner.b64(json.dumps(record).encode()),
+                                     "native_result": copy.deepcopy(record), "native_report": str(result_file),
+                                     "native_binaries": {key: copy.deepcopy(identities[key]) for key in ("gui", "candidate")}}
+                report = {"candidate_kind": "rust", "checkout_revision": "checkout", "reference_revision": "baseline",
+                    "manifest_sha256": runner.digest(runner.MANIFEST), "implementation_fingerprint": "sources", "platform": "win32", "host": {"platform": "win32"},
+                    "candidate": identities["candidate"], "native_gui": identities["gui"], "suites": details,
+                    "entries": [{**entry, "observation_results": {"suite:" + entry["suites"][0]: "pass"}} for entry in entries]}
+                if change == "gui-bytes": paths["gui"].write_bytes(b"replacement")
+                elif change == "gui-missing": paths["gui"].unlink()
+                elif change == "candidate-bytes": paths["candidate"].write_bytes(b"replacement")
+                elif change == "result-file": (root / "second.json").write_text("{}")
+                elif change == "result-missing": (root / "second.json").unlink()
+                elif change == "recorded-result": details["second"]["native_result"]["candidate_sha256"] = "0" * 64
+                elif change == "stdout-hash": details["second"]["stdout_base64"] = runner.b64(json.dumps(record | {"gui_sha256": "0" * 64}).encode())
+                elif change in ("other-suite-candidate", "other-suite-gui"):
+                    role = change.removeprefix("other-suite-")
+                    details["second"]["native_binaries"][role] = identities["other"]
+                    altered = record | {role + "_sha256": identities["other"]["sha256"]}
+                    details["second"]["native_result"] = altered
+                    details["second"]["stdout_base64"] = runner.b64(json.dumps(altered).encode())
+                    (root / "second.json").write_text(json.dumps(altered), encoding="utf-8")
+                elif change == "missing-identities": details["second"].pop("native_binaries")
+                elif change == "missing-frozen-gui": report.pop("native_gui")
+                elif change == "candidate-changed-flag": report["candidate_changed_during_run"] = True
+                elif change == "gui-changed-flag": report["native_gui_changed_during_run"] = True
+                with self.subTest(change=change), patch.object(runner, "suites", return_value=suites), \
+                     patch.object(runner, "inventory", side_effect=lambda *_: copy.deepcopy(entries)), \
+                     patch.object(runner, "source_revision", return_value="checkout"), \
+                     patch.object(runner, "implementation_fingerprint", return_value="sources"), \
+                     patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                    problems = runner.blockers(report, "windows", config)
+                    if change is None:
+                        self.assertEqual(problems, [])
+                    else:
+                        self.assertTrue(problems)
+                        if not change.endswith("-flag"):
+                            self.assertIn("second.exact: failure", problems)
+
     def test_source_ledger_handles_git_crlf_checkout_without_hiding_edits_or_binary_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -458,15 +669,19 @@ class PlatformEvidenceTests(unittest.TestCase):
 
     def test_platform_watchdogs_preserve_all_common_proof_members(self):
         by_platform = {target: {entry["id"]: entry for entry in runner.inventory(host_platform=target)}
-                       for target in ("darwin", "linux")}
+                       for target in ("darwin", "linux", "win32")}
         obligations = ["runtime.child-descendant-cleanup", "lifetime.owner-process-exit", "scope:process-lifecycle:1"]
         for obligation in obligations:
             with self.subTest(obligation=obligation):
                 mac = set(by_platform["darwin"][obligation]["proof"])
                 linux = set(by_platform["linux"][obligation]["proof"])
+                windows = set(by_platform["win32"][obligation]["proof"])
                 self.assertEqual(mac - linux, {"lifetime.macos-acknowledged-pty-owner-death"})
                 self.assertEqual(linux - mac, {"lifetime.linux-acknowledged-pty-owner-death"})
                 self.assertGreater(len(mac & linux), 3)
+                self.assertEqual(mac - windows, {"lifetime.macos-acknowledged-pty-owner-death"})
+                self.assertEqual(windows - mac, {"lifetime.windows-job-owner-death"})
+                self.assertEqual(mac & linux, linux & windows)
         self.assertEqual(by_platform["darwin"]["ipc.linux-ancillary-queues-eof-and-cloexec"]["status"], "not-applicable")
 
     def test_platform_proof_missing_empty_duplicate_or_wrong_target_fails_review(self):
@@ -479,11 +694,18 @@ class PlatformEvidenceTests(unittest.TestCase):
             {"darwin": ["lifetime.linux-acknowledged-pty-owner-death"], "linux": ["lifetime.linux-acknowledged-pty-owner-death"]},
             {"darwin": ["missing"], "linux": ["lifetime.linux-acknowledged-pty-owner-death"]},
         ]:
+            replacement["win32"] = ["lifetime.windows-job-owner-death"]
             with self.subTest(proof=replacement):
                 modified = copy.deepcopy(config)
                 next(item for item in modified["coverage"] if item["obligation"] == original["obligation"])["platform_assertions"] = replacement
                 with self.assertRaises(ValueError):
                     runner.inventory(modified, "linux")
+        for target in ("darwin", "linux", "win32"):
+            modified = copy.deepcopy(config)
+            mapping = next(item for item in modified["coverage"] if item["obligation"] == original["obligation"])["platform_assertions"]
+            del mapping[target]
+            with self.subTest(missing=target), self.assertRaises(ValueError):
+                runner.inventory(modified, target)
 
     def test_macos_test_transcript_cannot_certify_a_linux_desktop_requirement(self):
         suite = {"id": "desktop", "platforms": ["darwin"], "profiles": ["native-views"], "args": [],

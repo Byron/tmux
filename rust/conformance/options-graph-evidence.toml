@@ -2,6 +2,7 @@
 
 [[suites]]
 id = "input-keys-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "input_reference", "key_bytes_match_c_across_modes_modifiers_and_backspace_options", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -13,6 +14,7 @@ description = "Named/prefix/native key bytes match C under application cursor/ke
 
 [[suites]]
 id = "input-reset-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "input_reference", "send_keys_reset_clears_parser_screen_modes_and_palette_but_keeps_title", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -24,6 +26,7 @@ description = "C -R clears current screen, input parser and modes on main/altern
 
 [[suites]]
 id = "core-option-effects"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--lib", "options::tests::"]
 env = {}
@@ -40,6 +43,7 @@ description = "Unsupported option changes return explicit errors while preservin
 
 [[suites]]
 id = "options-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "options_reference", "contracts", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -51,6 +55,7 @@ description = "C executable agrees on scoped/inherited options, array append/del
 
 [[suites]]
 id = "options-head-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "options_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -112,6 +117,7 @@ description = "Both implementations reject numeric overflow, empty and malformed
 
 [[suites]]
 id = "graph-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "graph_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -183,6 +189,7 @@ description = "Current C top/bottom/left/right edge fields and unzoomed geometry
 
 [[suites]]
 id = "environment-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "environment_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -194,6 +201,7 @@ description = "C/R exact set/show observations cover isolated global/session val
 
 [[suites]]
 id = "owner-selection-alert-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--lib", "alerts::tests"]
 env = {}
@@ -205,6 +213,7 @@ description = "Native close and process exit clear the selected window's old bel
 
 [[suites]]
 id = "panes-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "panes_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -236,6 +245,7 @@ description = "Last-pane fallback, input toggles on the selected last pane, expa
 
 [[suites]]
 id = "runtime-pane-moves"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "pane_moves"]
 env = {}
@@ -247,6 +257,7 @@ description = "Real child PID survives pane moves and a zoomed native-view recon
 
 [[suites]]
 id = "format-context-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "formats_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}
@@ -288,6 +299,7 @@ description = "C pane C glob/regex/case-insensitive content search returns the f
 
 [[suites]]
 id = "titles-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--test", "titles_reference", "--", "--ignored", "--test-threads=1"]
 env = {TMUXX_C_TMUX = "$reference"}

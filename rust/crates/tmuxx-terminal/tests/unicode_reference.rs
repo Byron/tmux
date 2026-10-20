@@ -1,6 +1,10 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
+use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::{
-    collections::BTreeMap,
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
@@ -9,12 +13,18 @@ use std::{
 use tmuxx_terminal::{CaptureOptions, Terminal};
 
 struct Reference {
+    #[cfg(unix)]
     binary: PathBuf,
+    #[cfg(unix)]
     socket: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl Reference {
     fn new(columns: u16) -> Self {
+        #[cfg(unix)]
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        #[cfg(unix)]
         let reference = Self {
             binary: std::env::var_os("TMUXX_C_TMUX")
                 .expect("set TMUXX_C_TMUX")
@@ -24,6 +34,10 @@ impl Reference {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             )),
+        };
+        #[cfg(windows)]
+        let reference = Self {
+            remote: remote_reference::RemoteReference::new(),
         };
         reference.run(&[
             "new-session",
@@ -38,6 +52,7 @@ impl Reference {
         reference.run(&["resize-window", "-x", &columns.to_string(), "-y", "4"]);
         reference
     }
+    #[cfg(unix)]
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
         command
@@ -48,24 +63,39 @@ impl Reference {
         command
     }
     fn run(&self, args: &[&str]) -> Vec<u8> {
+        #[cfg(unix)]
         let output = self.command().args(args).output().unwrap();
+        #[cfg(windows)]
+        let output = self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        );
         assert!(output.status.success(), "{args:?}: {output:?}");
         output.stdout
     }
     fn feed(&self, bytes: &[u8]) {
-        let mut child = self
-            .command()
-            .args(["display-message", "-I"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(bytes).unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "{output:?}");
+        #[cfg(unix)]
+        {
+            let mut child = self
+                .command()
+                .args(["display-message", "-I"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(bytes).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+        #[cfg(windows)]
+        {
+            let output = self.remote.output(&[b"display-message", b"-I"], bytes);
+            assert!(output.status.success(), "{output:?}");
+        }
     }
 }
+#[cfg(unix)]
 impl Drop for Reference {
     fn drop(&mut self) {
         let _ = self.command().arg("kill-server").output();
@@ -83,7 +113,7 @@ fn content_cells(raw: &str) -> BTreeMap<&str, &str> {
 }
 
 #[test]
-#[ignore = "requires current C tmux Unicode input"]
+#[ignore = "requires current C tmux Unicode input; Windows needs TMUXX_REMOTE_C_CONFIG"]
 fn unicode_cells_cursor_and_snapshot_match_c() {
     let overflow = format!("u{}X", "\u{325}".repeat(16));
     for (columns, text) in [

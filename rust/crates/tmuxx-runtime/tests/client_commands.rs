@@ -1,15 +1,22 @@
-#![cfg(unix)]
+#[cfg(windows)]
+#[path = "client_commands/windows.rs"]
+mod windows;
+use std::time::Duration;
+#[cfg(unix)]
 use std::{
     io::{Read, Write},
     os::{fd::AsFd, unix::net::UnixStream},
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
 };
 use tmuxx_protocol::{Decoder, Event, Notification};
+#[cfg(unix)]
 use tmuxx_unix_ipc::{Connection, Identity, Schema, identify, msg, pack_argv};
+#[cfg(windows)]
+use windows::{Control, Pair};
 
+#[cfg(unix)]
 struct Control {
     _connection: Connection,
     input: UnixStream,
@@ -18,6 +25,7 @@ struct Control {
     notifications: Vec<Notification>,
     failed: bool,
 }
+#[cfg(unix)]
 impl Control {
     fn connect(path: &Path, pid: i32, session: &str) -> Self {
         let mut connection = Connection::new(
@@ -168,12 +176,14 @@ impl Control {
     }
 }
 
+#[cfg(unix)]
 struct Pair {
     binary: std::ffi::OsString,
     c: PathBuf,
     rust: PathBuf,
     _host: tmuxx_runtime::ServerHandle,
 }
+#[cfg(unix)]
 impl Pair {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -227,6 +237,7 @@ impl Pair {
         )
     }
 }
+#[cfg(unix)]
 impl Drop for Pair {
     fn drop(&mut self) {
         let _ = Command::new(&self.binary)

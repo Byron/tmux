@@ -2,6 +2,7 @@
 # different containment mechanism and are not certified by PTY session cleanup.
 [[suites]]
 id = "runtime-native-ui-policy"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "native_policy", "--", "--test-threads=1"]
 env = {}
@@ -18,6 +19,7 @@ description = "An attached control client receives explicit popup rejection, the
 
 [[suites]]
 id = "runtime-tilde-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "scheduler", "named_user_tilde", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -29,6 +31,7 @@ description = "C/R output agrees for named-account homes, empty/missing/configur
 
 [[suites]]
 id = "runtime-host-lifetimes"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["app-owned", "standalone", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "host"]
 env = {}
@@ -36,7 +39,7 @@ env = {}
 [[suites.assertions]]
 id = "runtime.pty-session-descendant-cleanup"
 tests = ["shutdown_terminates_pty_descendants_after_the_leader_exits"]
-description = "After the PTY leader exits, shutdown kills an orphaned child in another process group of the owned OS session even when it ignores SIGHUP; an independent host keeps the same live process."
+description = "After the PTY leader exits, shutdown reclaims its background descendant while an independent host retains the same live PID. Unix checks a same-session process group ignoring SIGHUP; Windows checks an owned Job Object process group ignoring console control signals through an exact process handle."
 
 [[suites.assertions]]
 id = "runtime.socket-client-admission-and-close"
@@ -46,15 +49,16 @@ description = "At most 128 simultaneous socket clients, including identification
 [[suites.assertions]]
 id = "runtime.native-endpoint-identity-and-version"
 tests = ["refuses_to_replace_existing_endpoint", "cleanup_does_not_remove_a_replacement_endpoint", "stale_owned_socket_is_recovered_but_regular_files_are_preserved", "second_endpoint_failure_removes_only_owned_bindings", "native_handshake_rejects_mismatched_versions_before_requests"]
-description = "Endpoint lifetime locks and inode checks protect live/replaced paths, stale sockets are recovered selectively, multi-endpoint failures roll back owned paths, and wrong native versions fail before mutation."
+description = "Unix lifetime locks and inode checks protect live/replaced paths and recover stale sockets selectively. Windows checks named-pipe kernel-handle lifetime, replacement-owner survival after old peers close, and preservation of rejected regular-file endpoints. Both preserve an existing owner after failed multi-endpoint setup and reject wrong versions before mutation."
 
 [[suites.assertions]]
 id = "runtime.native-snapshot-stream-and-recoverable-cap"
 tests = ["native_socket_streams_snapshots_and_cap_rejection_keeps_the_process"]
-description = "Negotiated real Unix sockets stream an atomic graph; a sixteen-byte server cap returns an explicit abort while the original PTY PID survives, and normal-budget reconnect retains that PID."
+description = "Negotiated real Unix sockets or Windows named pipes stream an atomic graph; a sixteen-byte server cap returns an explicit abort while the original PTY PID survives, and normal-budget reconnect retains that PID."
 
 [[suites]]
 id = "native-snapshot-owner-bounds"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["app-owned", "standalone", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "snapshots::"]
 env = {}
@@ -66,6 +70,7 @@ description = "A65MiB immutable snapshot does not trip the64MiB live-output queu
 
 [[suites]]
 id = "native-snapshot-framing"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["app-owned", "standalone", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-protocol", "--features", "native", "native::snapshot::tests"]
 env = {}
@@ -77,6 +82,7 @@ description = "Snapshot fragments stay below512KiB per wire record; only a valid
 
 [[suites]]
 id = "layout-legacy-floating-wire"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["system-client", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-layout", "--lib", "c37_floating_suffix_keeps_signed_geometry_and_z_without_duplicate_ids"]
 env = {}
@@ -89,6 +95,7 @@ description = "Exact C3.7c layout_dump wire examples (git tag 3.7c layout-custom
 
 [[suites]]
 id = "runtime-pty-ownership-reference"
+platforms = ["darwin", "linux"]
 profiles = ["app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "host", "pty_descendant_cleanup_difference_matches_c", "--", "--ignored", "--exact"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -100,6 +107,7 @@ description = "Both C references leave ignored-SIGHUP background-group and setsi
 
 [[suites]]
 id = "runtime-process-names-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "process_names", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -111,6 +119,7 @@ description = "OS foreground command/cwd and automatic-rename format follow real
 
 [[suites]]
 id = "runtime-session-lifecycle-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "lifecycle", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -142,6 +151,7 @@ description = "OSC133 prompt/start/end in one input chunk preserve C event order
 
 [[suites]]
 id = "runtime-format-jobs-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "standalone", "app-owned"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "format_jobs", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -153,6 +163,7 @@ description = "Persistent C/Rust clients observe immediate empty results, last-c
 
 [[suites]]
 id = "core-format-job-effects"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-core", "--lib", "format_jobs::tests::"]
 env = {}
@@ -164,6 +175,7 @@ description = "The core emits explicit job requests only when enabled, keeps res
 
 [[suites]]
 id = "runtime-identity-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "identity", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -185,6 +197,7 @@ description = "C client_written/client_discarded are absent without a client and
 
 [[suites]]
 id = "native-stream-consistency"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["app-owned", "standalone", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "native_stream_consistency", "--", "--test-threads=1"]
 env = {}
@@ -192,7 +205,7 @@ env = {}
 [[suites.assertions]]
 id = "native.atomic-live-snapshot-update-cut"
 tests = ["live_native_snapshot_has_one_cut_and_updates_follow_its_end"]
-description = "A real native socket stops after its first image snapshot chunk while the live owner changes output, alternate screen, size and window name. The old snapshot installs only at its end, newer output is delivered exactly once afterward, and the next complete snapshot has the new graph/screen state and a newer sequence."
+description = "A real native Unix socket or Windows pipe stops after its first image snapshot chunk while the live owner changes output, alternate screen, size and window name. The old snapshot installs only at its end, newer output is delivered exactly once afterward, and the next complete snapshot has the new graph/screen state and a newer sequence."
 
 [[suites.assertions]]
 id = "native.blocked-view-overflow-and-reconnect"
@@ -201,6 +214,7 @@ description = "A real PTY emits 20MiB while one native view stops reading. Only 
 
 [[suites]]
 id = "native-byte-backlog"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["app-owned", "standalone", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "snapshots::native_byte_backlog_disconnects_before_record_capacity", "--", "--exact"]
 env = {}
@@ -212,6 +226,7 @@ description = "With record capacity raised to 1024, 32768-byte pane output cross
 
 [[suites]]
 id = "client-command-flags-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "client_commands", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -263,6 +278,7 @@ description = "resize-window -a/-A and combined flags choose smallest/largest li
 
 [[suites]]
 id = "client-detach-delivery"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "control::tests::detach_drains_existing_output_before_closing_and_bounds_stalled_peers", "--", "--exact"]
 env = {}
@@ -274,6 +290,7 @@ description = "A full delivery channel retains existing output followed by the e
 
 [[suites]]
 id = "control-fifo-eof"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "unix_ipc::tests::silent_fifo_eof_closes_control_reader_and_restores_shared_flags", "--", "--exact"]
 env = {}
@@ -285,6 +302,7 @@ description = "A real FIFO held open without output keeps the reader alive; clos
 
 [[suites]]
 id = "runtime-endpoint-access"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["standalone", "app-owned", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "endpoint_access"]
 env = {}
@@ -292,10 +310,11 @@ env = {}
 [[suites.assertions]]
 id = "runtime.owner-private-sockets-and-lock-paths"
 tests = ["native_and_ipc_endpoints_are_owner_private_and_lock_symlinks_are_rejected"]
-description = "Both actual Unix endpoint types are owned by the current user with mode0600; newly created lock files exclude group/other access. A same-user native handshake succeeds, shutdown removes sockets, and a symlinked lock is rejected without modifying its target. Cross-UID socket admission remains guarded by OS peer credentials and is not simulated by this test."
+description = "Unix endpoint types have owner mode0600 and private locks. Windows inspects the actual pipe owner and protected single-account DACL, rejects a second owner, removes discovery on shutdown and assigns a new incarnation on replacement. Both perform a real handshake and preserve an unrelated target behind rejected filesystem/lock redirection; Windows explicitly rejects Unix IPC configuration. Cross-account and cross-logon admission has separate executable obligations."
 
 [[suites]]
 id = "native-file-type-policy"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "native_files"]
 env = {}
@@ -303,10 +322,11 @@ env = {}
 [[suites.assertions]]
 id = "difference.native-special-file-policy"
 tests = ["special_native_files_reject_without_blocking_owner_or_changing_buffers"]
-description = "Native load/save/source reject FIFOs, symlinks to FIFOs and non-null character devices before mutation; each rejection leaves buffers/PID intact and the owner responds. Regular files, symlinked regular files and /dev/null retain binary load/save/no-op behavior."
+description = "Native load/save/source reject Unix FIFOs or Windows named pipes, symlinks to those endpoints and non-null devices before mutation; each rejection leaves buffers/PID intact and the owner responds. Regular files and regular-file symlinks retain binary bytes. Unix /dev/null and Windows NUL (including admitted absolute spellings) retain no-op behavior; Windows reserved-device aliases are rejected and source enumeration never opens a pipe symlink."
 
 [[suites]]
 id = "native-diagnostic-byte-bounds"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "app-owned", "standalone"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "messages::tests::diagnostic_bounds_count_escaped_bytes_and_mark_truncation", "--", "--exact"]
 env = {}

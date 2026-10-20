@@ -14,6 +14,7 @@ description = "The explicitly selected and fingerprinted C3.7c binary passes all
 
 [[suites]]
 id = "ssh-c-3.7c-reference"
+platforms = ["darwin", "linux"]
 reference = "older"
 reference_version = "tmux 3.7c"
 profiles = ["system-client", "command-control"]
@@ -28,6 +29,7 @@ description = "A real isolated SSH server executes fingerprinted C3.7c; the Rust
 [[suites]]
 id = "rustty-system-ssh-3.7c"
 kind = "rustty-system-ssh"
+platforms = ["darwin", "linux"]
 reference = "older"
 reference_version = "tmux 3.7c"
 profiles = ["system-client", "native-views"]

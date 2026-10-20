@@ -33,11 +33,11 @@ def number(expression, macros, active=()):
 
 
 def read_entries(root=ROOT):
-    source = (root / "options-table.c").read_text()
-    header = (root / "tmux.h").read_text()
+    source = (root / "options-table.c").read_text(encoding="utf-8")
+    header = (root / "tmux.h").read_text(encoding="utf-8")
     macros = {"INT_MAX": "2147483647", "UINT_MAX": "4294967295",
               "SHRT_MAX": "32767", "USHRT_MAX": "65535"}
-    for data in (header, (root / "compat.h").read_text(), source):
+    for data in (header, (root / "compat.h").read_text(encoding="utf-8"), source):
         for name, value in re.findall(r"^#define\s+(\w+)[ \t]+([^\n]*)", data.replace("\\\n", ""), re.M):
             macros[name] = re.sub(r"/\*.*?\*/", "", value).strip()
     for body in re.findall(r"enum (?:box_lines|pane_lines) \{(.*?)\};", header, re.S):
@@ -135,7 +135,7 @@ def main():
     args = parser.parse_args()
     result = generate()
     if args.check:
-        if not OUTPUT.exists() or OUTPUT.read_text() != result:
+        if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != result:
             parser.exit(1, "C option metadata changed; regenerate and review schemas, defaults and parity coverage.\n")
     else:
         OUTPUT.write_text(result)

@@ -53,6 +53,11 @@ execution = "active"
 includes = ["command-control", "system-client", "native-views", "standalone", "app-owned"]
 reason = "Require fresh native Windows evidence for the shared command, protocol, terminal, view and lifetime contracts and all four Windows obligations."
 
+[applicability.unix-imsg]
+platforms = ["darwin", "linux"]
+assertions = ["ipc.four-command-control-pairings", "ipc.ordinary-tty-rejection-before-mutation", "ipc.identify-order-version-and-descriptor-rejection", "control.c-3.7c-command-control-pairings"]
+rationale = "These exact assertions exercise local C/Rust AF_UNIX imsg pairings, SCM_RIGHTS descriptor admission or ordinary tty identify rejection. The Windows product has no local C/Unix-imsg ABI; its account-private named-pipe and native stdio assertions remain required separately. Both supported real C SSH control versions and all shared command, protocol and terminal effects remain required. This prevents mixed suite profile labels from importing Unix-only transport obligations and preserves every original macOS proof member."
+
 [[exclusions]]
 id = "ordinary-tty-renderer"
 reason = "Ordinary ANSI terminal presentation is outside the requested product. Shared terminal state/input assertions remain required."
@@ -134,6 +139,26 @@ ids = ["ipc.four-command-control-pairings", "ipc.identify-fd-validation-ownershi
 [[requirements]]
 profiles = ["windows"]
 ids = ["windows.named-pipe-acl-desktop-ssh", "windows.bridge-no-duplicate-server", "windows.conpty-runtime-packaging", "windows.input-resize-descendant-lifetime"]
+
+[[coverage]]
+obligation = "windows.named-pipe-acl-desktop-ssh"
+assertions = ["windows.pipe-fragmentation-identity-and-bounds", "windows.real-unauthorized-and-network-denial", "windows.real-desktop-local-pipe-ssh-shared-graph", "windows.real-rustty-ssh-view-and-helper-lifetime", "windows.live-protocol-fragments-eof-and-incarnations"]
+rationale = "Require real account-token and local-only pipe checks, actual distinct-account denial, same-account desktop/OpenSSH access across logon sessions, shared live graph/PIDs, and stale/replacement identity behavior. Discovery names alone earn no authentication evidence."
+
+[[coverage]]
+obligation = "windows.bridge-no-duplicate-server"
+assertions = ["windows.live-native-bridge-shared-panes", "windows.live-protocol-fragments-eof-and-incarnations", "windows.real-ssh-bridge-shells-and-disconnect", "windows.real-desktop-local-pipe-ssh-shared-graph", "windows.real-rustty-ssh-view-and-helper-lifetime", "windows.desktop-external-shared-duplicate-links", "windows.desktop-standalone-retained-restart"]
+rationale = "Local binary stdio and real cmd/PowerShell OpenSSH bridges must select an existing desktop/standalone owner, preserve pane identity and shared/duplicate links, reject missing or replaced instances, and leave jobs alive across bridge/GUI restarts."
+
+[[coverage]]
+obligation = "windows.conpty-runtime-packaging"
+assertions = ["windows.conpty-resource-hashes-and-negative-initialization", "windows.owner-rejects-missing-incompatible-runtime", "windows.shipped-gui-and-owner-resource-negatives", "windows.conpty-synchronized-output-cursor-order", "windows.atomic-spawn-job-ownership"]
+rationale = "Require the shared initializer's exact pinned resource hashes, both real shipped executables and negative resource cases, actual bundled ConPTY redraw/cursor results, and atomic process ownership. Compilation or an in-box runtime cannot satisfy this proof."
+
+[[coverage]]
+obligation = "windows.input-resize-descendant-lifetime"
+assertions = ["windows.native-hwnd-keyboard-mouse-resize", "windows.native-clipboard-paste-and-fixture-cleanup", "windows.real-ime-preedit-commit-and-restoration", "windows.native-osc52-host-effect-and-query-once", "windows.atomic-spawn-job-ownership", "windows.desktop-app-owner-cleanup", "windows.desktop-standalone-retained-restart", "windows.conpty-synchronized-output-cursor-order", "windows.real-rustty-ssh-view-and-helper-lifetime"]
+rationale = "Require real native HWND keyboard/mouse/resize and bracketed paste, actual TSF preedit/commit into the original pane, elected native clipboard write/read with exactly-once pane replies and reconnect behavior, bundled ConPTY cursor ordering, atomic spawn-time ownership, both graceful and abrupt app-owner descendant cleanup with an unrelated survivor, and retained standalone GUI restart plus SSH-viewer lifetime. An IME capability probe, backend encoder, compile, or fixture cleanup alone cannot satisfy these complete executable members."
 
 [[assertions]]
 id = "graph.link-move-unlink"
@@ -351,7 +376,7 @@ rationale = "Every-byte/two-chunk fixtures cover UTF8, CSI, OSC/OSC8/OSC133, leg
 
 [[coverage]]
 obligation = "native.atomic-snapshot-and-update-cut"
-assertions = ["protocol.snapshot-atomicity-offsets-and-truncation", "native.atomic-live-snapshot-update-cut", "runtime.native-snapshot-stream-and-recoverable-cap", "runtime.snapshot-large-message-and-image-restore"]
+assertions = ["protocol.snapshot-atomicity-offsets-and-truncation", "native.atomic-live-snapshot-update-cut", "runtime.native-snapshot-stream-and-recoverable-cap", "runtime.snapshot-large-message-and-image-restore", "native.retained-agent-status-without-views"]
 rationale = "Native records install only at a validated end. Real socket updates produced while an image snapshot is partially read follow its old cut once; rejected/oversized/truncated snapshots preserve the live owner and permit bounded retry."
 
 [[coverage]]
@@ -392,18 +417,18 @@ rationale = "A live endpoint cannot be replaced, incompatible native hello versi
 [[coverage]]
 obligation = "runtime.child-descendant-cleanup"
 assertions = ["runtime.graceful-owner-drop", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary", "lifetime.abrupt-owner-pty-hangup"]
-platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"] }
-rationale = "Graceful shutdown reclaims jobs and all acknowledged PTY-session groups after leader exit; the selected platform owner SIGKILL watchdog handles ignored-SIGHUP foreground/background groups; Linux and macOS must execute their own exact watchdog assertion. Exact C/native fixtures retain the independently daemonized setsid ownership boundary. The macOS spawn/registration gap remains outside its acknowledged-process contract; the Linux broker owns children before exec and has separate failed-registration/lost-reply evidence."
+platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"], win32 = ["lifetime.windows-job-owner-death"] }
+rationale = "Graceful shutdown reclaims jobs and all acknowledged PTY-session groups after leader exit; the selected platform owner SIGKILL watchdog handles ignored-SIGHUP foreground/background groups; Linux and macOS must execute their own exact watchdog assertion; Windows must execute its exact Job Object owner-death assertion. Exact C/native fixtures retain the independently daemonized setsid ownership boundary. The macOS spawn/registration gap remains outside its acknowledged-process contract; the Linux broker owns children before exec and has separate failed-registration/lost-reply evidence."
 
 [[coverage]]
 obligation = "lifetime.owner-process-exit"
 assertions = ["runtime.graceful-owner-drop", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary", "lifetime.abrupt-owner-pty-hangup"]
-platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"] }
+platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"], win32 = ["lifetime.windows-job-owner-death"] }
 rationale = "Actual owner drop and SIGKILL remove acceptance and terminate acknowledged ordinary PTY/session jobs, including ignored-SIGHUP descendants after leader exit; a separately owned server remains alive. Deliberate setsid escape remains an explicit boundary. The macOS unacknowledged spawn/registration window remains unclaimed; Linux broker ownership begins before exec."
 
 [[coverage]]
 obligation = "lifetime.remote-loss-keeps-local-job"
-assertions = ["rustty.native-input-focus-host-effects-and-process-replacement", "native.blocked-view-overflow-and-reconnect", "runtime.pty-input-after-client-reconnect"]
+assertions = ["rustty.native-input-focus-host-effects-and-process-replacement", "native.blocked-view-overflow-and-reconnect", "runtime.pty-input-after-client-reconnect", "native.retained-agent-status-without-views"]
 rationale = "Actual Rustty embedded/local and Unix-connected remote Session views share a PTY; dropping the remote connection emits the final focus transition while the same local child accepts another key and emits END. Separately, blocked-view transport loss and socket reconnect keep healthy views and the same process. SSH is a byte transport over this owner-loss path, not a second process owner."
 
 # Further exact all-of proposals; image/native-view additions have targeted verification in progress.
@@ -440,7 +465,7 @@ rationale = "Actual native Session snapshots/updates preserve whole wide cells, 
 [[coverage]]
 obligation = "scope:process-lifecycle:1"
 assertions = ["runtime.failed-spawn-rollback", "process.empty-and-window-respawn", "process.c-empty-respawn-and-pipe", "control.c-process-exit-and-output-lifetimes", "process.c-live-stdin-and-cancellation", "process.c-stdin-shutdown-and-pane-wait", "command.background-branches-after-disconnect", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary"]
-platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"] }
+platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"], win32 = ["lifetime.windows-job-owner-death"] }
 rationale = "Real C/Rust process fixtures cover failed/empty spawn, respawn identity and environment, status versus signals, final output draining, stdin cancellation and pane-wait completion; disconnected callbacks cannot revive cancelled work. Graceful and abrupt acknowledged-process cleanup uses the separately tested PTY-session boundary, preserving independent setsid sessions."
 
 [[coverage]]

@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 tmuxx-command = { path = "../tmuxx-command" }
 tmuxx-format = { path = "../tmuxx-format" }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,4 +1,6 @@
-#![cfg(unix)]
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -14,6 +16,14 @@ struct Rust {
 }
 fn path() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(windows)]
+    return tmuxx_runtime::windows::endpoint(&format!(
+        "hooks-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    #[cfg(unix)]
     std::env::temp_dir().join(format!(
         "tx-hook-{}-{}",
         std::process::id(),
@@ -33,10 +43,14 @@ impl Commands for Rust {
     }
 }
 fn run_client(client: &LocalClient, args: &[&str]) -> (i32, Vec<u8>) {
+    #[cfg(unix)]
+    let argv = args.iter().map(|v| v.as_bytes().to_vec()).collect();
+    #[cfg(windows)]
+    let argv = fixture_argv(args);
     client
         .send(Request {
             request_id: 1,
-            argv: args.iter().map(|v| v.as_bytes().to_vec()).collect(),
+            argv,
             stdin: None,
             subscribe: false,
             control: false,
@@ -57,6 +71,39 @@ fn run_client(client: &LocalClient, args: &[&str]) -> (i32, Vec<u8>) {
         assert!(Instant::now() < deadline, "no reply to {args:?}");
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+#[cfg(windows)]
+fn fixture_argv(args: &[&str]) -> Vec<Vec<u8>> {
+    // These are the original test's passive and immediately exiting pane
+    // applications. Translate only these explicit process fixtures, retaining
+    // every command, target, hook source and observed output unchanged.
+    let mut values = args
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    if matches!(
+        args.first().copied(),
+        Some("new-session" | "new-window" | "neww" | "split-window")
+    ) {
+        let fixture = if args.ends_with(&["sleep", "30"]) {
+            Some((2, "import time; time.sleep(30)"))
+        } else if args.ends_with(&["sleep 30"]) {
+            Some((1, "import time; time.sleep(30)"))
+        } else if args.ends_with(&["/bin/sh", "-c", "exit 0"]) {
+            Some((3, "raise SystemExit(0)"))
+        } else {
+            None
+        };
+        if let Some((count, source)) = fixture {
+            values.truncate(values.len() - count);
+            values.extend([
+                std::env::var("TMUXX_REMOTE_PYTHON").unwrap_or_else(|_| "python".into()),
+                "-c".into(),
+                source.into(),
+            ]);
+        }
+    }
+    values.into_iter().map(String::into_bytes).collect()
 }
 fn good(server: &impl Commands, args: &[&str]) -> Vec<u8> {
     let (status, out) = server.run(args);
@@ -393,11 +440,20 @@ fn dead_object_hook_payloads_survive_removal_and_target_the_remaining_dead_pane(
 }
 
 struct C {
+    #[cfg(unix)]
     program: PathBuf,
+    #[cfg(unix)]
     socket: PathBuf,
+    #[cfg(windows)]
+    remote: remote_reference::RemoteReference,
 }
 impl C {
     fn new() -> Self {
+        #[cfg(windows)]
+        return Self {
+            remote: remote_reference::RemoteReference::new(),
+        };
+        #[cfg(unix)]
         Self {
             program: std::env::var_os("TMUXX_C_TMUX")
                 .expect("set TMUXX_C_TMUX")
@@ -408,30 +464,39 @@ impl C {
 }
 impl Commands for C {
     fn run(&self, args: &[&str]) -> (i32, Vec<u8>) {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new(&self.program)
-            .arg("-S")
-            .arg(&self.socket)
-            .args(["-f", "/dev/null"])
-            .args(args)
-            .env_remove("TMUX")
-            .env("SHELL", "/bin/sh")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                panic!("C command timeout {args:?}");
+        #[cfg(windows)]
+        let out = self.remote.output(
+            &args.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>(),
+            &[],
+        );
+        #[cfg(unix)]
+        let out = {
+            use std::process::{Command, Stdio};
+            let mut child = Command::new(&self.program)
+                .arg("-S")
+                .arg(&self.socket)
+                .args(["-f", "/dev/null"])
+                .args(args)
+                .env_remove("TMUX")
+                .env("SHELL", "/bin/sh")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    panic!("C command timeout {args:?}");
+                }
+                std::thread::sleep(Duration::from_millis(2));
             }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let out = child.wait_with_output().unwrap();
+            child.wait_with_output().unwrap()
+        };
         (out.status.code().unwrap_or(1), out.stdout)
     }
 }
+#[cfg(unix)]
 impl Drop for C {
     fn drop(&mut self) {
         let _ = self.run(&["kill-server"]);
@@ -991,10 +1056,13 @@ fn client_lifecycle_hooks_follow_control_attach_switch_resize_and_detach() {
 #[test]
 #[ignore = "requires separate C oracle in TMUXX_C_TMUX"]
 fn client_lifecycle_attach_switch_resize_detach_matches_c() {
+    #[cfg(unix)]
     use std::io::Write;
+    #[cfg(unix)]
     use std::process::{Command, Stdio};
     let server = C::new();
     client_hooks_setup(&server);
+    #[cfg(unix)]
     let mut child = Command::new(&server.program)
         .arg("-S")
         .arg(&server.socket)
@@ -1005,6 +1073,8 @@ fn client_lifecycle_attach_switch_resize_detach_matches_c() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    #[cfg(windows)]
+    let child = server.remote.control_open("main");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let log = value(&server, "@clients");
@@ -1020,25 +1090,40 @@ fn client_lifecycle_attach_switch_resize_detach_matches_c() {
             String::from_utf8_lossy(&log)
         );
     }
+    #[cfg(unix)]
     child
         .stdin
         .as_mut()
         .unwrap()
         .write_all(b"switch-client -t other\nrefresh-client -C 77,22\ndetach-client\n")
         .unwrap();
-    while child.try_wait().unwrap().is_none() {
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            panic!("control child timed out");
+    #[cfg(windows)]
+    {
+        let output =
+            child.write(b"switch-client -t other\nrefresh-client -C 77,22\ndetach-client\n");
+        assert!(output.status.success(), "{output:?}");
+        while child.exited().is_none() {
+            assert!(Instant::now() < deadline, "C control child timed out");
+            std::thread::sleep(Duration::from_millis(2));
         }
-        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(child.exited(), Some(0));
     }
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    #[cfg(unix)]
+    {
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("control child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let c = value(&server, "@clients");
     assert_eq!(
         String::from_utf8(rust_client_contract()).unwrap(),
@@ -1085,13 +1170,38 @@ fn readonly_attach_blocks_commands_and_input_until_switch_toggle() {
 }
 
 #[test]
+fn embedded_control_rejects_ambiguous_source_before_owner_mutation() {
+    let server = Rust::new();
+    good(&server, &["set", "-g", "@source-guard", "before"]);
+    let error = server
+        .client
+        .send_control(tmuxx_protocol::native::ControlRequest {
+            request_id: 93,
+            argv: vec![
+                b"set".to_vec(),
+                b"-g".to_vec(),
+                b"@source-guard".to_vec(),
+                b"argv".to_vec(),
+            ],
+            source: Some(b"set -g @source-guard source".to_vec()),
+            subscribe: false,
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(value(&server, "@source-guard"), b"before\n");
+}
+
+#[test]
 #[ignore = "requires current C oracle with client format loops"]
 fn client_format_loops_follow_attached_clients_and_preserve_target_defaults() {
+    #[cfg(unix)]
     use std::{
         io::Write,
         process::{Child, Command, Stdio},
     };
+    #[cfg(unix)]
     struct Controls(Vec<Child>);
+    #[cfg(unix)]
     impl Drop for Controls {
         fn drop(&mut self) {
             for child in &mut self.0 {
@@ -1105,9 +1215,13 @@ fn client_format_loops_follow_attached_clients_and_preserve_target_defaults() {
     setup(&rust);
     setup(&c);
     let clients = [rust.host.connect().unwrap(), rust.host.connect().unwrap()];
+    #[cfg(unix)]
     let mut controls = Controls(Vec::new());
+    #[cfg(windows)]
+    let mut controls = Vec::new();
     for (index, session) in ["main", "other"].into_iter().enumerate() {
         native_control(&clients[index], &["attach-session", "-t", session]);
+        #[cfg(unix)]
         controls.0.push(
             Command::new(&c.program)
                 .arg("-S")
@@ -1120,6 +1234,8 @@ fn client_format_loops_follow_attached_clients_and_preserve_target_defaults() {
                 .spawn()
                 .unwrap(),
         );
+        #[cfg(windows)]
+        controls.push(c.remote.control_open(session));
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while good(&c, &["list-clients", "-F", "#{client_session}"])
@@ -1145,14 +1261,23 @@ fn client_format_loops_follow_attached_clients_and_preserve_target_defaults() {
         assert_eq!(good(&rust, &args), good(&c, &args), "{format}");
     }
     native_control(&clients[0], &["detach-client"]);
+    #[cfg(unix)]
     controls.0[0]
         .stdin
         .as_mut()
         .unwrap()
         .write_all(b"detach-client\n")
         .unwrap();
+    #[cfg(windows)]
+    assert!(controls[0].write(b"detach-client\n").status.success());
     let deadline = Instant::now() + Duration::from_secs(5);
+    #[cfg(unix)]
     while controls.0[0].try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "C control client did not detach");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    #[cfg(windows)]
+    while controls[0].exited().is_none() {
         assert!(Instant::now() < deadline, "C control client did not detach");
         std::thread::sleep(Duration::from_millis(2));
     }

@@ -1,5 +1,9 @@
 //! Image admission is shared by all panes, matching the C server's global LRU.
+#[cfg(windows)]
+#[path = "../../../conformance/remote_reference.rs"]
+mod remote_reference;
 use serde_json::json;
+#[cfg(unix)]
 use std::{path::PathBuf, process::Command};
 use tmuxx_terminal::{Effect, ImageQuota, Terminal};
 fn control(control: &str, payload: &str) -> Vec<u8> {
@@ -12,33 +16,53 @@ fn place(id: u32) -> Vec<u8> {
     control(&format!("a=p,i={id},C=1"), "")
 }
 fn compare(name: &str, count: usize, bytes: usize, steps: Vec<(usize, Vec<u8>)>) {
-    let directory = PathBuf::from(format!(
-        "/tmp/txquota-fixture-{}-{name}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&directory).unwrap();
-    let fixture = directory.join("fixture.json");
-    let output = directory.join("result.json");
-    std::fs::write(&fixture,serde_json::to_vec(&json!({"count":count,"bytes":bytes,"steps":steps.iter().map(|(pane,feed)|json!({"pane":pane,"feed":feed})).collect::<Vec<_>>()})).unwrap()).unwrap();
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap()
-        .to_owned();
-    let status = Command::new("python3")
-        .arg("-B")
-        .arg(root.join("rust/conformance/image_quota.py"))
-        .arg(std::env::var_os("TMUXX_C_TMUX").expect("set TMUXX_C_TMUX"))
-        .arg(&fixture)
-        .arg(&output)
-        .status()
-        .unwrap();
-    assert!(
-        status.success(),
-        "C quota observation failed: {}",
-        fixture.display()
-    );
-    let expected: Vec<Vec<u8>> = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    #[cfg(windows)]
+    let (expected, fixture): (Vec<Vec<u8>>, String) = {
+        let remote = remote_reference::RemoteReference::new();
+        let output = remote.observe("image_quota", &serde_json::to_vec(&json!({"count":count,"bytes":bytes,"steps":steps.iter().map(|(pane,feed)|json!({"pane":pane,"feed":feed})).collect::<Vec<_>>()})).unwrap());
+        assert!(
+            output.status.success(),
+            "remote C quota observation failed: {output:?}"
+        );
+        (
+            serde_json::from_slice(&output.stdout).unwrap(),
+            format!("remote C quota fixture {name}"),
+        )
+    };
+    #[cfg(unix)]
+    let (expected, fixture, directory): (Vec<Vec<u8>>, String, PathBuf) = {
+        let directory = PathBuf::from(format!(
+            "/tmp/txquota-fixture-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let fixture = directory.join("fixture.json");
+        let output = directory.join("result.json");
+        std::fs::write(&fixture,serde_json::to_vec(&json!({"count":count,"bytes":bytes,"steps":steps.iter().map(|(pane,feed)|json!({"pane":pane,"feed":feed})).collect::<Vec<_>>()})).unwrap()).unwrap();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_owned();
+        let status = Command::new("python3")
+            .arg("-B")
+            .arg(root.join("rust/conformance/image_quota.py"))
+            .arg(std::env::var_os("TMUXX_C_TMUX").expect("set TMUXX_C_TMUX"))
+            .arg(&fixture)
+            .arg(&output)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "C quota observation failed: {}",
+            fixture.display()
+        );
+        (
+            serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap(),
+            fixture.display().to_string(),
+            directory,
+        )
+    };
     let quota = ImageQuota::default();
     quota.set_limits(count, bytes);
     let mut panes = [Terminal::new(40, 16, 2000), Terminal::new(40, 16, 2000)];
@@ -74,8 +98,9 @@ fn compare(name: &str, count: usize, bytes: usize, steps: Vec<(usize, Vec<u8>)>)
         failures.is_empty(),
         "{}; fixture {}",
         failures.join("\n"),
-        fixture.display()
+        fixture
     );
+    #[cfg(unix)]
     std::fs::remove_dir_all(directory).unwrap();
 }
 #[test]

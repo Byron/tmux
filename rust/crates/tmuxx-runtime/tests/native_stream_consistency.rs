@@ -1,22 +1,32 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
+#[cfg(windows)]
+#[path = "support/windows_fixture.rs"]
+mod windows_fixture;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as Stream;
 use std::{
     io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 use tmuxx_core::ClientContext;
 use tmuxx_protocol::native::{Hello, Request, Response, ServerMessage, SnapshotAssembler};
+#[cfg(windows)]
+use tmuxx_runtime::windows::PipeStream as Stream;
 use tmuxx_runtime::{LocalClient, Options, ServerHandle};
 
 fn host() -> (ServerHandle, PathBuf) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
+    let name = format!(
         "txstream-{}-{}.sock",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    );
+    #[cfg(unix)]
+    let path = std::env::temp_dir().join(name);
+    #[cfg(windows)]
+    let path = tmuxx_runtime::windows::endpoint(&name).unwrap();
     (tmuxx_runtime::start(Options::new(&path)).unwrap(), path)
 }
 fn receive<T>(client: &LocalClient, mut select: impl FnMut(ServerMessage) -> Option<T>) -> T {
@@ -39,9 +49,13 @@ fn receive<T>(client: &LocalClient, mut select: impl FnMut(ServerMessage) -> Opt
     }
 }
 fn request(argv: &[&str], stdin: Option<Vec<u8>>, subscribe: bool) -> Request {
+    #[cfg(unix)]
+    let args = argv.iter().map(|arg| arg.as_bytes().to_vec()).collect();
+    #[cfg(windows)]
+    let args = windows_fixture::argv(argv);
     Request {
         request_id: 1,
-        argv: argv.iter().map(|v| v.as_bytes().to_vec()).collect(),
+        argv: args,
         stdin,
         subscribe,
         control: false,
@@ -82,11 +96,11 @@ fn terminal(state: &serde_json::Value) -> tmuxx_terminal::Terminal {
         .restore()
         .unwrap()
 }
-fn write_record(stream: &mut UnixStream, value: &impl serde::Serialize) {
+fn write_record(stream: &mut Stream, value: &impl serde::Serialize) {
     serde_json::to_writer(&mut *stream, value).unwrap();
     stream.write_all(b"\n").unwrap();
 }
-fn read_record(reader: &mut BufReader<UnixStream>) -> ServerMessage {
+fn read_record(reader: &mut BufReader<Stream>) -> ServerMessage {
     let mut line = String::new();
     assert!(reader.read_line(&mut line).unwrap() > 0, "native EOF");
     serde_json::from_str(&line).unwrap()
@@ -110,7 +124,10 @@ fn live_native_snapshot_has_one_cut_and_updates_follow_its_end() {
         Some(format!("BEFORE\x1b_Ga=t,i=7,f=32,s=256,v=256;{pixels}\x1b\\").into_bytes()),
         false,
     );
-    let mut stream = UnixStream::connect(path).unwrap();
+    #[cfg(unix)]
+    let mut stream = Stream::connect(path).unwrap();
+    #[cfg(windows)]
+    let mut stream = tmuxx_runtime::windows::connect(&path).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();

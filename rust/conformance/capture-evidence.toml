@@ -1,6 +1,7 @@
 # These narrow byte comparisons do not certify the complete terminal profile.
 [[suites]]
 id = "capture-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "capture_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -62,6 +63,7 @@ description = "Independent C/native outcomes for an8-column tab narrowed to6 and
 
 [[suites]]
 id = "capture-contracts"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "capture_reference"]
 env = {}
@@ -88,6 +90,7 @@ description = "JSON/native restore at every byte of malformed UTF8, retained HT,
 
 [[suites]]
 id = "capture-raw-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "raw_capture_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -104,6 +107,7 @@ description = "Independent exact C/R examples expose actual native full row slot
 
 [[suites]]
 id = "unicode-cells-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-terminal", "--test", "unicode_reference", "--", "--ignored", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }

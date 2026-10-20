@@ -1,6 +1,7 @@
 # Exact assertions for C control subscriptions, flow and IPC flags.
 [[suites]]
 id = "control-unit"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["command-control", "native-views", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--lib", "control::tests"]
 env = {}
@@ -27,6 +28,7 @@ description = "Initial/changed/removed subscriptions and every index of a shared
 
 [[suites]]
 id = "control-c-reference"
+platforms = ["darwin", "linux"]
 profiles = ["command-control", "system-client", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "control_subscriptions_flags_sizes_and_flow_match_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -37,6 +39,7 @@ tests = ["control_subscriptions_flags_sizes_and_flow_match_c"]
 description = "Four C/Rust client/server pairings: exact subscription fields/order, flags, dimensions, extended output, no replay after pause/continue, read-only denial and wait-exit blank acknowledgement. C 3.7 in-guard flow records remain command bytes; newer C and Rust defer notifications."
 [[suites]]
 id = "window-size-policy-reference"
+platforms = ["darwin", "linux"]
 profiles = ["app-owned", "standalone", "unix-ipc", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "window_creation_policy_aggressive_resize_and_limits_match_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -48,6 +51,7 @@ description = "Live C clients compare creation print dimensions, latest-client s
 
 [[suites]]
 id = "control-color-reports-reference"
+platforms = ["darwin", "linux"]
 profiles = ["app-owned", "standalone", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "control_color_reports_query_precedence_and_lifetime_match_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -59,6 +63,7 @@ description = "Real C clients report OSC10/11 pane colors; live application repl
 
 [[suites]]
 id = "native-color-report-restore"
+platforms = ["darwin", "linux", "win32"]
 profiles = ["app-owned", "standalone", "native-views"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-runtime", "--test", "native_views", "native_reported_colors_are_query_only_and_survive_reconnect"]
 env = {}
@@ -70,6 +75,7 @@ description = "Native reports override color/theme queries without repainting co
 
 [[suites]]
 id = "process-formats-head-reference"
+platforms = ["darwin", "linux"]
 profiles = ["app-owned", "standalone", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "process_exit_signal_pipe_and_output_format_lifetimes_match_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }
@@ -81,6 +87,7 @@ description = "Real C clients compare exit 137 versus SIGKILL 9, raw status/sign
 
 [[suites]]
 id = "process-formats-supported-reference"
+platforms = ["darwin", "linux"]
 profiles = ["app-owned", "standalone", "unix-ipc"]
 args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "interoperability", "process_exit_signal_and_pipe_lifetimes_match_supported_c", "--", "--ignored", "--exact", "--test-threads=1"]
 env = { TMUXX_C_TMUX = "$reference" }

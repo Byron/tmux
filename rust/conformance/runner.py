@@ -24,6 +24,7 @@ import tomllib
 import generate_command_metadata
 import generate_option_metadata
 import generate_format_metadata
+import remote_c_evidence
 
 
 HERE = Path(__file__).resolve().parent
@@ -32,6 +33,7 @@ MANIFEST = HERE / "manifest.toml"
 SCOPE = HERE / "scope.json"
 RUSTTY_INTEGRATION = ROOT / "rust/integration/rustty"
 UNIX_PLATFORMS = ("darwin", "linux")
+WINDOWS_NATIVE_KINDS = ("windows-native-views", "windows-native-input", "windows-native-clipboard", "windows-native-ime", "windows-native-frame", "windows-lifetime", "windows-cli-state", "windows-system-c-views", "windows-ssh")
 
 
 def digest(path):
@@ -73,7 +75,7 @@ def rustty_identity():
     root = rustty_root()
     if not (root / "Cargo.toml").is_file():
         raise ValueError(f"Rustty checkout missing: {root}; set TMUXX_RUSTTY_ROOT to the integrated checkout")
-    integration = json.loads((RUSTTY_INTEGRATION / "manifest.json").read_text())
+    integration = json.loads((RUSTTY_INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     if revision != integration["base_revision"]:
         raise ValueError("Rustty base revision changed; review and regenerate the integration manifest")
@@ -95,7 +97,7 @@ def implementation_fingerprint():
     paths += [path for path in (ROOT / "rust/vendor").rglob("*") if path.is_file() and not {"target", ".git"}.intersection(path.parts)]
     paths += [ROOT / "rust/Cargo.toml", ROOT / "rust/Cargo.lock", SCOPE]
     paths += [path for path in (ROOT / "rust/windows").rglob("*") if path.is_file()]
-    paths += list(HERE.glob("*.toml")) + list(HERE.glob("*.py"))
+    paths += list(HERE.glob("*.toml")) + list(HERE.glob("*.py")) + list(HERE.glob("*.rs"))
     paths += [RUSTTY_INTEGRATION / name for name in ("manifest.json", "rustty.patch")]
     hasher = hashlib.sha256()
     for path in sorted(paths):
@@ -114,13 +116,13 @@ def implementation_fingerprint():
 
 
 def manifest():
-    return tomllib.loads(MANIFEST.read_text())
+    return tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
 def suites():
     found = {}
     for path in sorted(HERE.glob("*-evidence.toml")):
-        for suite in tomllib.loads(path.read_text())["suites"]:
+        for suite in tomllib.loads(path.read_text(encoding="utf-8"))["suites"]:
             identifier = suite["id"]
             if identifier in found:
                 raise ValueError(f"duplicate evidence suite: {identifier}")
@@ -141,11 +143,27 @@ def select_suites(requested, host_platform):
     """Keep unavailable executable obligations visible without running zero tests."""
     available = suites()
     selected = available if "all" in requested else {name: available[name] for name in requested}
+    config = manifest()
+    domains = {identifier: domain["platforms"] for domain in config.get("applicability", {}).values()
+               for identifier in domain.get("assertions", [])}
+
+    def applies(suite, assertion):
+        if host_platform not in assertion.get("platforms", domains.get(assertion["id"], [host_platform])):
+            return False
+        profiles = set(suite.get("profiles", []))
+        for profile, definition in config["profiles"].items():
+            if profiles.intersection(definition.get("includes", [])):
+                profiles.add(profile)
+        return any(host_platform in config["profiles"][profile]["platforms"] for profile in profiles)
+
+    counterparts = {assertion["id"] for suite in available.values() if host_platform in suite_platforms(suite)
+                    for assertion in suite["assertions"] if applies(suite, assertion)}
     runnable, blocked = {}, {}
     for name, suite in selected.items():
         if host_platform in suite_platforms(suite):
             runnable[name] = suite
-        elif any(host_platform in assertion.get("platforms", [host_platform]) for assertion in suite["assertions"]):
+        elif any(applies(suite, assertion) and ("all" not in requested or assertion["id"] not in counterparts)
+                 for assertion in suite["assertions"]):
             blocked[name] = {"status": "blocked", "platform": host_platform,
                              "execution_platforms": suite_platforms(suite), "completed_tests": {},
                              "reason": "Required client execution is unavailable on this host; supported desktop/client evidence remains required."}
@@ -185,11 +203,11 @@ def source_revision():
 
 
 def inventory(config=None, host_platform=None):
-    if generate_command_metadata.OUTPUT.read_text() != generate_command_metadata.generate():
+    if generate_command_metadata.OUTPUT.read_text(encoding="utf-8") != generate_command_metadata.generate():
         raise ValueError("C command metadata changed; regenerate and review metadata.rs and parity coverage")
-    if generate_format_metadata.OUTPUT.read_text() != generate_format_metadata.generate():
+    if generate_format_metadata.OUTPUT.read_text(encoding="utf-8") != generate_format_metadata.generate():
         raise ValueError("C format callbacks changed; regenerate and review format metadata and conformance")
-    if generate_option_metadata.OUTPUT.read_text() != generate_option_metadata.generate():
+    if generate_option_metadata.OUTPUT.read_text(encoding="utf-8") != generate_option_metadata.generate():
         raise ValueError("C option metadata changed; regenerate and review options_metadata.rs and parity coverage")
     config = config or manifest()
     host_platform = host_platform or sys.platform
@@ -234,6 +252,27 @@ def inventory(config=None, host_platform=None):
     identifiers = [entry["id"] for entry in entries]
     if len(identifiers) != len(set(identifiers)):
         raise ValueError("duplicate conformance assertion IDs")
+    domains = set()
+    for name, domain in config.get("applicability", {}).items():
+        platforms = domain.get("platforms", [])
+        if (not platforms or not set(platforms) <= config.get("platform_execution", {}).keys()
+                or not domain.get("rationale", "").strip()):
+            raise ValueError(f"invalid platform applicability domain: {name}")
+        for identifier in domain.get("assertions", []):
+            if identifier not in by_id or identifier in domains:
+                raise ValueError(f"unknown or duplicate platform applicability assertion: {identifier}")
+            by_id[identifier].update(platforms=platforms[:], platform_domain=name,
+                                     platform_rationale=domain["rationale"])
+            domains.add(identifier)
+    # An execution profile inherits obligations, never their previous evidence.
+    for profile, definition in config["profiles"].items():
+        shared = set(definition.get("includes", []))
+        if shared - config["profiles"].keys() or profile in shared:
+            raise ValueError(f"invalid shared profiles for {profile}")
+        for entry in entries:
+            if (shared.intersection(entry["profiles"])
+                    and (not entry.get("platforms") or set(definition["platforms"]).intersection(entry["platforms"]))):
+                entry["profiles"] = sorted(set(entry["profiles"]) | {profile})
     obligations = {identifier for group in config["requirements"] for identifier in group["ids"]}
     obligations.update(identifier for identifier in by_id if identifier.startswith("scope:"))
     covered = set()
@@ -268,14 +307,6 @@ def inventory(config=None, host_platform=None):
         covered.add(identifier)
     if any(source in covered for identifier in covered for source in by_id[identifier]["proof"]):
         raise ValueError("coverage proofs must be executable assertions, not other derived obligations")
-    # An execution profile inherits obligations, never their previous evidence.
-    for profile, definition in config["profiles"].items():
-        shared = set(definition.get("includes", []))
-        if shared - config["profiles"].keys() or profile in shared:
-            raise ValueError(f"invalid shared profiles for {profile}")
-        for entry in entries:
-            if shared.intersection(entry["profiles"]):
-                entry["profiles"] = sorted(set(entry["profiles"]) | {profile})
     for entry in entries:
         if host_platform not in entry.get("platforms", [host_platform]):
             entry["status"] = "not-applicable"
@@ -285,16 +316,16 @@ def inventory(config=None, host_platform=None):
 def discovered(config):
     regressions = {path.relative_to(ROOT).as_posix() for path in ROOT.glob(config["discovery"]["regressions"])}
     commands = {name for path in ROOT.glob(config["discovery"]["commands"])
-                for name in re.findall(r'\.name\s*=\s*"([^"]+)"', path.read_text())}
-    options = set(re.findall(r'\.name\s*=\s*"([^"]+)"', (ROOT / config["discovery"]["options"]).read_text()))
-    source = (ROOT / config["discovery"]["formats"]).read_text()
+                for name in re.findall(r'\.name\s*=\s*"([^"]+)"', path.read_text(encoding="utf-8"))}
+    options = set(re.findall(r'\.name\s*=\s*"([^"]+)"', (ROOT / config["discovery"]["options"]).read_text(encoding="utf-8")))
+    source = (ROOT / config["discovery"]["formats"]).read_text(encoding="utf-8")
     table = source.split("static const struct format_table_entry format_table[] = {", 1)[1].split("\n};", 1)[0]
     formats = set(re.findall(r'\{\s*"([^"]+)"\s*,\s*FORMAT_TABLE_', table))
     return dict(regressions=regressions, commands=commands, options=options, formats=formats)
 
 
 def scope_inventory(config):
-    scope = json.loads(SCOPE.read_text())
+    scope = json.loads(SCOPE.read_text(encoding="utf-8"))
     found = discovered(config)
     mapped = {kind: set() for kind in found}
     entries = []
@@ -321,7 +352,7 @@ def scope_inventory(config):
                             "reason": "New or removed upstream surface needs explicit assertion disposition."})
     paths = {path.relative_to(ROOT).as_posix() for path in (ROOT / "regress").rglob("*") if path.is_file()}
     paths |= {path.relative_to(ROOT).as_posix() for path in ROOT.glob(config["discovery"]["commands"])
-              if re.search(r'\.name\s*=', path.read_text())}
+              if re.search(r'\.name\s*=', path.read_text(encoding="utf-8"))}
     paths |= {config["discovery"]["options"], config["discovery"]["formats"]}
     tracked = subprocess.check_output(
         ["git", "ls-files", "-z", "--", "*.c", "*.h", "*.y", "*.l", "*.ac", "*.am"], cwd=ROOT)
@@ -363,6 +394,32 @@ def apply_observations(entries, observations):
     return entries
 
 
+def platform_inventory(entries, available, evidence_platform):
+    """Choose executable counterparts without removing any required assertion."""
+    for entry in entries:
+        entry["applicable"] = not entry.get("platforms") or evidence_platform in entry["platforms"]
+        declared = entry.get("suites", [])
+        entry["declared_suites"] = declared[:]
+        entry["suites"] = [name for name in declared if evidence_platform in suite_platforms(available[name])]
+        counterparts = [assertion.get("scenario_counterpart") for name in entry["suites"]
+                        for assertion in available[name].get("assertions", []) if assertion["id"] == entry["id"]
+                        and assertion.get("scenario_counterpart")]
+        if counterparts:
+            if not entry.get("scenario") or any(name != entry["scenario"] for name in counterparts):
+                raise ValueError("scenario counterpart must name its exact original scenario")
+            entry["declared_scenario"] = entry.pop("scenario")
+    by_id = {entry["id"]: entry for entry in entries}
+    for entry in entries:
+        if "proof" in entry:
+            entry["declared_proof"] = entry["proof"][:]
+            # Only explicitly reviewed transport domains remove a common proof
+            # member. Platform owner-death variants were selected in inventory;
+            # an inapplicable common member must not silently weaken ALL-of.
+            entry["proof"] = [identifier for identifier in entry["proof"]
+                              if by_id[identifier]["applicable"] or not by_id[identifier].get("platform_domain")]
+    return entries
+
+
 def derive_statuses(entries):
     """Require every declared executable source, then every reviewed proof member."""
     by_id = {entry["id"]: entry for entry in entries}
@@ -374,10 +431,12 @@ def derive_statuses(entries):
         required = {"suite:" + suite for suite in entry.get("suites", [])}
         if entry.get("scenario"):
             required.add(entry["scenario"])
-        entry["status"] = "failure" if "failure" in results.values() else (
+        applicable_results = [status for source, status in results.items()
+                              if not source.startswith("suite:") or source in required]
+        entry["status"] = "failure" if "failure" in applicable_results else (
             "pass" if required and all(results.get(source) in passing for source in required) else "pending")
     for entry in entries:
-        if "proof" not in entry or entry["status"] == "deferred":
+        if "proof" not in entry or entry["status"] in ("deferred", "not-applicable"):
             continue
         statuses = [by_id.get(source, {}).get("status") for source in entry["proof"]]
         entry["status"] = "failure" if "failure" in statuses else (
@@ -646,6 +705,10 @@ def executable_identity(path):
 
 
 def suite_reference(suite, references):
+    if suite.get("kind") in ("remote-c-cargo", "remote-c-scenarios", "windows-system-c-views"):
+        if "$reference" in suite.get("env", {}).values() or not suite.get("reference_version"):
+            raise ValueError(f"{suite['id']} needs a pinned remote reference, never a local $reference")
+        return None
     needs_reference = ("$reference" in suite.get("env", {}).values()
                        or suite.get("reference_version") or suite.get("kind") == "rustty-system-ssh")
     role = suite.get("reference", "current" if needs_reference else "none")
@@ -668,8 +731,11 @@ def suite_reference(suite, references):
 
 def suite_observations(suite, returncode, output):
     harness = suite.get("harness", "libtest")
-    if harness == "rustty-windows-conpty":
-        manifest = json.loads((ROOT / "rust/windows/conpty.json").read_text())
+    if harness == "windows-external-json":
+        value = windows_external_record(suite, output)
+        records = [(name, "ok") for name in value["tests"]] if value else []
+    elif harness == "rustty-windows-conpty":
+        manifest = json.loads((ROOT / "rust/windows/conpty.json").read_text(encoding="utf-8"))
         hashes = {file["name"]: file["sha256"] for file in manifest["files"]}
         expected = {"suite": "windows_conpty", "status": "passed", "completed_redraws": 8,
                     "byte_boundary_cursor_ordering": True, "version": manifest["version"],
@@ -699,6 +765,73 @@ def suite_observations(suite, returncode, output):
         passed = returncode == 0 and all(completed.get(name) == "ok" for name in assertion["tests"])
         observations.append({"assertion": assertion["id"], "scenario": "suite:" + suite["id"], "status": "pass" if passed else "failure"})
     return observations, completed
+
+
+def windows_external_record(suite, output):
+    """Only one complete, exact native fixture result can establish evidence."""
+    try:
+        records = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+    except ValueError:
+        return None
+    if len(records) != 1 or not isinstance(records[0], dict):
+        return None
+    value = records[0]
+    expected = {name for assertion in suite["assertions"] for name in assertion["tests"]}
+    tests = value.get("tests")
+    if (type(value.get("schema")) is not int or value["schema"] != 1
+            or value.get("kind") != suite.get("kind") or value.get("passed") is not True
+            or type(value.get("failures")) is not list or value["failures"]
+            or type(value.get("cleanup_remaining")) is not list or value["cleanup_remaining"]
+            or not isinstance(tests, list) or not all(isinstance(name, str) for name in tests)
+            or len(tests) != len(set(tests)) or set(tests) != expected
+            or not all(isinstance(value.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", value[key])
+                       for key in (("candidate_sha256",) if suite.get("kind") == "remote-c-scenarios"
+                                   else ("candidate_sha256", "gui_sha256")))):
+        return None
+    return value
+
+
+def same_executable(left, right):
+    return (isinstance(left, dict) and isinstance(right, dict)
+            and isinstance(left.get("path"), str) and isinstance(right.get("path"), str)
+            and Path(left["path"]).resolve() == Path(right["path"]).resolve()
+            and left.get("sha256") == right.get("sha256"))
+
+
+def executable_unchanged(identity):
+    try:
+        return (isinstance(identity, dict) and isinstance(identity.get("path"), str)
+                and Path(identity["path"]).is_file() and digest(identity["path"]) == identity.get("sha256"))
+    except OSError:
+        return False
+
+
+def validate_native_evidence(suite, details, candidate, gui):
+    """Bind replayed native results to the same files frozen before collection."""
+    output = base64.b64decode(details.get("stdout_base64", ""), validate=True).decode("utf-8", "replace")
+    value = windows_external_record(suite, output)
+    if value is None or value != details.get("native_result"):
+        raise ValueError(f"{suite['id']} lacks its exact native completion record")
+    report = details.get("native_report")
+    if (not isinstance(report, str) or not Path(report).is_file()
+            or json.loads(Path(report).read_text(encoding="utf-8")) != value):
+        raise ValueError(f"{suite['id']} native result file is missing or changed")
+    binaries = details.get("native_binaries")
+    expected = {"candidate": candidate} if suite.get("kind") == "remote-c-scenarios" else {"candidate": candidate, "gui": gui}
+    if not isinstance(binaries, dict) or set(binaries) != set(expected):
+        raise ValueError(f"{suite['id']} lacks its native executable identities")
+    for name, frozen in expected.items():
+        identity = binaries[name]
+        if (not same_executable(identity, frozen) or not executable_unchanged(identity)
+                or value[name + "_sha256"] != identity.get("sha256")):
+            raise ValueError(f"{suite['id']} native {name} executable differs from the frozen collection identity")
+    if suite.get("kind") == "windows-system-c-views":
+        files = value.get("system_ssh_files")
+        if not isinstance(files, dict) or set(files) != {"config", "key", "known_hosts"}:
+            raise ValueError("system-C desktop evidence lacks exact restricted SSH fixture identities")
+        if not all(executable_unchanged(identity) for identity in files.values()):
+            raise ValueError("system-C desktop SSH configuration or credentials changed since collection")
+    return value
 
 
 SUITE_OWNER_ENV = "TMUXX_CONFORMANCE_OWNER_TOKEN"
@@ -841,7 +974,7 @@ def stop_suite_session(process):
 class WindowsSuiteJob:
     """Kill-on-close ownership established before the worker starts any tests."""
 
-    def __init__(self):
+    def __init__(self, *, allow_breakaway=False):
         import ctypes
         from ctypes import wintypes
 
@@ -872,6 +1005,11 @@ class WindowsSuiteJob:
             raise ctypes.WinError(ctypes.get_last_error())
         limits = ExtendedLimits()
         limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if allow_breakaway:
+            # Only the IME fixture's independent, bounded restoration watchdog
+            # explicitly requests breakaway. Product and ordinary suite jobs
+            # retain their normal non-breakaway ownership.
+            limits.BasicLimitInformation.LimitFlags |= 0x800
         if not self.api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
             error = ctypes.WinError(ctypes.get_last_error())
             self.close()
@@ -893,8 +1031,8 @@ class WindowsSuiteJob:
             self.handle = None
 
 
-def run_suite_process(command, *, cwd, env, timeout):
-    job = WindowsSuiteJob() if os.name == "nt" else None
+def run_suite_process(command, *, cwd, env, timeout, allow_breakaway=False):
+    job = WindowsSuiteJob(allow_breakaway=allow_breakaway) if os.name == "nt" else None
     owner_token = secrets.token_hex(32)
     process = None
     try:
@@ -948,19 +1086,26 @@ def run_suite_process(command, *, cwd, env, timeout):
                     stream.close()
 
 
-def run_suite(suite, reference):
-    command = ["cargo", *suite["args"]]
+def run_suite(suite, reference, candidate=None, candidate_identity=None, gui_identity=None):
+    command = ["cargo", *suite.get("args", [])]
     cwd = ROOT / "rust"
     env = os.environ.copy()
     env.update({key: str(reference) if value == "$reference" else value for key, value in suite.get("env", {}).items()})
     env["CARGO_TERM_COLOR"] = "never"
+    if sys.platform == "win32":
+        # Native fixture PIDs and cwd belong to the interpreter, not a launcher
+        # shim which may create it from a different working directory.
+        env.setdefault("TMUXX_REMOTE_PYTHON", sys.executable)
     try:
         if sys.platform not in suite_platforms(suite):
             raise ValueError(f"suite {suite['id']} requires execution on {suite_platforms(suite)}, not {sys.platform}")
         if reference is None and "$reference" in suite.get("env", {}).values():
             raise ValueError(f"{suite['id']} needs an explicit C reference")
         external = None
-        if suite.get("kind") in ("rustty-cargo", "rustty-system-ssh", "rustty-desktop-smoke"):
+        remote_reference = None
+        native_binaries = None
+        native_report = None
+        if suite.get("kind") in ("rustty-cargo", "rustty-system-ssh", "rustty-desktop-smoke", *WINDOWS_NATIVE_KINDS):
             external = rustty_identity()
             cwd = Path(external["root"])
             if sys.platform == "win32":
@@ -969,18 +1114,104 @@ def run_suite(suite, reference):
                 command = [sys.executable, str(HERE / "rustty_system_ssh.py"), "--rustty", str(cwd), "--reference", str(reference)]
             elif suite["kind"] == "rustty-desktop-smoke":
                 command = [sys.executable, str(HERE / "rustty_desktop_smoke.py"), "--rustty", str(cwd)]
+            elif suite["kind"] in WINDOWS_NATIVE_KINDS:
+                gui = Path(env.get("TMUXX_WINDOWS_GUI", cwd / "target/debug/Rustty/rustty.exe")).resolve(strict=True)
+                executable = Path(candidate or env.get("TMUXX_WINDOWS_CANDIDATE", ROOT / "rust/target/debug/tmuxx/tmuxx.exe")).resolve(strict=True)
+                native_binaries = {"gui": {"path": str(gui), "sha256": digest(gui)},
+                                   "candidate": {"path": str(executable), "sha256": digest(executable)}}
+                for name, frozen in (("candidate", candidate_identity), ("gui", gui_identity)):
+                    if frozen is not None and not same_executable(native_binaries[name], frozen):
+                        raise ValueError(f"native {name} executable changed before suite execution")
+                native_report = Path(tempfile.mkdtemp(prefix="tmuxx-windows-evidence-")) / "result.json"
+                if suite["kind"] in ("windows-native-views", "windows-native-input", "windows-native-clipboard", "windows-native-ime", "windows-native-frame", "windows-lifetime", "windows-cli-state", "windows-system-c-views"):
+                    script = suite["kind"].replace("-", "_") + ".py"
+                    if suite["kind"] == "windows-native-ime" and env.get("TMUXX_WINDOWS_IME_PROFILE") != "temporary-japanese":
+                        raise ValueError("Windows IME desktop prerequisite missing: TMUXX_WINDOWS_IME_PROFILE=temporary-japanese")
+                    if suite["kind"] == "windows-system-c-views":
+                        for name in ("TMUXX_SYSTEM_C_SSH_CONFIG", "TMUXX_SYSTEM_C_SSH_HOST", "TMUXX_SYSTEM_C_SELECTION"):
+                            if not env.get(name):
+                                raise ValueError("Windows system-C desktop prerequisite missing: " + name)
+                        remote_reference = remote_c_evidence.identity(suite, run_suite_process)
+                        env.update(TMUXX_REMOTE_C_CONFIG=remote_reference["config"]["path"],
+                                   TMUXX_REMOTE_PYTHON=sys.executable, TZ="UTC", LC_ALL="C.UTF-8")
+                    command = [sys.executable, str(HERE / script), "--gui", str(gui),
+                               "--candidate", str(executable), "--report", str(native_report), *suite.get("args", [])]
+                else:
+                    required = {"TMUXX_WINDOWS_SSH_KEY": "--key", "TMUXX_WINDOWS_SSH_KNOWN_HOSTS": "--known-hosts",
+                                "TMUXX_WINDOWS_SSH_HOST": "--host", "TMUXX_WINDOWS_SSH_VIEWER_KEY": "--viewer-key",
+                                "TMUXX_WINDOWS_SSH_VIEWER_BRIDGE": "--viewer-bridge"}
+                    for name in required:
+                        if not env.get(name):
+                            raise ValueError(f"Windows cross-logon desktop prerequisite missing: {name}")
+                    observer = env.get("TMUXX_WINDOWS_SSH_OBSERVER", str(native_report.with_name("observer.json")))
+                    command = [sys.executable, str(HERE / "windows_ssh.py"), "--tmuxx", str(executable),
+                               "--gui", str(gui), "--observer", observer, "--report", str(native_report)]
+                    for name, argument in required.items():
+                        command += [argument, env[name]]
+                    for name, argument in {"TMUXX_WINDOWS_SSH_EXE": "--ssh",
+                                           "TMUXX_WINDOWS_SSH_DENIAL_DIRECTORY": "--denial-directory"}.items():
+                        if env.get(name):
+                            command += [argument, env[name]]
+                    command += suite.get("args", [])
+        elif suite.get("kind") in ("remote-c-cargo", "remote-c-scenarios"):
+            remote_reference = remote_c_evidence.identity(suite, run_suite_process)
+            env["TMUXX_REMOTE_C_CONFIG"] = remote_reference["config"]["path"]
+            env["TMUXX_REMOTE_PYTHON"] = sys.executable
+            env["TZ"] = "UTC"
+            env["LC_ALL"] = "C.UTF-8"
+            if suite.get("raw_system_ssh"):
+                system = remote_reference["system_ssh"]
+                env.update(TMUXX_SYSTEM_C_SSH=system["ssh"]["path"],
+                           TMUXX_SYSTEM_C_SSH_CONFIG=system["config"]["path"], TMUXX_SYSTEM_C_SSH_HOST=system["host"])
+                if not env.get("TMUXX_SYSTEM_C_SELECTION"):
+                    raise ValueError("raw C SSH requires private TMUXX_SYSTEM_C_SELECTION")
+            if suite["kind"] == "remote-c-scenarios":
+                executable = Path(candidate or env.get("TMUXX_WINDOWS_CANDIDATE", ROOT / "rust/target/debug/tmuxx/tmuxx.exe")).resolve(strict=True)
+                native_binaries = {"candidate": {"path": str(executable), "sha256": digest(executable)}}
+                if candidate_identity is not None and not same_executable(native_binaries["candidate"], candidate_identity):
+                    raise ValueError("native scenario candidate changed before execution")
+                native_report = Path(tempfile.mkdtemp(prefix="tmuxx-windows-scenarios-")) / "result.json"
+                command = [sys.executable, str(HERE / "windows_scenarios.py"), "--candidate", str(executable),
+                           "--config", remote_reference["config"]["path"], "--report", str(native_report)]
         elif suite.get("kind", "cargo") != "cargo":
             raise ValueError(f"unknown suite kind: {suite['kind']}")
-        result = run_suite_process(command, cwd=cwd, env=env, timeout=suite.get("timeout", 300))
+        result = run_suite_process(command, cwd=cwd, env=env, timeout=suite.get("timeout", 300),
+                                   allow_breakaway=suite.get("kind") == "windows-native-ime")
         output = result.stdout.decode("utf-8", "replace")
         observations, completed = suite_observations(suite, result.returncode, output)
         recorded_env = set(suite.get("env", {})) | ({"TMUXX_CONPTY_RESOURCES"} if "TMUXX_CONPTY_RESOURCES" in env else set())
+        if suite.get("kind") == "windows-ssh":
+            recorded_env |= {name for name in env if name.startswith("TMUXX_WINDOWS_SSH_")}
+        if suite.get("kind") == "windows-native-ime":
+            recorded_env.add("TMUXX_WINDOWS_IME_PROFILE")
+        if suite.get("kind") == "windows-system-c-views" or suite.get("raw_system_ssh"):
+            recorded_env |= {name for name in env if name.startswith("TMUXX_SYSTEM_C_")}
         details = {"argv": command, "cwd": str(cwd), "env": {key: env[key] for key in sorted(recorded_env)}, "status": result.returncode,
                    "stdout_base64": b64(result.stdout), "stderr_base64": b64(result.stderr), "completed_tests": completed}
+        if native_binaries:
+            value = windows_external_record(suite, output)
+            if value:
+                if not native_report.is_file() or json.loads(native_report.read_text(encoding="utf-8")) != value:
+                    raise ValueError("native fixture result file does not match its completion record")
+                for name, identity in native_binaries.items():
+                    if value[name + "_sha256"] != identity["sha256"] or digest(identity["path"]) != identity["sha256"]:
+                        raise ValueError(f"native fixture {name} executable changed or result hash mismatches")
+                details["native_result"] = value
+            details["native_binaries"] = native_binaries
+            details["native_report"] = str(native_report)
         if external:
             details["rustty"] = external
             if external != rustty_identity():
                 raise ValueError("Rustty sources changed during suite execution")
+        if remote_reference:
+            details["remote_reference"] = remote_reference
+            details["env"].update({key: env[key] for key in ("TMUXX_REMOTE_C_CONFIG", "TMUXX_REMOTE_PYTHON", "TZ", "LC_ALL")})
+            try:
+                details["remote_fixtures"] = remote_c_evidence.fixtures(suite, result.stderr.decode("utf-8", "replace"), remote_reference)
+                remote_c_evidence.verify(suite, details, run_suite_process)
+            except (ValueError, TypeError, OSError, subprocess.SubprocessError) as error:
+                observations, _ = suite_observations(suite, -1, "")
+                details.update(status=-1, error=str(error))
     except subprocess.TimeoutExpired as error:
         stdout, stderr = error.output or b"", error.stderr or b""
         observations, completed = suite_observations(suite, -1, stdout.decode("utf-8", "replace"))
@@ -997,6 +1228,7 @@ def run_suite(suite, reference):
 def smoke(args):
     config = manifest()
     fingerprint = implementation_fingerprint()
+    revision = source_revision()
     if not args.no_smoke and not args.reference:
         raise ValueError("C/R smoke scenarios require --reference; use --no-smoke for native suites")
     reference = executable_identity(args.reference) if args.reference else None
@@ -1006,6 +1238,9 @@ def smoke(args):
     if older and not older["version"].startswith("tmux "):
         raise ValueError("older reference must identify as C tmux")
     references = {"current": reference, "older": older}
+    candidate = executable_identity(args.candidate)
+    if args.candidate_kind == "rust" and not candidate["version"].startswith("tmuxx "):
+        raise ValueError("Rust candidate must identify as tmuxx; refusing accidental C/C evidence")
     observations = []
     details = {}
     selected, suite_details = select_suites(args.suite or [], sys.platform)
@@ -1015,9 +1250,23 @@ def smoke(args):
     if selected and args.candidate_kind != "rust":
         raise ValueError("Rust executable suites cannot be attached to C/C evidence")
     selected_references = {name: suite_reference(suite, references) for name, suite in selected.items()}
+    native_gui = None
+    if any(suite.get("kind") in WINDOWS_NATIVE_KINDS for suite in selected.values()):
+        gui = Path(os.environ.get("TMUXX_WINDOWS_GUI", rustty_root() / "target/debug/Rustty/rustty.exe")).resolve(strict=True)
+        native_gui = {"path": str(gui), "sha256": digest(gui)}
     for name, suite in selected.items():
         identity = selected_references[name]
-        evidence, suite_details[name] = run_suite(suite, identity["path"] if identity else None)
+        if suite.get("kind") in WINDOWS_NATIVE_KINDS:
+            evidence, suite_details[name] = run_suite(suite, identity["path"] if identity else None,
+                candidate=candidate["path"], candidate_identity=candidate, gui_identity=native_gui)
+            if all(item["status"] == "pass" for item in evidence):
+                try:
+                    validate_native_evidence(suite, suite_details[name], candidate, native_gui)
+                except (ValueError, TypeError, OSError) as error:
+                    evidence, _ = suite_observations(suite, -1, "")
+                    suite_details[name].update(status=-1, error=str(error))
+        else:
+            evidence, suite_details[name] = run_suite(suite, identity["path"] if identity else None)
         suite_details[name]["reference"] = selected_references[name]
         observations.extend(evidence)
         passed = all(item["status"] == "pass" for item in evidence)
@@ -1028,9 +1277,6 @@ def smoke(args):
             for key in ("stdout_base64", "stderr_base64"):
                 if failed.get(key):
                     print(base64.b64decode(failed[key]).decode("utf-8", "replace")[-8000:], flush=True)
-    candidate = executable_identity(args.candidate)
-    if args.candidate_kind == "rust" and not candidate["version"].startswith("tmuxx "):
-        raise ValueError("Rust candidate must identify as tmuxx; refusing accidental C/C evidence")
     assertions = {entry["scenario"]: entry["id"] for entry in config["assertions"]}
     for scenario in ([] if args.no_smoke else args.scenario or SCENARIOS):
         left = run_side(args.reference, "c", scenario)
@@ -1043,15 +1289,20 @@ def smoke(args):
         if not passed:
             print(f"  reference: {left.get('error', left.get('observations'))}")
             print(f"  candidate: {right.get('error', right.get('observations'))}")
-    entries = apply_observations(inventory(config, sys.platform), observations)
+    entries = apply_observations(platform_inventory(inventory(config, sys.platform), suites(), sys.platform), observations)
     changed = fingerprint != implementation_fingerprint()
+    revision_changed = revision != source_revision()
+    candidate_changed = not executable_unchanged(candidate)
+    gui_changed = native_gui is not None and not executable_unchanged(native_gui)
     references_changed = any(identity and (not Path(identity["path"]).is_file() or digest(identity["path"]) != identity["sha256"]) for identity in references.values())
     report = {"schema_version": 2, "kind": "exact-assertion-evidence", "candidate_kind": args.candidate_kind,
-              "checkout_revision": source_revision(), "reference_revision": config["reference_revision"], "manifest_sha256": digest(MANIFEST),
+              "checkout_revision": revision, "checkout_changed_during_run": revision_changed,
+              "reference_revision": config["reference_revision"], "manifest_sha256": digest(MANIFEST),
               "implementation_fingerprint": fingerprint, "source_changed_during_run": changed, "platform": sys.platform,
               "host": host_identity(), "platform_execution": config["platform_execution"],
               "reference": reference, "older_reference": older, "references_changed_during_run": references_changed,
-              "candidate": candidate, "summary": counts(entries),
+              "candidate": candidate, "candidate_changed_during_run": candidate_changed,
+              "native_gui": native_gui, "native_gui_changed_during_run": gui_changed, "summary": counts(entries),
               "entries": entries, "scenarios": details, "suites": suite_details, "blocked_suites": blocked_suites, "profile_release_ready": False}
     destination = Path(args.report)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1062,7 +1313,10 @@ def smoke(args):
         print("Source changed during evidence collection; rerun before using this report.")
     if references_changed:
         print("C reference changed during evidence collection; rerun before using this report.")
-    return 0 if observations and not blocked_suites and not changed and not references_changed and all(item["status"] == "pass" for item in observations) else 1
+    if revision_changed or candidate_changed or gui_changed:
+        print("Checkout revision or candidate/GUI executable changed during evidence collection; rerun before using this report.")
+    return 0 if (observations and not blocked_suites and not any((changed, revision_changed, references_changed, candidate_changed, gui_changed))
+                 and all(item["status"] == "pass" for item in observations)) else 1
 
 
 def blockers(report, profile, config=None):
@@ -1084,6 +1338,11 @@ def blockers(report, profile, config=None):
         problems.append("source changed during evidence collection")
     if report.get("references_changed_during_run"):
         problems.append("C reference changed during evidence collection")
+    for key, description in (("checkout_changed_during_run", "checkout revision"),
+                             ("candidate_changed_during_run", "candidate executable"),
+                             ("native_gui_changed_during_run", "native GUI executable")):
+        if report.get(key):
+            problems.append(f"{description} changed during evidence collection")
     baseline = subprocess.run(["git", "merge-base", "--is-ancestor", config["reference_revision"], "HEAD"],
                               cwd=ROOT, capture_output=True)
     if baseline.returncode:
@@ -1091,7 +1350,7 @@ def blockers(report, profile, config=None):
     for role in ("candidate", *(["reference"] if report.get("reference") else []), *(["older_reference"] if report.get("older_reference") else [])):
         recorded = report.get(role) or {}
         path = recorded.get("path")
-        if not path or not Path(path).is_file() or digest(path) != recorded.get("sha256"):
+        if not executable_unchanged(recorded):
             problems.append(f"{role} executable is missing or changed since evidence was collected")
     if config.get("platform_execution", {}).get(report.get("platform"), {}).get("status") == "deferred":
         problems.append(f"{report.get('platform')} execution is user-deferred, not certified")
@@ -1107,7 +1366,8 @@ def blockers(report, profile, config=None):
             problems.append("this Linux qualification requires an identified GNU target and glibc host")
         if host.get("cargo_build_target") not in (None, host.get("rust_host_target")):
             problems.append("cross-compiled test targets require separate executable qualification")
-    current_entries = inventory(config, report.get("platform"))
+    available = suites()
+    current_entries = platform_inventory(inventory(config, report.get("platform")), available, report.get("platform"))
     evidence = {entry["id"]: entry for entry in report.get("entries", [])}
     for entry in current_entries:
         entry["observation_results"] = dict(evidence.get(entry["id"], {}).get("observation_results", {}))
@@ -1122,13 +1382,15 @@ def blockers(report, profile, config=None):
     ):
         problems.append("C/R scenario evidence requires a genuine C reference executable")
     references = {"current": report.get("reference"), "older": report.get("older_reference")}
-    for suite in suites().values():
+    for suite in available.values():
         if not any(assertion["id"] in required for assertion in suite["assertions"]):
             continue
         details = report.get("suites", {}).get(suite["id"], {})
         if report.get("platform") not in suite_platforms(suite):
-            problems.append(f"{suite['id']}: requires supported client execution on {', '.join(suite_platforms(suite))}; "
-                            "a local or historical desktop result does not qualify this server host")
+            if any(assertion["id"] in required and not by_id[assertion["id"]].get("suites")
+                   for assertion in suite["assertions"]):
+                problems.append(f"{suite['id']}: requires supported client execution on {', '.join(suite_platforms(suite))}; "
+                                "a local or historical desktop result does not qualify this server host")
             # In particular, copied macOS observations must not pass Linux gates.
             for assertion in suite["assertions"]:
                 by_id[assertion["id"]]["observation_results"].pop("suite:" + suite["id"], None)
@@ -1140,8 +1402,12 @@ def blockers(report, profile, config=None):
             if details.get("reference") != expected:
                 raise ValueError(f"{suite['id']} lacks matching executable reference evidence")
             output = base64.b64decode(details.get("stdout_base64", ""), validate=True).decode("utf-8", "replace")
+            if suite.get("kind") in (*WINDOWS_NATIVE_KINDS, "remote-c-scenarios") and details.get("status") == 0:
+                validate_native_evidence(suite, details, report.get("candidate"), report.get("native_gui"))
+            if suite.get("kind") in ("remote-c-cargo", "remote-c-scenarios", "windows-system-c-views") and details.get("status") == 0:
+                remote_c_evidence.verify(suite, details, run_suite_process)
             observations, _ = suite_observations(suite, details.get("status", -1), output)
-        except (ValueError, TypeError) as error:
+        except (ValueError, TypeError, OSError, subprocess.SubprocessError) as error:
             problems.append(str(error))
             observations, _ = suite_observations(suite, -1, "")
         for observation in observations:
@@ -1192,7 +1458,7 @@ def main(argv=None):
             return 0
         if args.action == "smoke":
             return smoke(args)
-        report = json.loads(Path(args.report).read_text())
+        report = json.loads(Path(args.report).read_text(encoding="utf-8"))
         problems = blockers(report, args.profile)
         if problems:
             print(f"{args.profile}: BLOCKED ({len(problems)} obligations or evidence problems)")

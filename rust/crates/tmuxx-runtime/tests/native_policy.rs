@@ -1,13 +1,20 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
+#[cfg(windows)]
+#[path = "support/windows_fixture.rs"]
+mod windows_fixture;
 use std::time::{Duration, Instant};
 use tmuxx_protocol::native::{Request, Response, ServerMessage};
 use tmuxx_runtime::LocalClient;
 
 fn run(client: &LocalClient, argv: &[&str]) -> Response {
+    #[cfg(unix)]
+    let args = argv.iter().map(|arg| arg.as_bytes().to_vec()).collect();
+    #[cfg(windows)]
+    let args = windows_fixture::argv(argv);
     client
         .send(Request {
             request_id: 1,
-            argv: argv.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+            argv: args,
             stdin: None,
             subscribe: true,
             control: false,
@@ -35,7 +42,11 @@ fn state(client: &LocalClient) -> Vec<Vec<u8>> {
 
 #[test]
 fn every_scoped_native_ui_command_rejects_without_state_or_input_mutation() {
+    #[cfg(unix)]
     let path = std::env::temp_dir().join(format!("tmuxx-ui-policy-{}.sock", std::process::id()));
+    #[cfg(windows)]
+    let path =
+        tmuxx_runtime::windows::endpoint(&format!("ui-policy-{}", std::process::id())).unwrap();
     let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(path)).unwrap();
     let client = host.connect().unwrap();
     assert_eq!(
@@ -178,7 +189,10 @@ fn every_scoped_native_ui_command_rejects_without_state_or_input_mutation() {
 
 #[test]
 fn control_popup_rejection_preserves_pane_and_next_guarded_reply() {
+    #[cfg(unix)]
     let path = format!("/tmp/tx-popup-{}", std::process::id());
+    #[cfg(windows)]
+    let path = tmuxx_runtime::windows::endpoint(&format!("popup-{}", std::process::id())).unwrap();
     let host = tmuxx_runtime::start(tmuxx_runtime::Options::new(path)).unwrap();
     let admin = host.connect().unwrap();
     assert_eq!(
