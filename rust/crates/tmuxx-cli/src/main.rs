@@ -274,12 +274,29 @@ fn native_stdio_bridge(endpoint: &std::path::Path) -> io::Result<()> {
     let stream = std::os::unix::net::UnixStream::connect(endpoint)?;
     let mut writer = stream.try_clone()?;
     std::thread::spawn(move || {
-        let _ = io::copy(&mut io::stdin().lock(), &mut writer);
+        let _ = copy_bridge_bytes(&mut io::stdin().lock(), &mut writer);
         let _ = writer.shutdown(Shutdown::Write);
     });
     let mut reader = stream;
-    io::copy(&mut reader, &mut io::stdout().lock())?;
-    Ok(())
+    copy_bridge_bytes(&mut reader, &mut io::stdout().lock())
+}
+
+#[cfg(unix)]
+fn copy_bridge_bytes(input: &mut impl io::Read, output: &mut impl io::Write) -> io::Result<()> {
+    // This is an interactive duplex bridge. Linux's kernel splice specialization
+    // of io::copy can leave tiny pipe/socket writes waiting for another transfer;
+    // forward each available chunk and flush without waiting for a full record.
+    let mut buffer = [0; 32 * 1024];
+    loop {
+        let length = match input.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(length) => length,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        output.write_all(&buffer[..length])?;
+        output.flush()?;
+    }
 }
 
 #[cfg(unix)]
