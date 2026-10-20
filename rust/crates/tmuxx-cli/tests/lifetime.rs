@@ -220,9 +220,53 @@ fn alive(pid: i32) -> bool {
         .unwrap();
     output.status.success() && !output.stdout.is_empty() && !output.stdout.starts_with(b"Z")
 }
-struct ProcessCleanup(Vec<i32>);
+struct ProcessCleanup(
+    Vec<i32>,
+    #[cfg(target_os = "linux")] Vec<std::os::fd::OwnedFd>,
+);
+impl ProcessCleanup {
+    fn new(pids: Vec<i32>) -> Self {
+        #[cfg(target_os = "linux")]
+        let handles = {
+            use std::os::fd::FromRawFd;
+            pids.iter()
+                .filter_map(|pid| {
+                    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, *pid, 0) } as i32;
+                    if fd < 0 {
+                        assert_eq!(
+                            std::io::Error::last_os_error().raw_os_error(),
+                            Some(libc::ESRCH)
+                        );
+                        None
+                    } else {
+                        Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+                    }
+                })
+                .collect()
+        };
+        Self(
+            pids,
+            #[cfg(target_os = "linux")]
+            handles,
+        )
+    }
+}
 impl Drop for ProcessCleanup {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        for handle in &self.1 {
+            use std::os::fd::AsRawFd;
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    handle.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
         for pid in &self.0 {
             unsafe {
                 libc::kill(*pid, libc::SIGKILL);
@@ -267,7 +311,7 @@ fn abrupt_owner_death_closes_pty_and_foreground_descendants_without_harming_othe
     .parse::<i32>()
     .unwrap();
     wait_until(|| std::fs::read_to_string(&pids).is_ok_and(|s| s.split_whitespace().count() == 2));
-    let cleanup = ProcessCleanup(
+    let cleanup = ProcessCleanup::new(
         std::fs::read_to_string(pids)
             .unwrap()
             .split_whitespace()
@@ -418,7 +462,7 @@ fn reused_endpoint_and_pane_id_have_a_new_server_incarnation() {
 }
 
 #[test]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn killed_owner_watchdog_cleans_hup_ignoring_session_jobs_and_preserves_independent_sessions() {
     for leader_exits in [false, true] {
         let mut owner = Owner::start();
@@ -459,7 +503,7 @@ fn killed_owner_watchdog_cleans_hup_ignoring_session_jobs_and_preserves_independ
         wait_until(|| {
             std::fs::read_to_string(&path).is_ok_and(|text| text.split_whitespace().count() == 4)
         });
-        let cleanup = ProcessCleanup(
+        let cleanup = ProcessCleanup::new(
             std::fs::read_to_string(path)
                 .unwrap()
                 .split_whitespace()

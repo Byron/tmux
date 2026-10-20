@@ -35,6 +35,9 @@ mod snapshots;
 #[cfg(unix)]
 mod unix_ipc;
 mod view_state;
+#[cfg(target_os = "linux")]
+#[path = "linux_watchdog.rs"]
+mod watchdog;
 #[cfg(target_os = "macos")]
 mod watchdog;
 
@@ -126,8 +129,9 @@ struct Client {
 }
 
 struct Process {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     _watchdog: Option<watchdog::Registration>,
+    #[cfg(not(target_os = "linux"))]
     pid: Option<u32>,
     generation: u64,
     master: Box<dyn MasterPty + Send>,
@@ -149,16 +153,24 @@ struct PendingHostAction {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "linux")))]
         let mut groups = process::session_groups(self.pid, self.status.is_some());
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "linux")))]
         groups.push(self.master.process_group_leader());
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "linux")))]
         process::signal_groups(&groups, libc::SIGHUP);
+        #[cfg(target_os = "linux")]
+        if let Some(registration) = &self._watchdog {
+            let _ = registration.signal(libc::SIGHUP);
+        }
         let _ = self.stop.try_send(());
         let _ = self.finished.recv_timeout(Duration::from_secs(2));
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "linux")))]
         process::signal_groups(&groups, libc::SIGKILL);
+        #[cfg(target_os = "linux")]
+        if let Some(registration) = &self._watchdog {
+            let _ = registration.signal(libc::SIGKILL);
+        }
     }
 }
 
@@ -492,7 +504,7 @@ pub fn start(options: Options) -> io::Result<ServerHandle> {
         result?;
     }
     let endpoint = options.endpoint.clone();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let watchdog = watchdog::Watchdog::start()?;
     let (tx, rx) = mpsc::sync_channel(1024);
     let next_client = Arc::new(AtomicU64::new(0));
@@ -563,7 +575,7 @@ pub fn start(options: Options) -> io::Result<ServerHandle> {
             let _paths = paths;
             let accept = accept;
             let mut host = Host::new(engine_tx, &options, environment);
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 host.watchdog = Some(watchdog);
             }
@@ -898,7 +910,7 @@ fn serve_connection(
 }
 
 struct Host {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     watchdog: Option<Arc<watchdog::Watchdog>>,
     format_jobs: BTreeMap<u64, format_jobs::FormatProcess>,
     latest_clients: BTreeMap<Id, u64>,
@@ -992,7 +1004,7 @@ impl Host {
                 .into_owned(),
         );
         Self {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             watchdog: None,
             latest_clients: BTreeMap::new(),
             size_activity: BTreeMap::new(),
@@ -1974,13 +1986,32 @@ impl Host {
         command.cwd(&cwd);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        let (child, registration) = {
+            if self.watchdog.is_none() {
+                self.watchdog =
+                    Some(watchdog::Watchdog::start().map_err(|error| error.to_string())?);
+            }
+            let master = pair
+                .master
+                .as_raw_fd()
+                .ok_or("PTY master has no descriptor")?;
+            let (child, registration) = self
+                .watchdog
+                .as_ref()
+                .unwrap()
+                .spawn(command, master)
+                .map_err(|error| error.to_string())?;
+            (child, Some(registration))
+        };
+        #[cfg(not(target_os = "linux"))]
         let mut child = pair
             .slave
             .spawn_command(command)
             .map_err(|e| e.to_string())?;
         let pid = child.process_id();
-        // shortcut: owner death between spawn and this registration can escape
-        // cleanup; atomic spawn-crash ownership needs a pre-exec spawn broker.
+        // macOS retains its acknowledged registration boundary. Linux's broker
+        // owns the child before exec and also covers a lost spawn reply.
         #[cfg(target_os = "macos")]
         let registration = match (&self.watchdog, pid) {
             (Some(watchdog), Some(pid)) => match watchdog.register(pid) {
@@ -1999,8 +2030,9 @@ impl Host {
         let (stop, stop_rx) = mpsc::sync_channel(1);
         let (done_tx, finished) = mpsc::sync_channel(1);
         let process = Process {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             _watchdog: registration,
+            #[cfg(not(target_os = "linux"))]
             pid,
             generation,
             master: pair.master,

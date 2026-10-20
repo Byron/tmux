@@ -1,7 +1,7 @@
 //! Streaming pipe ownership and a single output route for PTYs and empty panes.
 use super::*;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(super) fn session_groups(pid: Option<u32>, reaped: bool) -> Vec<Option<libc::pid_t>> {
     let Some(session) = pid.map(|pid| pid as libc::pid_t) else {
         return Vec::new();
