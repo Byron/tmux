@@ -1,0 +1,22 @@
+[package]
+name = "tmuxx-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tmuxx-core = { path = "../tmuxx-core" }
+tmuxx-command = { path = "../tmuxx-command" }
+tmuxx-config = { path = "../tmuxx-config" }
+tmuxx-format = { path = "../tmuxx-format" }
+tmuxx-protocol = { path = "../tmuxx-protocol", features = ["native"] }
+portable-pty.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tmuxx-terminal = { path = "../tmuxx-terminal" }
+libc.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+tmuxx-unix-ipc = { path = "../tmuxx-unix-ipc" }
+

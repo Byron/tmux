@@ -1,0 +1,3709 @@
+use crate::modes::Modes;
+use crate::packed::RowHeader;
+use crate::query::{self, Query};
+use crate::screen::*;
+use crate::unicode::{self, properties};
+use crate::{clipboard, dnd};
+use rustty_parser::{BatchEvent, Event, MAX_OSC_BYTES, Parser};
+
+/// Host actions are returned in input order. The terminal never accesses the OS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Effect {
+    Write(Vec<u8>),
+    Title(Vec<u8>),
+    WindowName(Vec<u8>),
+    WorkingDirectory(Vec<u8>),
+    Bell,
+    /// PTY input translation, enabled by `Terminal::linefeed_mode_events`.
+    LinefeedMode(bool),
+    ClipboardRead(clipboard::Read),
+    ClipboardWrite(clipboard::Write),
+    /// Drag target registration, acceptance, or drop completion changed.
+    DragAndDrop(dnd::Event),
+    /// Serviced by built-in query defaults or the synchronous host callbacks.
+    Query(Query),
+    Notification {
+        title: Vec<u8>,
+        body: Vec<u8>,
+    },
+    /// Private pane-local metadata, enabled by `Terminal::agent_status_events`.
+    AgentStatus(crate::agent::Event),
+    /// Rustty host extension, enabled by `Terminal::shell_command_events`.
+    CommandStart,
+    /// tmux-only owner event, without a duplicate GUI lifecycle event.
+    TmuxCommandStart {
+        command_line: Option<Vec<u8>>,
+    },
+    /// tmux OSC 133 A/N.
+    ShellPrompt,
+    /// Rustty host extension, enabled by `Terminal::shell_command_events`.
+    CommandEnd {
+        exit_code: Option<i32>,
+    },
+    Progress {
+        state: u8,
+        value: Option<u8>,
+    },
+    /// RIS discards progress without reporting a task outcome.
+    ProgressReset,
+    UnknownSequence(String),
+}
+
+/// Synchronous host callbacks used by `Terminal::feed_with_handler`.
+/// Clipboard callbacks are separate from `effect`; they are never reported
+/// twice. OSC 52 writes need no acknowledgement; unanswered reads return empty.
+pub trait EffectHandler {
+    fn effect(&mut self, effect: Effect);
+
+    /// Observe DND state before the next parser event can change it.
+    /// The default forwards only the event, like deferred `Terminal::feed`.
+    fn drag_and_drop(&mut self, event: dnd::Event, _state: Option<&dnd::State>) {
+        self.effect(Effect::DragAndDrop(event));
+    }
+
+    fn color_scheme(&mut self) -> Option<query::ColorScheme> {
+        None
+    }
+    fn device_attributes(&mut self) -> Option<query::DeviceAttributes> {
+        None
+    }
+    fn enquiry(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+    fn size(&mut self) -> Option<query::Size> {
+        None
+    }
+    fn xtversion(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn clipboard_read_enabled(&self) -> bool {
+        true
+    }
+
+    fn clipboard_write_enabled(&self) -> bool {
+        true
+    }
+
+    fn clipboard_read(&mut self, _request: &clipboard::Read) -> clipboard::ReadResult {
+        clipboard::ReadResult::Denied
+    }
+
+    fn clipboard_write(&mut self, _request: &clipboard::Write) -> clipboard::WriteResult {
+        clipboard::WriteResult::Denied
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Margins {
+    pub top: usize,
+    pub bottom: usize,
+    pub left: usize,
+    pub right: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Terminal {
+    pub(crate) metadata: crate::snapshot::TerminalMetadata,
+    pub cols: u16,
+    pub rows: u16,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub modes: Modes,
+    pub margins: Margins,
+    pub palette: Vec<[u8; 3]>,
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub cursor_color: Option<[u8; 3]>,
+    /// Host's actual TERM name, used for XTGETTCAP TN. Unset or names longer
+    /// than 128 bytes leave TN unanswered. This host setting is not persisted.
+    pub terminfo_name: Option<Vec<u8>>,
+    pub query_defaults: query::Defaults,
+    /// Allow CSI 21 t to report the raw title. Disabled by default.
+    pub title_report: bool,
+    /// Owner policy for application OSC/APC title changes. Direct setters bypass it.
+    pub allow_set_title: bool,
+    pub(crate) tmux_strings: bool,
+    /// Emit command lifecycle effects for OSC 133 C/D. Disabled for native VT
+    /// compatibility; application sessions opt in. Retained through reset,
+    /// but not persisted in terminal snapshots.
+    pub shell_command_events: bool,
+    /// Match tmux OSC 52 selectors and strict base64. Owner policy remains external.
+    pub tmux_clipboard: bool,
+    /// tmux graphics replies, chunked queries and fallback cell geometry.
+    pub tmux_graphics: bool,
+    pub tmux_alternate_screen: bool,
+    pub tmux_scroll_on_clear: bool,
+    pub tmux_cursor_style: u16,
+    pub tmux_state: crate::tmux_state::TmuxState,
+    pub tmux_pane_style: Option<crate::TmuxPaneStyle>,
+    /// Query-only pane colors reported by a connected tmux control client.
+    pub tmux_control_colors: [Option<[u8; 3]>; 2],
+    pub tmux_widths: Vec<(u32, u32, u8)>,
+    pub tmux_vs16_wide: bool,
+    /// Maximum encoded chunk, accumulated upload and decoded RGBA bytes for tmux.
+    pub tmux_image_limit: usize,
+    pub tmux_image_quota: Option<crate::graphics::quota::Quota>,
+    /// Emit private OSC 777 agent metadata. Application sessions opt in; retained
+    /// through reset, but neither this setting nor agent status enters snapshots.
+    pub agent_status_events: bool,
+    /// Report ANSI mode 20 changes to the PTY writer, including RIS. Retained
+    /// through reset, but not snapshots; standalone VT clients opt in.
+    pub linefeed_mode_events: bool,
+    /// Externally owned view visibility, retained through reset.
+    pub visible: bool,
+    /// Maximum total decoded bytes in a Kitty clipboard write transaction.
+    /// A transfer retains the value that was configured when it began.
+    pub clipboard_write_limit: usize,
+    pub glyphs: crate::glyph::Glyphs,
+    /// OSC 72 state, allocated on registration and omitted from snapshots.
+    pub kitty_dnd: Option<dnd::State>,
+    pub(crate) clipboard: clipboard::kitty::State,
+    pub title: String,
+    pub working_directory: String,
+    pub generation: u64,
+    /// Changes on every synchronized-output enable so hosts can restart their
+    /// timeout without putting a wall clock in the terminal or its snapshots.
+    pub synchronized_output_generation: u64,
+    pub modify_other_keys: bool,
+    /// Optional tmux owner policy and current xterm extended-key mode.
+    pub tmux_extended_keys: Option<(u8, u8)>,
+    pub mouse_mode: u16,
+    pub mouse_format: u16,
+    pub(crate) primary: Screen,
+    pub(crate) alternate: Option<Screen>,
+    pub(crate) alternate_active: bool,
+    pub(crate) parser: Parser,
+    pub(crate) tabstops: Vec<bool>,
+    pub(crate) previous_char: Option<char>,
+    grapheme_state: u8,
+    pub(crate) status_display: bool,
+    dcs: Vec<u8>,
+    dcs_header: (Vec<u8>, Vec<u16>, u8),
+    apc: Vec<u8>,
+    apc_glyph_limit: Option<usize>,
+    tmux_string_kind: u8,
+    string_overflow: bool,
+}
+
+impl Terminal {
+    /// Dimensions are clamped to one cell; `resize` rejects zero dimensions.
+    pub fn new(cols: u16, rows: u16, scrollback_limit: usize) -> Self {
+        Self::with_limits(
+            cols,
+            rows,
+            ScrollbackLimits {
+                bytes: None,
+                lines: Some(scrollback_limit),
+            },
+        )
+    }
+
+    pub fn with_limits(cols: u16, rows: u16, limits: ScrollbackLimits) -> Self {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let mut parser = Parser::new();
+        // Native capture starts after the command prefix. The raw parser also
+        // retains that prefix; OSC 5522 has the longest allocating one.
+        parser.set_osc_limit(MAX_OSC_BYTES + b"5522;".len());
+        Self {
+            metadata: crate::snapshot::TerminalMetadata::default(),
+            cols,
+            rows,
+            width_px: 0,
+            height_px: 0,
+            modes: Modes::default(),
+            margins: Margins {
+                top: 0,
+                bottom: usize::from(rows) - 1,
+                left: 0,
+                right: usize::from(cols) - 1,
+            },
+            palette: default_palette(),
+            foreground: [255; 3],
+            background: [0; 3],
+            cursor_color: None,
+            terminfo_name: None,
+            query_defaults: query::Defaults::default(),
+            title_report: false,
+            allow_set_title: true,
+            tmux_strings: false,
+            shell_command_events: false,
+            tmux_clipboard: false,
+            tmux_graphics: false,
+            tmux_alternate_screen: true,
+            tmux_scroll_on_clear: true,
+            tmux_cursor_style: 0,
+            tmux_state: crate::tmux_state::TmuxState::default(),
+            tmux_pane_style: None,
+            tmux_control_colors: [None; 2],
+            tmux_widths: Vec::new(),
+            tmux_vs16_wide: true,
+            tmux_image_limit: 64 * 1024 * 1024,
+            tmux_image_quota: None,
+            agent_status_events: false,
+            linefeed_mode_events: false,
+            visible: true,
+            clipboard_write_limit: 64 * 1024 * 1024,
+            glyphs: crate::glyph::Glyphs::default(),
+            kitty_dnd: None,
+            clipboard: clipboard::kitty::State::default(),
+            title: String::new(),
+            working_directory: String::new(),
+            generation: 0,
+            synchronized_output_generation: 0,
+            modify_other_keys: false,
+            tmux_extended_keys: None,
+            mouse_mode: 0,
+            mouse_format: 0,
+            primary: Screen::new(cols.into(), rows.into(), limits),
+            alternate: None,
+            alternate_active: false,
+            parser,
+            tabstops: (0..cols).map(|i| i > 0 && i % 8 == 0).collect(),
+            previous_char: None,
+            grapheme_state: 0,
+            status_display: false,
+            dcs: Vec::new(),
+            dcs_header: (Vec::new(), Vec::new(), 0),
+            apc: Vec::new(),
+            apc_glyph_limit: None,
+            tmux_string_kind: 0,
+            string_overflow: false,
+        }
+    }
+
+    pub fn screen(&self) -> &Screen {
+        if self.alternate_active {
+            self.alternate.as_ref().unwrap()
+        } else {
+            &self.primary
+        }
+    }
+    pub fn screen_mut(&mut self) -> &mut Screen {
+        if self.alternate_active {
+            self.alternate.as_mut().unwrap()
+        } else {
+            &mut self.primary
+        }
+    }
+    pub fn is_alternate_screen(&self) -> bool {
+        self.alternate_active
+    }
+    pub fn parser(&self) -> &Parser {
+        &self.parser
+    }
+
+    pub fn set_tmux_strings(&mut self, enabled: bool) {
+        self.tmux_strings = enabled;
+        self.parser.set_tmux_strings(enabled);
+    }
+
+    pub fn restore_tmux_pending_input(&mut self, bytes: Option<&[u8]>) -> Result<(), String> {
+        self.parser
+            .restore_pending_input(bytes)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Recover terminal input and display state without dispatching pending sequences.
+    pub fn reset_from_host(&mut self) {
+        self.parser.reset_preserving_pending_input();
+        self.dcs.clear();
+        self.dcs_header.0.clear();
+        self.dcs_header.1.clear();
+        self.dcs_header.2 = 0;
+        self.apc.clear();
+        self.apc_glyph_limit = None;
+        self.string_overflow = false;
+        self.reset();
+    }
+
+    /// Restore stable row anchors omitted by the portable GHOSTSNP checkpoint.
+    pub fn restore_view_row_identity(
+        &mut self,
+        primary: &Screen,
+        alternate: Option<&Screen>,
+    ) -> Result<(), &'static str> {
+        if self.alternate.is_some() != alternate.is_some() {
+            return Err("view alternate screen mismatch");
+        }
+        self.primary.restore_view_row_identity(primary)?;
+        if let (Some(current), Some(source)) = (&mut self.alternate, alternate) {
+            current.restore_view_row_identity(source)?;
+        }
+        Ok(())
+    }
+
+    /// Install validated display graphics after a GHOSTSNP restore, without effects.
+    pub fn restore_view_graphics(
+        &mut self,
+        primary: crate::graphics::ViewSnapshot,
+        alternate: Option<crate::graphics::ViewSnapshot>,
+    ) -> Result<(), &'static str> {
+        self.restore_view_graphics_with_limit(primary, alternate, 400 * 1024 * 1024)
+    }
+    pub fn restore_view_graphics_with_limit(
+        &mut self,
+        primary: crate::graphics::ViewSnapshot,
+        alternate: Option<crate::graphics::ViewSnapshot>,
+        max_bytes: usize,
+    ) -> Result<(), &'static str> {
+        let primary = crate::graphics::Graphics::from_view_snapshot_with_limit(primary, max_bytes)?;
+        let alternate = alternate
+            .map(|snapshot| {
+                crate::graphics::Graphics::from_view_snapshot_with_limit(snapshot, max_bytes)
+            })
+            .transpose()?;
+        if alternate.is_some() && self.alternate.is_none() {
+            return Err("graphics has no alternate screen");
+        }
+        self.primary.graphics = primary;
+        if let Some(screen) = &mut self.alternate {
+            screen.graphics = alternate.unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    pub fn primary_screen(&self) -> &Screen {
+        &self.primary
+    }
+    pub fn alternate_screen(&self) -> Option<&Screen> {
+        self.alternate.as_ref()
+    }
+
+    /// Restore tmux-only color spelling metadata kept outside GHOSTSNP.
+    pub fn restore_tmux_capture_metadata(
+        &mut self,
+        primary: &Screen,
+        alternate: Option<&Screen>,
+    ) -> Result<(), &'static str> {
+        self.primary.restore_tmux_capture_metadata(primary)?;
+        match (&mut self.alternate, alternate) {
+            (Some(current), Some(source)) => current.restore_tmux_capture_metadata(source),
+            (None, None) => Ok(()),
+            _ => Err("capture metadata alternate screen mismatch"),
+        }
+    }
+
+    /// Release a tracked cell even when its screen is inactive or was reset.
+    pub fn untrack(&mut self, point: TrackedPoint) {
+        self.primary.untrack(point);
+        if let Some(screen) = &mut self.alternate {
+            screen.untrack(point);
+        }
+    }
+
+    pub fn tabstops(&self) -> &[bool] {
+        &self.tabstops
+    }
+
+    /// Raw title bytes, including non-UTF-8 bytes retained by direct setters
+    /// or a stream title truncated in the middle of a character.
+    pub fn title_bytes(&self) -> &[u8] {
+        self.metadata
+            .title_raw
+            .as_deref()
+            .unwrap_or(self.title.as_bytes())
+    }
+
+    pub fn working_directory_bytes(&self) -> &[u8] {
+        self.metadata
+            .pwd_raw
+            .as_deref()
+            .unwrap_or(self.working_directory.as_bytes())
+    }
+
+    /// Replace raw host state without stream length limits or host effects.
+    /// An empty value clears the title; `title` remains its display string.
+    /// Title changes do not invalidate prepared terminal content.
+    pub fn set_title(&mut self, title: &[u8]) {
+        self.title = String::from_utf8_lossy(title).into_owned();
+        self.metadata.title_raw = std::str::from_utf8(title).is_err().then(|| title.to_vec());
+    }
+
+    /// Replace the raw working directory without parsing or decoding its URI.
+    /// An empty value clears it. This direct setter emits no host effects.
+    pub fn set_working_directory(&mut self, directory: &[u8]) {
+        self.working_directory = String::from_utf8_lossy(directory).into_owned();
+        self.metadata.pwd_raw = std::str::from_utf8(directory)
+            .is_err()
+            .then(|| directory.to_vec());
+        self.changed();
+    }
+
+    pub fn shell_prompt_redraw(&self) -> PromptRedraw {
+        if self.tmux_strings {
+            return PromptRedraw::None;
+        }
+        match self.metadata.shell_redraw {
+            1 => PromptRedraw::None,
+            2 => PromptRedraw::Last,
+            _ => PromptRedraw::All,
+        }
+    }
+
+    /// Feed input with runtime `query_defaults` and return deferred host effects.
+    /// Query replies use host geometry when supplied, otherwise terminal geometry.
+    /// Readonly hosts use `feed_with_handler` and opt into the needed callbacks.
+    /// DND effects carry event tags; use `feed_with_handler` to observe the state
+    /// at each event instead of the final state after the complete input batch.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let mut pending = Vec::new();
+        let mut parser = std::mem::take(&mut self.parser);
+        parser.advance_batched(bytes, |event| {
+            let event = match event {
+                BatchEvent::PrintAscii(bytes) => {
+                    self.print_ascii(bytes);
+                    return;
+                }
+                BatchEvent::PrintUtf8(text) => {
+                    self.print_utf8(text);
+                    return;
+                }
+                BatchEvent::ApcPut(bytes) => {
+                    self.apc_put(bytes);
+                    return;
+                }
+                BatchEvent::Event(event) => event,
+            };
+            self.handle(event, &mut pending, true, true);
+            for effect in pending.drain(..) {
+                match effect {
+                    Effect::Query(query) => {
+                        let reply = if self.tmux_pane_style.is_some() && query == Query::ColorScheme
+                        {
+                            self.tmux_color_scheme().map(query::ColorScheme::encode)
+                        } else {
+                            self.query_defaults.reply(query, self.query_size())
+                        };
+                        if let Some(reply) = reply {
+                            effects.push(Effect::Write(reply));
+                        }
+                    }
+                    effect => effects.push(effect),
+                }
+            }
+        });
+        self.parser = parser;
+        effects
+    }
+
+    /// Feed bytes while servicing host queries, clipboard requests, and DND
+    /// state callbacks before the next parser event. Replies go to `handler.effect`.
+    /// Hosts that need deferred consent can use `feed` and `Read::reply` instead.
+    pub fn feed_with_handler(&mut self, bytes: &[u8], handler: &mut impl EffectHandler) {
+        let mut effects = Vec::new();
+        let mut parser = std::mem::take(&mut self.parser);
+        let read_enabled = handler.clipboard_read_enabled();
+        let write_enabled = handler.clipboard_write_enabled();
+        parser.advance_batched(bytes, |event| {
+            let event = match event {
+                BatchEvent::PrintAscii(bytes) => {
+                    self.print_ascii(bytes);
+                    return;
+                }
+                BatchEvent::PrintUtf8(text) => {
+                    self.print_utf8(text);
+                    return;
+                }
+                BatchEvent::ApcPut(bytes) => {
+                    self.apc_put(bytes);
+                    return;
+                }
+                BatchEvent::Event(event) => event,
+            };
+            self.handle(event, &mut effects, write_enabled, read_enabled);
+            self.dispatch_effects(effects.drain(..), handler, write_enabled, read_enabled);
+        });
+        self.parser = parser;
+    }
+
+    /// Dispatch one complete OSC payload, including its numeric prefix, without
+    /// VT stream framing. Control bytes are data; `None` represents a missing
+    /// terminator and uses ST for replies. Command capture limits still apply.
+    /// The streaming parser and any unfinished escape sequence are unchanged.
+    pub fn feed_osc_with_handler(
+        &mut self,
+        data: &[u8],
+        terminator: Option<u8>,
+        handler: &mut impl EffectHandler,
+    ) {
+        if matches!(terminator, Some(0x18 | 0x1a)) {
+            return;
+        }
+        let mut effects = Vec::new();
+        let read_enabled = handler.clipboard_read_enabled();
+        let write_enabled = handler.clipboard_write_enabled();
+        self.osc(
+            data,
+            terminator == Some(0x07),
+            &mut effects,
+            write_enabled,
+            read_enabled,
+        );
+        self.dispatch_effects(effects.into_iter(), handler, write_enabled, read_enabled);
+    }
+
+    fn dispatch_effects(
+        &mut self,
+        effects: impl Iterator<Item = Effect>,
+        handler: &mut impl EffectHandler,
+        write_enabled: bool,
+        read_enabled: bool,
+    ) {
+        for effect in effects {
+            match effect {
+                Effect::DragAndDrop(event) => {
+                    handler.drag_and_drop(event, self.kitty_dnd.as_ref());
+                }
+                Effect::ClipboardRead(request) => {
+                    let result = if read_enabled {
+                        handler.clipboard_read(&request)
+                    } else if request.protocol == clipboard::Protocol::Osc52 {
+                        continue;
+                    } else {
+                        clipboard::ReadResult::Denied
+                    };
+                    handler.effect(Effect::Write(self.reply_clipboard_read(request, result)));
+                }
+                Effect::ClipboardWrite(request) => {
+                    if write_enabled {
+                        let result = handler.clipboard_write(&request);
+                        if let Some(reply) = self.reply_clipboard_write(request, result) {
+                            handler.effect(Effect::Write(reply));
+                        }
+                    }
+                }
+                Effect::Query(query) => {
+                    let reply = match query {
+                        Query::ColorScheme => {
+                            handler.color_scheme().map(query::ColorScheme::encode)
+                        }
+                        Query::DeviceAttributes(kind) => {
+                            handler.device_attributes().map(|a| a.encode(kind))
+                        }
+                        Query::Enquiry => query::enquiry(&handler.enquiry()),
+                        Query::Size(style) => handler.size().map(|s| s.encode(style)),
+                        Query::Xtversion => query::xtversion(&handler.xtversion()),
+                    };
+                    if let Some(reply) = reply {
+                        handler.effect(Effect::Write(reply));
+                    }
+                }
+                effect => handler.effect(effect),
+            }
+        }
+    }
+
+    /// Complete a deferred clipboard request, including an optional grant.
+    pub fn reply_clipboard_read(
+        &mut self,
+        request: clipboard::Read,
+        result: clipboard::ReadResult,
+    ) -> Vec<u8> {
+        self.clipboard.remember_read(&request, &result);
+        request.reply_result(result)
+    }
+
+    /// Complete a deferred write. OSC 52 has no acknowledgement bytes.
+    pub fn reply_clipboard_write(
+        &mut self,
+        request: clipboard::Write,
+        result: clipboard::WriteResult,
+    ) -> Option<Vec<u8>> {
+        self.clipboard.remember_write(&request, result);
+        request.reply(result)
+    }
+
+    #[inline(always)]
+    fn ensure_row_cells(&mut self, row: usize, end: usize) -> (usize, usize) {
+        let columns = usize::from(self.cols);
+        let screen = self.screen();
+        let location = screen.pages.locate_from_end(screen.height() - 1 - row);
+        if usize::from(screen.pages.pages[location.0].columns) < end.min(columns) {
+            // A partial reflow can leave a physical row narrower than the
+            // logical screen. Extend its actual page when an edit reaches
+            // past it, so subsequent snapshots keep valid PAGE dimensions.
+            self.screen_mut().extend_physical_row(row, columns);
+            let screen = self.screen();
+            screen.pages.locate_from_end(screen.height() - 1 - row)
+        } else {
+            location
+        }
+    }
+
+    fn ensure_active_columns(&mut self) {
+        let columns = usize::from(self.cols);
+        let screen = self.screen();
+        let first = screen.pages.locate_from_end(screen.height - 1).0;
+        if screen
+            .pages
+            .pages
+            .range(first..)
+            .all(|page| usize::from(page.columns) >= columns)
+        {
+            return;
+        }
+        for row in 0..usize::from(self.rows) {
+            self.ensure_row_cells(row, columns);
+        }
+    }
+
+    fn clamp_cursor(&mut self) {
+        let columns = usize::from(self.cols);
+        let screen = self.screen_mut();
+        screen.cursor.col = screen
+            .cursor
+            .col
+            .min(columns - 1)
+            .min(screen.row_columns(screen.cursor.row) - 1);
+    }
+
+    pub fn limits(&self) -> ScrollbackLimits {
+        self.primary.limits
+    }
+
+    /// Update both policies and prune the oldest history immediately.
+    pub fn set_limits(&mut self, limits: ScrollbackLimits) {
+        self.primary.set_limits(limits);
+        self.changed();
+    }
+
+    /// Bound reclaimable historical pages independently of native page limits.
+    /// Charges cached cell/header buffers, resource tables and payload capacities.
+    /// Pages intersecting the active screen are an additional minimum allowance;
+    /// eviction removes whole historical pages. Graphics have a separate budget.
+    /// `None` is unlimited; zero clears history and disables ordinary retention.
+    /// Retained through reset; hosts reapply it after decoding a snapshot.
+    pub fn set_scrollback_memory_limit(&mut self, bytes: Option<usize>) {
+        for screen in std::iter::once(&mut self.primary).chain(self.alternate.iter_mut()) {
+            screen.memory_limit = bytes;
+            screen.enforce_memory_limit();
+        }
+        self.changed();
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        self.modes.set(true, 2026, false);
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        let prompt_redraw = self.shell_prompt_redraw();
+        self.primary.resize(
+            cols.into(),
+            rows.into(),
+            self.modes.dec(7),
+            self.tmux_graphics,
+        );
+        self.primary.clear_prompt_for_redraw(prompt_redraw);
+        self.primary.sync_cursor_resources();
+        if let Some(alt) = &mut self.alternate {
+            alt.resize(cols.into(), rows.into(), false, self.tmux_graphics);
+            alt.sync_cursor_resources();
+        }
+        if cols != self.cols {
+            self.tabstops = (0..cols).map(|i| i > 0 && i % 8 == 0).collect();
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.reset_margins();
+        self.changed();
+    }
+
+    pub fn set_pixel_size(&mut self, width: u32, height: u32) {
+        self.width_px = width;
+        self.height_px = height;
+    }
+
+    /// Current complete cell geometry for the built-in query responder.
+    pub fn query_size(&self) -> query::Size {
+        query::Size {
+            rows: self.rows,
+            columns: self.cols,
+            cell_width: self.width_px / u32::from(self.cols),
+            cell_height: self.height_px / u32::from(self.rows),
+        }
+    }
+
+    /// Resize with optional cell pixel geometry. Supplying complete geometry
+    /// emits the mode-2048 report when enabled, even if grid dimensions match.
+    pub fn resize_with_cell_size(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_size: Option<(u32, u32)>,
+    ) -> Vec<Effect> {
+        if cols == 0 || rows == 0 {
+            return Vec::new();
+        }
+        self.resize(cols, rows);
+        let Some((cell_width, cell_height)) = cell_size else {
+            return Vec::new();
+        };
+        self.set_pixel_size(
+            u32::from(cols).saturating_mul(cell_width),
+            u32::from(rows).saturating_mul(cell_height),
+        );
+        if self.modes.dec(2048) {
+            vec![Effect::Write(
+                query::Size {
+                    rows,
+                    columns: cols,
+                    cell_width,
+                    cell_height,
+                }
+                .encode(query::SizeStyle::InBand),
+            )]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Reset terminal state while preserving the input stream's pending bytes.
+    /// A host reset does not cancel a partially received escape sequence.
+    pub fn reset(&mut self) {
+        if self.tmux_graphics {
+            self.reset_tmux();
+            return;
+        }
+        let input = (
+            std::mem::take(&mut self.parser),
+            std::mem::take(&mut self.dcs),
+            std::mem::take(&mut self.dcs_header),
+            std::mem::take(&mut self.apc),
+            self.apc_glyph_limit,
+            self.tmux_string_kind,
+            self.string_overflow,
+        );
+        let limits = self.primary.limits;
+        let memory_limit = self.primary.memory_limit;
+        let primary_identity = self.primary.metadata.identity;
+        let terminfo_name = self.terminfo_name.take();
+        let query_defaults = self.query_defaults.clone();
+        let title_report = self.title_report;
+        let allow_set_title = self.allow_set_title;
+        let tmux_strings = self.tmux_strings;
+        let shell_command_events = self.shell_command_events;
+        let tmux_clipboard = self.tmux_clipboard;
+        let tmux_graphics = self.tmux_graphics;
+        let tmux_alternate_screen = self.tmux_alternate_screen;
+        let tmux_scroll_on_clear = self.tmux_scroll_on_clear;
+        let tmux_cursor_style = self.tmux_cursor_style;
+        let tmux_pane_style = self.tmux_pane_style;
+        let tmux_control_colors = self.tmux_control_colors;
+        let tmux_widths = std::mem::take(&mut self.tmux_widths);
+        let tmux_vs16_wide = self.tmux_vs16_wide;
+        let tmux_image_limit = self.tmux_image_limit;
+        let tmux_image_quota = self.tmux_image_quota.clone();
+        let tmux_sources = self
+            .tmux_graphics
+            .then(|| self.screen().graphics.without_placements());
+        self.primary.graphics.release_placement_quota();
+        if let Some(alt) = &mut self.alternate {
+            alt.graphics.release_placement_quota();
+        }
+        let agent_status_events = self.agent_status_events;
+        let linefeed_mode_events = self.linefeed_mode_events;
+        let synchronized_output_generation = self.synchronized_output_generation;
+        let visible = self.visible;
+        let clipboard = std::mem::take(&mut self.clipboard);
+        // RIS interrupts chunking while retaining the drag registration and data.
+        let mut kitty_dnd = self.kitty_dnd.take();
+        if let Some(state) = &mut kitty_dnd {
+            state.chunking = dnd::Chunking::default();
+        }
+        let clipboard_write_limit = self.clipboard_write_limit;
+        let mut glyphs = std::mem::take(&mut self.glyphs);
+        glyphs.reset();
+        let (foreground, background, cursor, palette) = (
+            self.foreground,
+            self.background,
+            self.cursor_color,
+            self.metadata.original_palette.clone(),
+        );
+        let (width_px, height_px) = (self.width_px, self.height_px);
+        let mut metadata = self.metadata.clone();
+        metadata.palette_overrides.fill(0);
+        metadata.cursor_is_default = true;
+        metadata.shell_redraw = 0;
+        metadata.mouse_shift_capture = None;
+        metadata.password_input = false;
+        metadata.title_raw = None;
+        metadata.pwd_raw = None;
+        let mut modes = self.modes.clone();
+        modes.reset();
+        *self = Self::with_limits(self.cols, self.rows, limits);
+        self.primary.memory_limit = memory_limit;
+        (
+            self.parser,
+            self.dcs,
+            self.dcs_header,
+            self.apc,
+            self.apc_glyph_limit,
+            self.tmux_string_kind,
+            self.string_overflow,
+        ) = input;
+        // RIS resets the existing primary screen. A streaming restore may
+        // still deliver older history into that same screen afterward.
+        self.primary.metadata.identity = primary_identity;
+        self.terminfo_name = terminfo_name;
+        self.query_defaults = query_defaults;
+        self.title_report = title_report;
+        self.allow_set_title = allow_set_title;
+        self.tmux_strings = tmux_strings;
+        self.shell_command_events = shell_command_events;
+        self.tmux_clipboard = tmux_clipboard;
+        self.tmux_graphics = tmux_graphics;
+        self.tmux_alternate_screen = tmux_alternate_screen;
+        self.tmux_scroll_on_clear = tmux_scroll_on_clear;
+        self.tmux_cursor_style = tmux_cursor_style;
+        self.tmux_pane_style = tmux_pane_style;
+        self.tmux_control_colors = tmux_control_colors;
+        self.tmux_widths = tmux_widths;
+        self.tmux_vs16_wide = tmux_vs16_wide;
+        self.tmux_image_limit = tmux_image_limit;
+        self.tmux_image_quota = tmux_image_quota;
+        if let Some(sources) = tmux_sources {
+            self.primary.graphics = sources;
+        }
+        self.agent_status_events = agent_status_events;
+        self.linefeed_mode_events = linefeed_mode_events;
+        self.synchronized_output_generation = synchronized_output_generation;
+        self.visible = visible;
+        self.clipboard = clipboard;
+        self.kitty_dnd = kitty_dnd;
+        self.clipboard_write_limit = clipboard_write_limit;
+        self.glyphs = glyphs;
+        self.width_px = width_px;
+        self.height_px = height_px;
+        self.metadata = metadata;
+        self.modes = modes;
+        self.foreground = foreground;
+        self.background = background;
+        self.cursor_color = cursor;
+        self.palette = palette;
+        self.set_cursor_style(0);
+        self.set_mode(true, 25, self.modes.dec(25));
+        self.changed();
+    }
+
+    // tmux RIS resets the pen and visible grid, retaining the existing screens.
+    fn reset_tmux(&mut self) {
+        let alternate_modes = [47, 1047, 1049].map(|mode| self.modes.dec(mode));
+        self.modes.reset();
+        for (mode, value) in [47, 1047, 1049].into_iter().zip(alternate_modes) {
+            self.modes.set(true, mode, value);
+        }
+        self.tmux_state.cursor_blinking = false;
+        self.tmux_state.cursor_blinking_set = false;
+        self.tmux_state.cursor_very_visible = false;
+        self.mouse_mode = 0;
+        self.mouse_format = 0;
+        self.modify_other_keys = false;
+        if let Some((policy, mode)) = &mut self.tmux_extended_keys {
+            *mode = u8::from(*policy == 2);
+        }
+        self.reset_margins();
+        self.tabstops = (0..self.cols).map(|i| i > 0 && i % 8 == 0).collect();
+        self.palette.clone_from(&self.metadata.original_palette);
+        self.metadata.palette_overrides.fill(0);
+        self.metadata.colors[0][1] = None;
+        self.metadata.colors[1][1] = None;
+        self.foreground = self
+            .color_current(crate::color::Target::Foreground)
+            .unwrap_or([255; 3]);
+        self.background = self
+            .color_current(crate::color::Target::Background)
+            .unwrap_or([0; 3]);
+        self.previous_char = None;
+        self.grapheme_state = 0;
+        let screen = self.screen_mut();
+        screen.set_cursor_style(Style::default());
+        screen.cursor.hyperlink = None;
+        screen.cursor.protected = false;
+        screen.cursor.visible = true;
+        screen.iso_protection = false;
+        screen.charset = CharsetState::default();
+        screen.saved_cursor = Some(SavedCursor {
+            cursor: Cursor::default(),
+            origin: screen
+                .saved_cursor
+                .as_ref()
+                .is_some_and(|saved| saved.origin),
+            charset: CharsetState::default(),
+        });
+        self.erase_display(2, false);
+        self.cursor_position(1, 1);
+        self.changed();
+    }
+
+    /// DECSTR resets application modes and the pen without clearing content or
+    /// moving the cursor. Dynamic colors and modes outside DECSTR stay intact.
+    pub fn soft_reset(&mut self) {
+        for (private, mode) in [
+            (true, 25),
+            (false, 4),
+            (true, 6),
+            (true, 7),
+            (true, 45),
+            (true, 1045),
+            (false, 2),
+            (true, 1),
+            (true, 66),
+            (true, 69),
+        ] {
+            let default = self.modes.get_default(private, mode).unwrap();
+            // Origin mode must change without its usual cursor repositioning.
+            self.modes.set(private, mode, default);
+        }
+        self.reset_margins();
+        let screen = self.screen_mut();
+        screen.set_cursor_style(Style::default());
+        screen.cursor.protected = false;
+        screen.iso_protection = false;
+        screen.metadata.protected_mode = 0;
+        screen.charset = CharsetState::default();
+        screen.saved_cursor = None;
+        self.status_display = false;
+        self.modify_other_keys = false;
+        if let Some((policy, mode)) = &mut self.tmux_extended_keys {
+            *mode = u8::from(*policy == 2);
+        }
+        self.palette.clone_from(&self.metadata.original_palette);
+        self.metadata.palette_overrides.fill(0);
+        self.set_cursor_style(0);
+        self.set_mode(true, 25, self.modes.dec(25));
+        self.changed();
+    }
+
+    /// Set a host-configurable mode's current value and reset default. Modes
+    /// with transition side effects require their semantic API instead.
+    pub fn set_default_mode(&mut self, private: bool, mode: u16, value: bool) -> bool {
+        if !Modes::default_configurable(private, mode) {
+            return false;
+        }
+        self.modes.set_default(private, mode, value);
+        self.set_mode(private, mode, value);
+        true
+    }
+
+    /// Update configured colors while preserving application overrides.
+    /// `None` clears a configured dynamic color without inventing a query value.
+    /// Palette entries beyond the supplied slice retain their defaults.
+    pub fn set_default_colors(
+        &mut self,
+        foreground: Option<[u8; 3]>,
+        background: Option<[u8; 3]>,
+        cursor: Option<[u8; 3]>,
+        palette: &[[u8; 3]],
+    ) {
+        if self
+            .metadata
+            .colors
+            .iter()
+            .zip([background, foreground, cursor])
+            .all(|(entry, value)| entry[0] == value)
+            && self
+                .metadata
+                .original_palette
+                .iter()
+                .zip(palette)
+                .all(|(a, b)| a == b)
+        {
+            return;
+        }
+        for (entry, value) in self
+            .metadata
+            .colors
+            .iter_mut()
+            .zip([background, foreground, cursor])
+        {
+            entry[0] = value;
+        }
+        self.background = self
+            .color_current(crate::color::Target::Background)
+            .unwrap_or([0; 3]);
+        self.foreground = self
+            .color_current(crate::color::Target::Foreground)
+            .unwrap_or([255; 3]);
+        self.cursor_color = self.metadata.colors[2][1].or(cursor);
+        for (i, &color) in palette.iter().take(256).enumerate() {
+            self.metadata.original_palette[i] = color;
+            if self.metadata.palette_overrides[i / 8] & (1 << (i % 8)) == 0 {
+                self.palette[i] = color;
+            }
+        }
+        self.changed();
+    }
+
+    /// Configuration changes apply immediately while the cursor follows its
+    /// default; an application-selected shape persists until CSI 0 SP q/reset.
+    pub fn set_default_cursor(&mut self, shape: CursorShape, blink: Option<bool>) {
+        if self.metadata.cursor_default_shape == crate::snapshot::cursor_shape(shape)
+            && self.metadata.cursor_default_blink == blink
+        {
+            return;
+        }
+        self.metadata.cursor_default_shape = crate::snapshot::cursor_shape(shape);
+        self.metadata.cursor_default_blink = blink;
+        if self.metadata.cursor_is_default {
+            self.set_cursor_style(0);
+        }
+    }
+
+    fn set_cursor_style(&mut self, value: u16) {
+        self.metadata.cursor_is_default = value == 0;
+        let shape = match value {
+            0 => crate::snapshot::decode_shape(self.metadata.cursor_default_shape),
+            3 | 4 => CursorShape::Underline,
+            5 | 6 => CursorShape::Bar,
+            _ => CursorShape::Block,
+        };
+        let blink = if value == 0 {
+            self.metadata.cursor_default_blink.unwrap_or(true)
+        } else {
+            matches!(value, 1 | 3 | 5)
+        };
+        self.screen_mut().cursor.shape = shape;
+        self.set_mode(true, 12, blink);
+        self.changed();
+    }
+
+    fn end_hyperlink(&mut self) {
+        self.screen_mut().end_hyperlink();
+    }
+
+    pub fn plain_text(&self) -> String {
+        let mut result = String::new();
+        for row in self.screen().viewport() {
+            result.push_str(&self.screen().row_text(row));
+            if !row.wrapped {
+                result.push('\n');
+            }
+        }
+        result.truncate(result.trim_end_matches('\n').len());
+        result
+    }
+
+    pub fn resolve_color(&self, color: Color, default: [u8; 3]) -> [u8; 3] {
+        match color {
+            Color::Default => default,
+            Color::Indexed(i) => self.palette[i as usize],
+            Color::Rgb(r, g, b) => [r, g, b],
+        }
+    }
+
+    pub(crate) fn changed(&mut self) {
+        self.screen_mut().sync_cursor_resources();
+        self.generation = self.generation.wrapping_add(1);
+    }
+    fn reset_margins(&mut self) {
+        self.margins = Margins {
+            top: 0,
+            bottom: self.rows as usize - 1,
+            left: 0,
+            right: self.cols as usize - 1,
+        };
+    }
+
+    fn handle(
+        &mut self,
+        event: Event<'_>,
+        effects: &mut Vec<Effect>,
+        clipboard_write_enabled: bool,
+        clipboard_read_enabled: bool,
+    ) {
+        match event {
+            Event::Print(cp) => self.print(cp),
+            // Raw C1 controls emitted outside UTF-8 ground-state decoding are
+            // equivalent to their seven-bit ESC forms.
+            Event::Execute(byte) if byte > 0x7f => self.esc(&[], byte - 0x40, effects),
+            Event::Execute(byte) => match byte {
+                0x05 => effects.push(Effect::Query(Query::Enquiry)),
+                0x07 => effects.push(Effect::Bell),
+                0x08 => self.cursor_left(1),
+                0x09 => self.horizontal_tab(),
+                0x0a..=0x0c => {
+                    self.index();
+                    if self.modes.get(false, 20) {
+                        self.carriage_return();
+                    }
+                }
+                0x0d => self.carriage_return(),
+                0x0e => self.screen_mut().charset.gl = 1,
+                0x0f => self.screen_mut().charset.gl = 0,
+                _ => {}
+            },
+            Event::Esc {
+                intermediates,
+                final_byte,
+            } => self.esc(intermediates, final_byte, effects),
+            Event::Csi {
+                intermediates,
+                params,
+                colon_separators,
+                final_byte,
+            } => self.csi(
+                intermediates,
+                params,
+                colon_separators,
+                final_byte,
+                effects,
+                clipboard_read_enabled,
+            ),
+            Event::Osc {
+                data,
+                terminated_by_bell,
+            } => self.osc(
+                data,
+                terminated_by_bell,
+                effects,
+                clipboard_write_enabled,
+                clipboard_read_enabled,
+            ),
+            Event::DcsHook {
+                intermediates,
+                params,
+                final_byte,
+            } => {
+                self.dcs.clear();
+                self.string_overflow = false;
+                self.dcs_header = (intermediates.to_vec(), params.to_vec(), final_byte);
+            }
+            Event::DcsPut(byte) => {
+                let limit =
+                    if !self.tmux_strings && self.dcs_header.0 == b"$" && self.dcs_header.2 == b'q'
+                    {
+                        2
+                    } else {
+                        1024 * 1024
+                    };
+                if self.dcs.len() < limit {
+                    self.dcs.push(byte);
+                } else {
+                    self.string_overflow = true;
+                }
+            }
+            Event::DcsUnhook => self.dcs_end(effects),
+            Event::ApcStart | Event::TmuxStringStart(_) => {
+                self.apc.clear();
+                self.apc_glyph_limit = None;
+                self.string_overflow = false;
+                self.tmux_string_kind = if let Event::TmuxStringStart(kind) = event {
+                    kind
+                } else {
+                    0
+                };
+            }
+            Event::ApcPut(byte) => self.apc_put(&[byte]),
+            Event::ApcEnd | Event::TmuxStringEnd => {
+                let mut apc = std::mem::take(&mut self.apc);
+                if !self.string_overflow {
+                    if self.tmux_string_kind == b'k' {
+                        if std::str::from_utf8(&apc).is_ok() {
+                            effects.push(Effect::WindowName(apc.clone()));
+                        }
+                    } else if self.tmux_strings && !matches!(self.tmux_string_kind, b'_' | 0x9f) {
+                        // SOS and PM consume their payload without changing pane metadata.
+                    } else if self.apc_glyph_limit.is_some() {
+                        let (reply, changed) = self.glyphs.execute(&apc[5..]);
+                        if let Some(reply) = reply {
+                            effects.push(Effect::Write(reply));
+                        }
+                        if changed {
+                            self.changed();
+                        }
+                    } else if self.tmux_strings && !(apc.len() > 1 && apc[0] == b'G') {
+                        if self.allow_set_title && std::str::from_utf8(&apc).is_ok() {
+                            self.set_title(&apc);
+                            effects.push(Effect::Title(apc.clone()));
+                        }
+                    } else {
+                        self.graphics_command(&apc, effects);
+                    }
+                }
+                apc.clear();
+                self.apc = apc;
+            }
+            Event::OscOverflow => {
+                effects.push(Effect::UnknownSequence("OSC exceeded capture limit".into()))
+            }
+        }
+    }
+
+    fn apc_put(&mut self, mut bytes: &[u8]) {
+        if self.string_overflow {
+            return;
+        }
+        if self.apc.len() < 5 {
+            let prefix = bytes.len().min(5 - self.apc.len());
+            self.apc.extend_from_slice(&bytes[..prefix]);
+            bytes = &bytes[prefix..];
+            if self.apc.as_slice() == b"25a1;"
+                && self.tmux_string_kind != b'k'
+                && (!self.tmux_strings || self.glyphs.enabled())
+            {
+                self.apc_glyph_limit = Some(self.glyphs.apc_limit());
+                self.string_overflow = !self.glyphs.enabled();
+                if self.string_overflow {
+                    return;
+                }
+            }
+        }
+        let limit = if self.tmux_strings
+            && (self.tmux_string_kind == b'k' || self.apc.first() != Some(&b'G'))
+        {
+            1024 * 1024 - 1
+        } else {
+            self.apc_glyph_limit
+                .map_or(64 * 1024 * 1024, |limit| limit.saturating_add(5))
+        };
+        let available = limit.saturating_sub(self.apc.len());
+        self.apc
+            .extend_from_slice(&bytes[..bytes.len().min(available)]);
+        self.string_overflow = bytes.len() > available;
+    }
+
+    /// Fill ordinary row spans without repeating cursor and page lookup per cell.
+    fn print_ascii(&mut self, mut bytes: &[u8]) {
+        if self.status_display {
+            return;
+        }
+        let screen = self.screen();
+        if self.modes.get(false, 4)
+            || !self.modes.dec(7)
+            || screen.charset.single.is_some()
+            || screen.cursor.hyperlink.is_some()
+        {
+            for &byte in bytes {
+                self.print(char::from(byte));
+            }
+            return;
+        }
+        while !bytes.is_empty() {
+            self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
+            let col = self.screen().cursor.col.min(usize::from(self.cols) - 1);
+            self.screen_mut().cursor.col = col;
+            if self.screen().cursor.pending_wrap {
+                // A cursor beyond the margin uses its old right limit for one print.
+                if col > self.margins.right {
+                    self.print(char::from(bytes[0]));
+                    bytes = &bytes[1..];
+                    continue;
+                }
+                self.print_wrap();
+            }
+            let col = self.screen().cursor.col;
+            let right = if col > self.margins.right {
+                usize::from(self.cols) - 1
+            } else {
+                self.margins.right
+            };
+            let count = bytes.len().min(right - col + 1);
+            let written = self.screen_mut().write_cursor_ascii(&bytes[..count]);
+            if written == 0 {
+                // Wide cells, graphemes and links retain the scalar replacement rules.
+                self.print(char::from(bytes[0]));
+                bytes = &bytes[1..];
+                continue;
+            }
+            self.previous_char = Some(char::from(bytes[written - 1]));
+            let cursor = &mut self.screen_mut().cursor;
+            cursor.pending_wrap = col + written > right;
+            cursor.col = (col + written).min(right);
+            self.generation = self.generation.wrapping_add(written as u64);
+            bytes = &bytes[written..];
+        }
+    }
+
+    fn print_utf8(&mut self, text: &str) {
+        // C's byte-limited combining rules require the preceding completed cell.
+        if self.tmux_graphics {
+            let mut remaining = text;
+            while !remaining.is_empty() {
+                let ascii = remaining.bytes().take_while(u8::is_ascii).count();
+                if ascii > 0 {
+                    self.print_ascii(&remaining.as_bytes()[..ascii]);
+                    remaining = &remaining[ascii..];
+                } else {
+                    let cp = remaining.chars().next().unwrap();
+                    self.print(cp);
+                    remaining = &remaining[cp.len_utf8()..];
+                }
+            }
+            return;
+        }
+        if self.status_display {
+            return;
+        }
+        let screen = self.screen();
+        if self.modes.get(false, 4)
+            || !self.modes.dec(7)
+            || screen.charset.single.is_some()
+            || !matches!(
+                screen.charset.slots[screen.charset.gl],
+                Charset::Utf8 | Charset::Ascii
+            )
+            || screen.cursor.hyperlink.is_some()
+            || self.margins.left != 0
+            || self.margins.right != usize::from(self.cols) - 1
+        {
+            for cp in text.chars() {
+                self.print(cp);
+            }
+            return;
+        }
+        let right = usize::from(self.cols) - 1;
+        let graphemes = self.modes.dec(2027);
+        // Borrowed parser events stay borrowed; decode bounded chunks without
+        // a heap buffer, and reuse properties for neighboring equal scalars.
+        let mut input = text;
+        let mut codepoints = ['\0'; 256];
+        let mut properties = [0u32; 256];
+        let mut previous = ('\0', 0);
+        loop {
+            let len = crate::printing::decode_utf8(
+                &mut input,
+                &mut codepoints,
+                &mut properties,
+                &mut previous,
+            );
+            if len == 0 {
+                break;
+            }
+            let mut offset = 0;
+            while offset < len {
+                let mut state = self.grapheme_state;
+                let count = self.screen_mut().write_cursor_codepoints(
+                    &codepoints[offset..len],
+                    &properties[offset..len],
+                    right,
+                    graphemes,
+                    &mut state,
+                );
+                if count != 0 {
+                    self.grapheme_state = state;
+                    self.previous_char = Some(codepoints[offset + count - 1]);
+                    self.generation = self.generation.wrapping_add(count as u64);
+                    offset += count;
+                } else {
+                    if graphemes && codepoints[offset] == '\u{200d}' && offset + 1 < len {
+                        let count = self.screen_mut().append_zwj_pair(
+                            codepoints[offset + 1],
+                            unicode::Properties::from_bits(properties[offset + 1]).grapheme,
+                            right,
+                            &mut state,
+                        );
+                        if count != 0 {
+                            self.grapheme_state = state;
+                            self.generation = self.generation.wrapping_add(count as u64);
+                            offset += count;
+                            continue;
+                        }
+                    }
+                    // Scalar printing resolves wrapping, joins and resource growth.
+                    self.print_with_properties(
+                        codepoints[offset],
+                        unicode::Properties::from_bits(properties[offset]),
+                    );
+                    offset += 1;
+                }
+            }
+        }
+    }
+
+    pub fn print(&mut self, cp: char) {
+        self.print_with_properties(
+            cp,
+            unicode::Properties::from_bits(unicode::print_properties(cp)),
+        );
+    }
+
+    fn print_with_properties(&mut self, cp: char, mut prop: unicode::Properties) {
+        if self.tmux_graphics && cp as u32 > 127 {
+            if ('\u{1f1e6}'..='\u{1f1ff}').contains(&cp) {
+                prop.width = 1;
+            }
+            if let Some((_, _, width)) = self
+                .tmux_widths
+                .iter()
+                .rev()
+                .find(|(start, end, _)| (*start..=*end).contains(&(cp as u32)))
+            {
+                prop.width = *width;
+            }
+        }
+        if self.status_display {
+            return;
+        }
+        // A single shift applies to this scalar, including combining or ignored characters.
+        let charset = {
+            let state = &mut self.screen_mut().charset;
+            let slot = state.single.take().unwrap_or(state.gl);
+            state.slots[slot]
+        };
+        let mut location = self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
+        // The row now spans the logical screen, so clamping needs no page lookup.
+        let col = self.screen().cursor.col.min(usize::from(self.cols) - 1);
+        self.screen_mut().cursor.col = col;
+        let cursor = &self.screen().cursor;
+        let (col, pending_wrap) = (cursor.col, cursor.pending_wrap);
+        let right = if col > self.margins.right {
+            self.cols as usize - 1
+        } else {
+            self.margins.right
+        };
+        if self.tmux_graphics && self.tmux_combine(cp, prop.width, right) {
+            return;
+        }
+        let previous = if cp as u32 <= 127 || cp as u32 <= 255 && prop.width != 0 {
+            None
+        } else {
+            let graphemes = self.modes.dec(2027);
+            let row = self.screen().cursor_row();
+            let previous_col = if pending_wrap && self.modes.dec(7) {
+                Some(col)
+            } else if graphemes
+                && !self.modes.dec(7)
+                && col == right
+                && row.cells[right].codepoint().is_some()
+            {
+                Some(right)
+            } else {
+                col.checked_sub(1)
+            };
+            previous_col.map(|previous_col| {
+                let previous_col = if row.cells[previous_col].width() == 0 {
+                    previous_col.saturating_sub(1)
+                } else {
+                    previous_col
+                };
+                let cell = row.cells[previous_col];
+                let mut last = cell.codepoint();
+                let mut grapheme_len = 0;
+                if cell.has_grapheme()
+                    && last.is_some()
+                    && if graphemes { col > 0 } else { prop.width == 0 }
+                {
+                    let allocation = row.grapheme(previous_col).unwrap();
+                    grapheme_len = allocation.len;
+                    if graphemes {
+                        last = row.page.graphemes.text(allocation).chars().next_back();
+                    }
+                }
+                (previous_col, cell, last, grapheme_len)
+            })
+        };
+
+        if !self.tmux_graphics
+            && cp as u32 > 255
+            && self.modes.dec(2027)
+            && col > 0
+            && let Some((col, previous, Some(last), grapheme_len)) = previous
+        {
+            let previous_width = previous.width();
+            let old_state = self.grapheme_state;
+            let last_prop = properties(last);
+            if !unicode::grapheme_break_properties(
+                last_prop.grapheme,
+                prop.grapheme,
+                &mut self.grapheme_state,
+            ) {
+                let mut width = previous_width;
+                if matches!(cp, '\u{fe0f}' | '\u{fe0e}') {
+                    if !last_prop.emoji_vs_base {
+                        self.grapheme_state = old_state;
+                        return;
+                    }
+                    width = if cp == '\u{fe0f}' { 2 } else { 1 };
+                } else if !prop.zero_in_grapheme {
+                    width = 2;
+                }
+                self.append_grapheme(col, cp, width, right, previous, grapheme_len);
+                return;
+            }
+        }
+        let width = if cp as u32 <= 127 { 1 } else { prop.width };
+        if width == 0 {
+            if self.modes.dec(2027) {
+                return;
+            }
+            if let Some((col, previous, _, grapheme_len)) = previous {
+                if previous.codepoint().is_none() {
+                    return;
+                }
+                if matches!(cp, '\u{fe0f}' | '\u{fe0e}')
+                    && previous
+                        .codepoint()
+                        .is_none_or(|p| properties(p).grapheme != 11)
+                {
+                    return;
+                }
+                self.append_grapheme(col, cp, previous.width(), right, previous, grapheme_len);
+            }
+            return;
+        }
+        self.previous_char = Some(cp);
+        if pending_wrap && self.modes.dec(7) {
+            self.print_wrap();
+            location = self.screen().cursor_location();
+        }
+        if self.modes.get(false, 4)
+            && self.screen().cursor.col + usize::from(width) < self.cols as usize
+        {
+            self.insert_blanks(width.into());
+            location = self.screen().cursor_location();
+        }
+        if width == 2 && right.saturating_sub(self.margins.left) < 1 {
+            self.put_cell(None, 1, false, location);
+        } else {
+            if width == 2 && self.screen().cursor.col == right {
+                if !self.modes.dec(7) {
+                    return;
+                }
+                self.put_cell(None, 1, right == self.cols as usize - 1, location);
+                self.print_wrap();
+                location = self.screen().cursor_location();
+            }
+            self.put_cell(Some(charset.map(cp)), width, false, location);
+        }
+        let x = self.screen().cursor.col;
+        self.screen_mut().cursor.pending_wrap = x + width as usize > right;
+        self.screen_mut().cursor.col = (x + width as usize).min(right);
+        // put_cell synchronized the cursor's resources. Advancing within this
+        // row changes neither its owning page nor its style or hyperlink.
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn tmux_combine(&mut self, cp: char, width: u8, right: usize) -> bool {
+        if cp == '\u{3164}' {
+            return true;
+        }
+        let zero = width == 0 || matches!(cp, '\u{200d}' | '\u{fe0f}');
+        if cp.len_utf8() < 2 {
+            return zero;
+        }
+        let screen = self.screen();
+        let x = screen.cursor.col + usize::from(screen.cursor.pending_wrap);
+        let Some(mut col) = x.checked_sub(1) else {
+            return zero;
+        };
+        let row = screen.cursor_row();
+        if col > 0 && row.cells[col].width() == 0 {
+            col -= 1;
+        }
+        let cell = row.cells[col];
+        if x - col != usize::from(cell.width()) {
+            return zero;
+        }
+        let Some(base) = cell.codepoint() else {
+            return zero;
+        };
+        let text = screen.cell_text(row, col);
+        let regional = |cp| ('\u{1f1e6}'..='\u{1f1ff}').contains(&cp);
+        let pair =
+            regional(cp) && regional(base) && text.chars().filter(|cp| regional(*cp)).count() == 1;
+        let tone = ('\u{1f3fb}'..='\u{1f3ff}').contains(&cp) && tmux_emoji_modifier_base(base);
+        let force_wide = pair || tone || (cp == '\u{fe0f}' && self.tmux_vs16_wide);
+        if !zero && !pair && !tone && !text.ends_with('\u{200d}') {
+            return false;
+        }
+        if text.len() + cp.len_utf8() > 31 {
+            return zero;
+        }
+        if force_wide && cell.width() == 1 && self.cols < 2 {
+            return true;
+        }
+        let width = if force_wide && cell.width() == 1 {
+            2
+        } else {
+            cell.width()
+        };
+        let grapheme_len = row.grapheme(col).map_or(0, |allocation| allocation.len);
+        self.append_grapheme(col, cp, width, right, cell, grapheme_len);
+        true
+    }
+
+    fn append_grapheme(
+        &mut self,
+        mut col: usize,
+        cp: char,
+        width: u8,
+        right: usize,
+        cell: Cell,
+        grapheme_len: u8,
+    ) {
+        // Printing already extended the row and resolved this preceding cell.
+        if grapheme_len >= 64 {
+            return;
+        }
+        let old_width = cell.width();
+        let y = self.screen().cursor.row;
+        if width > old_width && col == right {
+            if !self.modes.dec(7) {
+                return;
+            }
+            let text = self.screen().cursor_row().copy_cell(col).text;
+            self.screen_mut().cursor.col = col;
+            self.put_cell(
+                None,
+                1,
+                right == self.cols as usize - 1,
+                self.screen().cursor_location(),
+            );
+            self.print_wrap();
+            col = self.screen().cursor.col;
+            self.put_cell(
+                cell.codepoint(),
+                width,
+                false,
+                self.screen().cursor_location(),
+            );
+            if let Some((text, len)) = text {
+                let _ = self.screen_mut().restore_wrapped_grapheme(text, len);
+            }
+        } else if width != old_width {
+            let background = self.screen().cursor.style.background;
+            self.screen_mut()
+                .change_grapheme_width(y, col, width, right, background);
+        }
+        let _ = self.screen_mut().append_grapheme(col, cp);
+        if width != old_width {
+            self.screen_mut().cursor.col = (col + width as usize).min(right);
+            self.screen_mut().cursor.pending_wrap =
+                width > old_width && col + width as usize > right;
+        }
+        self.changed();
+    }
+
+    fn put_cell(
+        &mut self,
+        codepoint: Option<char>,
+        width: u8,
+        spacer_head: bool,
+        location: (usize, usize),
+    ) {
+        // Native cells reserve codepoint zero for empty content.
+        let codepoint = codepoint.filter(|&cp| cp != '\0');
+        // print and append_grapheme extend the source row; print_wrap extends
+        // the destination row before any wrapped write reaches this helper.
+        self.screen_mut()
+            .write_cursor_cell(codepoint, width, spacer_head, location);
+    }
+
+    fn print_wrap(&mut self) {
+        let y = self.screen().cursor.row;
+        let semantic = self.screen().cursor.semantic;
+        let clear_eol = self.screen().metadata.cursor_clear_eol;
+        let mark_wrap = self.screen().cursor.col == usize::from(self.cols) - 1;
+        if mark_wrap {
+            self.screen_mut()
+                .row_header_mut(y)
+                .set(RowHeader::WRAPPED, true);
+        }
+        self.index();
+        let screen = self.screen_mut();
+        screen.cursor.semantic = semantic;
+        screen.metadata.cursor_clear_eol = clear_eol;
+        if semantic == SemanticContent::Prompt {
+            screen
+                .row_header_mut(screen.cursor.row)
+                .set_semantic(SemanticContent::Input);
+        }
+        if mark_wrap {
+            let y = self.screen().cursor.row;
+            self.screen_mut()
+                .row_header_mut(y)
+                .set(RowHeader::CONTINUATION, true);
+        }
+        self.screen_mut().cursor.col = self.margins.left;
+        self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
+        self.screen_mut().cursor.pending_wrap = false;
+    }
+
+    pub fn carriage_return(&mut self) {
+        let col = if self.modes.dec(6) || self.screen().cursor.col >= self.margins.left {
+            self.margins.left
+        } else {
+            0
+        };
+        self.ensure_row_cells(self.screen().cursor.row, col + 1);
+        self.screen_mut().cursor.col = col;
+        self.screen_mut().cursor.pending_wrap = false;
+        self.changed();
+    }
+
+    pub fn cursor_position(&mut self, row: usize, col: usize) {
+        let (top, left, bottom, right) = if self.modes.dec(6) {
+            (
+                self.margins.top,
+                self.margins.left,
+                self.margins.bottom,
+                self.margins.right,
+            )
+        } else {
+            (0, 0, self.rows as usize - 1, self.cols as usize - 1)
+        };
+        let row = top.saturating_add(row.max(1) - 1).min(bottom);
+        let col = left.saturating_add(col.max(1) - 1).min(right);
+        self.ensure_row_cells(row, col + 1);
+        let cursor = &mut self.screen_mut().cursor;
+        cursor.row = row;
+        cursor.col = col;
+        cursor.pending_wrap = false;
+        self.changed();
+    }
+
+    fn cursor_vertical(&mut self, amount: usize, down: bool) {
+        let y = self.screen().cursor.row;
+        let target = if down {
+            let bottom = if y <= self.margins.bottom {
+                self.margins.bottom
+            } else {
+                self.rows as usize - 1
+            };
+            y.saturating_add(amount.max(1)).min(bottom)
+        } else {
+            let top = if y >= self.margins.top {
+                self.margins.top
+            } else {
+                0
+            };
+            y.saturating_sub(amount.max(1)).max(top)
+        };
+        self.ensure_row_cells(target, self.screen().cursor.col + 1);
+        self.screen_mut().cursor.row = target;
+        self.clamp_cursor();
+        self.screen_mut().cursor.pending_wrap = false;
+        self.changed();
+    }
+
+    fn cursor_right(&mut self, amount: usize) {
+        let x = self.screen().cursor.col;
+        let right = if x <= self.margins.right {
+            self.margins.right
+        } else {
+            self.cols as usize - 1
+        };
+        let col = x.saturating_add(amount.max(1)).min(right);
+        self.ensure_row_cells(self.screen().cursor.row, col + 1);
+        self.screen_mut().cursor.col = col;
+        self.screen_mut().cursor.pending_wrap = false;
+        self.changed();
+    }
+
+    fn cursor_left(&mut self, amount: usize) {
+        let mut remaining = amount.max(1);
+        let reverse = self.modes.dec(7) && (self.modes.dec(45) || self.modes.dec(1045));
+        let extended = self.modes.dec(1045);
+        if reverse && self.screen().cursor.pending_wrap {
+            remaining -= 1;
+        }
+        self.screen_mut().cursor.pending_wrap = false;
+        if !reverse {
+            self.screen_mut().cursor.col = self.screen().cursor.col.saturating_sub(remaining);
+        } else {
+            let left = if self.screen().cursor.col < self.margins.left {
+                0
+            } else {
+                self.margins.left
+            };
+            while remaining > 0 {
+                let current = self.screen().cursor.clone();
+                let n = remaining.min(current.col.saturating_sub(left));
+                self.screen_mut().cursor.col -= n;
+                remaining -= n;
+                if remaining == 0 {
+                    break;
+                }
+                if current.row == self.margins.top {
+                    if !extended {
+                        break;
+                    }
+                    self.screen_mut().cursor.row = self.margins.bottom;
+                } else {
+                    if current.row == 0 || !extended && !self.screen().row(current.row - 1).wrapped
+                    {
+                        break;
+                    }
+                    self.screen_mut().cursor.row -= 1;
+                }
+                self.screen_mut().cursor.col = self.margins.right;
+                self.ensure_row_cells(self.screen().cursor.row, self.margins.right + 1);
+                remaining -= 1;
+            }
+        }
+        self.changed();
+    }
+
+    pub fn index(&mut self) {
+        let y = self.screen().cursor.row;
+        let mut cursor_ready = false;
+        if y == self.margins.bottom {
+            let x = self.screen().cursor.col;
+            if x >= self.margins.left && x <= self.margins.right {
+                cursor_ready = self.index_scroll();
+            }
+        } else if y + 1 < self.rows as usize {
+            self.ensure_row_cells(y + 1, self.screen().cursor.col + 1);
+            self.screen_mut().cursor.row += 1;
+        }
+        if !cursor_ready {
+            self.clamp_cursor();
+        }
+        self.screen_mut().cursor.pending_wrap = false;
+        let screen = self.screen_mut();
+        if screen.cursor.semantic != SemanticContent::Output {
+            if screen.metadata.cursor_clear_eol {
+                screen.cursor.semantic = SemanticContent::Output;
+                screen.metadata.cursor_clear_eol = false;
+            } else {
+                screen
+                    .row_header_mut(screen.cursor.row)
+                    .set_semantic(SemanticContent::Input);
+            }
+        }
+        // Public hyperlinks without an ID repeat native admission on each sync.
+        if !cursor_ready || self.screen().cursor.hyperlink.is_some() {
+            self.screen_mut().sync_cursor_resources();
+        }
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn reverse_index(&mut self) {
+        let cursor = &self.screen().cursor;
+        if cursor.row == self.margins.top
+            && cursor.col >= self.margins.left
+            && cursor.col <= self.margins.right
+        {
+            self.scroll_region(1, false);
+        } else {
+            self.cursor_vertical(1, false);
+        }
+    }
+
+    /// Whether the row operation also clamped the cursor and renewed its resources.
+    fn index_scroll(&mut self) -> bool {
+        let m = self.margins;
+        let cols = usize::from(self.cols);
+        let full = m.left == 0 && m.right == cols - 1;
+        let no_history = !self.screen().history_enabled();
+        if full && self.rows == 1 && no_history {
+            self.ensure_active_columns();
+            let screen = self.screen_mut();
+            screen.reset_row(0, screen.row(0).id, screen.cursor.style.background);
+            return false;
+        }
+        if !full || self.tmux_graphics || m.top == 0 && (!no_history || m.bottom == 0) {
+            self.scroll_up(1, true);
+            return true;
+        }
+        self.ensure_active_columns();
+        let screen = self.screen_mut();
+        let top = screen.history_len() + m.top;
+        let (page, page_row) = screen.pages.page_at(top);
+        let _ = page;
+        let erased = screen.row(m.top).id;
+        let replacement = if page_row == 0 {
+            screen.row(m.top + 1).id
+        } else {
+            screen.physical_row(top - 1).id
+        };
+        for point in screen.grid_points_mut() {
+            if point.row == erased {
+                point.row = replacement;
+                if page_row == 0 {
+                    point.col = 0;
+                }
+            }
+        }
+        let blank = screen.next_row_id();
+        screen.shift_rows(
+            m.top,
+            m.bottom,
+            true,
+            false,
+            blank,
+            screen.cursor.style.background,
+            usize::MAX,
+        );
+        self.clamp_cursor();
+        true
+    }
+
+    fn scrolls_above_cursor(&self) -> bool {
+        let m = self.margins;
+        if self.tmux_graphics {
+            return m.left == 0
+                && m.right + 1 == usize::from(self.cols)
+                && self.screen().history_enabled();
+        }
+        m.top == 0
+            && m.left == 0
+            && m.right + 1 == usize::from(self.cols)
+            && (self.screen().limits.bytes != Some(0) || m.bottom + 1 == usize::from(self.rows))
+    }
+
+    /// SU/SD temporarily move to a margin before doing the row operation.
+    /// Even though the visible cursor returns, those page crossings migrate
+    /// its resources and renew implicit hyperlink identities.
+    fn scroll_region(&mut self, count: usize, up: bool) {
+        let cursor = &self.screen().cursor;
+        let saved = (cursor.col, cursor.row, cursor.pending_wrap);
+        let (col, row) = if up && self.scrolls_above_cursor() {
+            (0, self.margins.bottom)
+        } else {
+            (self.margins.left, self.margins.top)
+        };
+        self.ensure_row_cells(row, col + 1);
+        self.screen_mut().cursor.col = col;
+        self.screen_mut().cursor.row = row;
+        self.screen_mut().sync_cursor_resources();
+        if up {
+            self.scroll_up(count, true)
+        } else {
+            self.scroll_down(count)
+        }
+        self.ensure_row_cells(saved.1, saved.0 + 1);
+        let cursor = &mut self.screen_mut().cursor;
+        (cursor.col, cursor.row, cursor.pending_wrap) = saved;
+        self.screen_mut().sync_cursor_resources();
+    }
+
+    fn scroll_up(&mut self, count: usize, history: bool) {
+        self.ensure_active_columns();
+        let m = self.margins;
+        let count = count.max(1).min(m.bottom - m.top + 1);
+        let cols = self.cols as usize;
+        let bg = self.screen().cursor.style.background;
+        let full = m.left == 0 && m.right == cols - 1;
+        let no_scrollback = !self.screen().history_enabled();
+        let shift_history = history && self.scrolls_above_cursor();
+        if !shift_history {
+            self.prepare_row_shift();
+        }
+        for _ in 0..count {
+            if full {
+                let screen = self.screen_mut();
+                let blank = screen.next_row_id();
+                let pins = if !shift_history {
+                    // IL/DL-style movement copies contents between physical
+                    // rows without moving their tracked coordinates.
+                    (m.top..=m.bottom)
+                        .map(|y| {
+                            (
+                                screen.row(y).id,
+                                if y == m.bottom {
+                                    blank
+                                } else {
+                                    screen.row(y + 1).id
+                                },
+                            )
+                        })
+                        .collect()
+                } else if no_scrollback {
+                    // The no-scrollback fast path clamps pins scrolled off
+                    // the top to the first surviving row.
+                    [(
+                        screen.row(0).id,
+                        if screen.height() > 1 {
+                            screen.row(1).id
+                        } else {
+                            blank
+                        },
+                    )]
+                    .into_iter()
+                    .collect()
+                } else {
+                    // Native history insertion shifts the whole page list.
+                    // Restoring content below the margin leaves pins in place.
+                    (m.bottom + 1..screen.height())
+                        .map(|y| {
+                            (
+                                screen.row(y).id,
+                                if y == m.bottom + 1 {
+                                    blank
+                                } else {
+                                    screen.row(y - 1).id
+                                },
+                            )
+                        })
+                        .collect()
+                };
+                if screen.tmux_history.is_none() || !shift_history {
+                    screen.remap_grid_rows(&pins);
+                }
+                screen.shift_rows(m.top, m.bottom, true, shift_history, blank, bg, cols);
+            } else {
+                for y in m.top..m.bottom {
+                    self.copy_row_region(y + 1, y, m.left, m.right + 1, bg);
+                }
+                self.screen_mut()
+                    .erase_row_cells(m.bottom, m.left, m.right + 1, bg, false);
+            }
+        }
+        self.clamp_cursor();
+        // Full-row shifts renewed resources; retain the repeated hyperlink admission.
+        if !full || self.screen().cursor.hyperlink.is_some() {
+            self.screen_mut().sync_cursor_resources();
+        }
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn scroll_down(&mut self, count: usize) {
+        self.ensure_active_columns();
+        let m = self.margins;
+        let cols = self.cols as usize;
+        let count = count.max(1).min(m.bottom - m.top + 1);
+        let bg = self.screen().cursor.style.background;
+        self.prepare_row_shift();
+        for _ in 0..count {
+            if m.left == 0 && m.right == cols - 1 {
+                let screen = self.screen_mut();
+                let blank = screen.next_row_id();
+                let pins = (m.top..=m.bottom)
+                    .map(|y| {
+                        (
+                            screen.row(y).id,
+                            if y == m.top {
+                                blank
+                            } else {
+                                screen.row(y - 1).id
+                            },
+                        )
+                    })
+                    .collect();
+                screen.remap_grid_rows(&pins);
+                screen.shift_rows(m.top, m.bottom, false, false, blank, bg, usize::MAX);
+            } else {
+                for y in (m.top + 1..=m.bottom).rev() {
+                    self.copy_row_region(y - 1, y, m.left, m.right + 1, bg);
+                }
+                self.screen_mut()
+                    .erase_row_cells(m.top, m.left, m.right + 1, bg, false);
+            }
+        }
+        self.clamp_cursor();
+        self.changed();
+    }
+
+    fn prepare_row_shift(&mut self) {
+        let m = self.margins;
+        let right_edge = m.right + 1 == usize::from(self.cols);
+        if m.left == 0 && right_edge {
+            let screen = self.screen_mut();
+            screen.pages.invalidate_layout(
+                screen.history_len() + m.top,
+                screen.history_len() + m.bottom,
+            );
+        }
+        for y in m.top..=m.bottom {
+            self.screen_mut()
+                .prepare_row_shift(y, m.left, m.right, right_edge);
+        }
+    }
+
+    fn copy_row_region(
+        &mut self,
+        source: usize,
+        destination: usize,
+        start: usize,
+        end: usize,
+        background: Color,
+    ) {
+        self.screen_mut()
+            .copy_row_cells(source, destination, start, end, background);
+    }
+
+    fn horizontal_tab(&mut self) {
+        if !self.tmux_strings {
+            self.tab(1, false);
+            return;
+        }
+        let col = self.screen().cursor.col;
+        let right = usize::from(self.cols) - 1;
+        if col >= right {
+            return;
+        }
+        let next = (col + 1..=right)
+            .find(|&i| self.tabstops[i])
+            .unwrap_or(right);
+        self.ensure_row_cells(self.screen().cursor.row, next + 1);
+        self.screen_mut().retain_tab(col, next);
+        self.screen_mut().cursor.col = next;
+        self.changed();
+    }
+
+    fn tab(&mut self, count: usize, backward: bool) {
+        for _ in 0..count.min(self.cols as usize) {
+            let col = self.screen().cursor.col;
+            let next = if backward {
+                let left = if self.modes.dec(6) {
+                    self.margins.left
+                } else {
+                    0
+                };
+                if col <= left {
+                    break;
+                }
+                (left..col)
+                    .rev()
+                    .find(|&i| self.tabstops[i])
+                    .unwrap_or(left)
+            } else {
+                let right = self.margins.right;
+                if col >= right {
+                    break;
+                }
+                (col + 1..=right)
+                    .find(|&i| self.tabstops[i])
+                    .unwrap_or(right)
+            };
+            self.screen_mut().cursor.col = next;
+            self.ensure_row_cells(self.screen().cursor.row, next + 1);
+        }
+        self.changed();
+    }
+
+    fn insert_blanks(&mut self, count: usize) {
+        self.screen_mut().cursor.pending_wrap = false;
+        let cur = self.screen().cursor.clone();
+        if cur.col < self.margins.left || cur.col > self.margins.right {
+            return;
+        }
+        self.ensure_row_cells(cur.row, usize::from(self.cols));
+        let end = self.margins.right + 1;
+        let count = count.max(1).min(end - cur.col);
+        self.screen_mut()
+            .shift_cells(cur.row, cur.col..end, count, true, cur.style.background);
+        self.changed();
+    }
+
+    fn delete_chars(&mut self, count: usize) {
+        let cur = self.screen().cursor.clone();
+        if cur.col < self.margins.left || cur.col > self.margins.right {
+            return;
+        }
+        self.ensure_row_cells(cur.row, usize::from(self.cols));
+        let end = self.margins.right + 1;
+        let count = count.max(1).min(end - cur.col);
+        self.screen_mut().split_cell_boundary(cur.col);
+        self.screen_mut().split_cell_boundary(cur.col + count);
+        self.screen_mut().split_cell_boundary(end);
+        self.screen_mut()
+            .shift_cells(cur.row, cur.col..end, count, false, cur.style.background);
+        self.screen_mut().cursor_reset_wrap();
+        self.changed();
+    }
+
+    pub fn erase_line(&mut self, mode: u16, protected: bool) {
+        let cursor = self.screen().cursor.clone();
+        let id = self.screen().row(cursor.row).id;
+        let shell_markers = self
+            .screen()
+            .tmux_shell
+            .as_ref()
+            .and_then(|m| m.get(&id))
+            .cloned();
+        let protected = protected || self.screen().iso_protection;
+        let cols = self.cols as usize;
+        let (start, end) = match mode {
+            0 => (cursor.col, cols),
+            1 => (0, cursor.col + 1),
+            2 => (0, cols),
+            _ => return,
+        };
+        self.ensure_row_cells(cursor.row, cols);
+        if mode != 1 {
+            self.screen_mut().cursor_reset_wrap();
+        }
+        self.screen_mut().erase_row_cells(
+            cursor.row,
+            start,
+            end,
+            cursor.style.background,
+            protected,
+        );
+        // C preserves OSC 133 metadata for EL, including a whole-line erase.
+        if let Some(markers) = shell_markers {
+            self.screen_mut()
+                .tmux_shell
+                .as_mut()
+                .unwrap()
+                .insert(id, markers);
+        }
+        self.screen_mut().cursor.pending_wrap = false;
+        self.changed();
+    }
+
+    pub fn erase_display(&mut self, mode: u16, protected: bool) {
+        if matches!(mode, 0..=2 | 22) {
+            self.ensure_active_columns();
+        }
+        let cursor = self.screen().cursor.clone();
+        let rows = self.rows as usize;
+        let protected = protected || self.screen().iso_protection;
+        if self.tmux_graphics
+            && self.tmux_scroll_on_clear
+            && !self.alternate_active
+            && self.screen().history_enabled()
+            && !protected
+            && (mode == 2 || mode == 0 && cursor.row == 0 && cursor.col == 0)
+        {
+            self.scroll_clear();
+            self.screen_mut().cursor.row = cursor.row;
+            self.screen_mut().cursor.col = cursor.col;
+        }
+        let (start, end) = match mode {
+            0 => {
+                self.erase_line(0, protected);
+                (cursor.row + 1, rows)
+            }
+            1 => {
+                self.erase_line(1, protected);
+                (0, cursor.row)
+            }
+            2 => {
+                if !self.tmux_graphics
+                    && !self.alternate_active
+                    && self
+                        .screen()
+                        .rows()
+                        .rfind(|row| {
+                            row.semantic != SemanticContent::Output
+                                || row.cells.iter().any(|cell| cell.codepoint().is_some())
+                        })
+                        .is_some_and(|row| row.semantic != SemanticContent::Output)
+                {
+                    self.scroll_clear();
+                }
+                let cell = [
+                    self.width_px / u32::from(self.cols),
+                    self.height_px / u32::from(self.rows),
+                ];
+                let retain_sources = self.tmux_graphics;
+                self.screen_mut().clear_visible_images(cell, retain_sources);
+                (0, rows)
+            }
+            3 => {
+                if self.tmux_graphics {
+                    self.primary.clear_history();
+                } else {
+                    self.screen_mut().clear_history();
+                }
+                self.changed();
+                return;
+            }
+            22 => {
+                self.scroll_clear();
+                return;
+            }
+            _ => return,
+        };
+        if !protected
+            && (mode == 0 && cursor.col == 0
+                || mode == 1 && cursor.col + 1 >= usize::from(self.cols))
+        {
+            let id = self.screen().row(cursor.row).id;
+            if let Some(markers) = &mut self.screen_mut().tmux_shell {
+                markers.remove(&id);
+            }
+        }
+        for y in start..end {
+            self.screen_mut()
+                .erase_row_cells(y, 0, usize::MAX, cursor.style.background, protected);
+            if !protected {
+                let header = self.screen_mut().row_header_mut(y);
+                header.set(RowHeader::WRAPPED | RowHeader::CONTINUATION, false);
+                header.set_semantic(SemanticContent::Output);
+            }
+        }
+        self.screen_mut().cursor.pending_wrap = false;
+        self.changed();
+    }
+
+    fn scroll_clear(&mut self) {
+        self.ensure_active_columns();
+        let cell = [
+            self.width_px / u32::from(self.cols),
+            self.height_px / u32::from(self.rows),
+        ];
+        let cols = usize::from(self.cols);
+        let count = self
+            .screen()
+            .rows()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.cells.iter().take(cols).enumerate().any(|(col, cell)| {
+                    cell.codepoint().is_some()
+                        || cell.width() != 1
+                        || cell.spacer_head()
+                        || row.style(col).background != Color::Default
+                })
+            })
+            .map(|(row, _)| row + 1)
+            .next_back()
+            .unwrap_or(0);
+        let retain_sources = self.tmux_graphics;
+        let count = if self.tmux_graphics {
+            self.screen()
+                .graphics
+                .placements
+                .iter()
+                .filter_map(|placement| {
+                    let image = self.screen().graphics.images.get(&placement.image_id)?;
+                    let row = self
+                        .screen()
+                        .all_rows()
+                        .position(|row| row.id == placement.row)?;
+                    let cell = [
+                        if cell[0] == 0 { 8 } else { cell[0] },
+                        if cell[1] == 0 { 16 } else { cell[1] },
+                    ];
+                    let height =
+                        placement.pixel_size(image, cell)[1] + placement.cell_offset(cell)[1];
+                    Some(
+                        (row + height.div_ceil(cell[1]) as usize)
+                            .saturating_sub(self.screen().history_len())
+                            .min(usize::from(self.rows)),
+                    )
+                })
+                .max()
+                .unwrap_or(0)
+                .max(count)
+        } else {
+            count
+        };
+        let screen = self.screen_mut();
+        for _ in 0..count {
+            screen.retain_history();
+        }
+        if let Some(history) = &mut screen.tmux_history {
+            history.scrolled = 0;
+        }
+        if screen.cursor.row < count {
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
+        } else {
+            screen.cursor.row -= count;
+        }
+        screen.cursor.pending_wrap = false;
+        screen.clear_visible_images(cell, retain_sources);
+        self.clamp_cursor();
+        self.changed();
+    }
+
+    pub fn save_cursor(&mut self) {
+        let origin = self.modes.dec(6);
+        let screen = self.screen_mut();
+        screen.saved_cursor = Some(SavedCursor {
+            cursor: screen.cursor.clone(),
+            origin,
+            charset: screen.charset.clone(),
+        });
+    }
+
+    pub fn restore_cursor(&mut self) {
+        let saved = self.screen().saved_cursor.clone().unwrap_or(SavedCursor {
+            cursor: Cursor::default(),
+            origin: false,
+            charset: CharsetState::default(),
+        });
+        let cols = self.cols as usize;
+        let rows = self.rows as usize;
+        let screen = self.screen_mut();
+        // DECRC restores only saved attributes. Hyperlinks, semantic content,
+        // and cursor appearance retain their current state.
+        screen.set_cursor_style(saved.cursor.style);
+        screen.cursor.col = saved.cursor.col.min(cols - 1);
+        screen.cursor.row = saved.cursor.row.min(rows - 1);
+        screen.cursor.protected = saved.cursor.protected;
+        screen.cursor.pending_wrap = saved.cursor.pending_wrap;
+        screen.charset = saved.charset;
+        self.ensure_row_cells(self.screen().cursor.row, self.screen().cursor.col + 1);
+        self.modes.set(true, 6, saved.origin);
+        self.changed();
+    }
+
+    pub fn set_mode(&mut self, private: bool, mode: u16, value: bool) {
+        if self.tmux_graphics
+            && !self.tmux_alternate_screen
+            && private
+            && matches!(mode, 47 | 1047 | 1049)
+        {
+            return;
+        }
+        if self.tmux_graphics && private && matches!(mode, 1000..=1003) {
+            if mode == 1001 && value {
+                return;
+            }
+            for mode in [1000, 1002, 1003] {
+                self.modes.set(true, mode, false);
+            }
+            self.mouse_mode = if value { mode } else { 0 };
+        }
+        if !self.modes.set(private, mode, value) {
+            return;
+        }
+        if private {
+            match mode {
+                3 => {
+                    if self.modes.dec(40) {
+                        self.resize(if value { 132 } else { 80 }, self.rows);
+                        self.erase_display(2, false);
+                        self.cursor_position(1, 1);
+                    } else {
+                        self.modes.set(true, 3, false);
+                    }
+                }
+                6 => self.cursor_position(1, 1),
+                12 | 25 => {
+                    for screen in
+                        std::iter::once(&mut self.primary).chain(self.alternate.iter_mut())
+                    {
+                        if mode == 12 {
+                            screen.cursor.blink = value;
+                        } else {
+                            screen.cursor.visible = value;
+                        }
+                    }
+                }
+                40 => {
+                    if let Some(size) = self.query_defaults.size {
+                        self.resize(size.columns, size.rows);
+                    }
+                }
+                47 | 1047 | 1049 => self.switch_screen(mode, value),
+                69 if !value => {
+                    self.margins.left = 0;
+                    self.margins.right = self.cols as usize - 1;
+                }
+                1048 => {
+                    if value {
+                        self.save_cursor();
+                    } else {
+                        self.restore_cursor();
+                    }
+                }
+                9 | 1000 | 1002 | 1003 => self.mouse_mode = if value { mode } else { 0 },
+                1005 | 1006 | 1015 | 1016 => self.mouse_format = if value { mode } else { 0 },
+                2026 if value => {
+                    self.synchronized_output_generation =
+                        self.synchronized_output_generation.wrapping_add(1);
+                }
+                _ => {}
+            }
+        }
+        self.changed();
+    }
+
+    fn set_stream_mode(
+        &mut self,
+        private: bool,
+        mode: u16,
+        value: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        if self.tmux_graphics {
+            if private && mode == 12 {
+                self.tmux_state.cursor_blinking = value;
+                self.tmux_state.cursor_blinking_set = true;
+            } else if !private && mode == 34 {
+                self.tmux_state.cursor_very_visible = !value;
+            }
+        }
+        self.set_mode(private, mode, value);
+        if !private && mode == 20 && self.linefeed_mode_events {
+            effects.push(Effect::LinefeedMode(value));
+        }
+        if private && value {
+            match mode {
+                1004 => {
+                    if let Some(focused) = self.query_defaults.focused {
+                        effects.push(Effect::Write(self.encode_focus(focused)));
+                    }
+                }
+                2048 => effects.push(Effect::Query(Query::Size(query::SizeStyle::InBand))),
+                2033 => effects.push(Effect::Write(query::visibility(self.visible))),
+                _ => {}
+            }
+        }
+    }
+
+    fn switch_screen(&mut self, mode: u16, enabled: bool) {
+        if self.tmux_graphics && mode == 1049 && enabled && !self.alternate_active {
+            self.tmux_state.alternate_saved = [
+                self.screen().cursor.col as u32,
+                self.screen().cursor.row as u32,
+            ];
+        }
+        if mode == 1049 && enabled {
+            self.save_cursor();
+        }
+        if mode == 1047 && !enabled && self.alternate_active {
+            self.erase_display(2, false);
+        }
+        if self.alternate_active == enabled {
+            if mode == 1049 {
+                if enabled {
+                    self.erase_display(2, false);
+                } else {
+                    self.restore_cursor();
+                }
+            }
+            return;
+        }
+        let old_cursor = self.screen().cursor.clone();
+        let tmux_link = self
+            .tmux_graphics
+            .then(|| old_cursor.hyperlink.clone())
+            .flatten();
+        let clear_eol = self.screen().metadata.cursor_clear_eol;
+        let hyperlink_implicit_id = self.screen().metadata.hyperlink_implicit_id;
+        let charset = self.screen().charset.clone();
+        self.end_hyperlink();
+        if enabled && self.alternate.is_none() {
+            let mut alternate =
+                Screen::new(self.cols.into(), self.rows.into(), ScrollbackLimits::NONE);
+            alternate.memory_limit = self.primary.memory_limit;
+            self.alternate = Some(alternate);
+        }
+        self.synchronize_tmux_sources();
+        self.alternate_active = enabled;
+        self.screen_mut().charset = charset;
+        self.screen_mut().selection = None;
+        if mode == 1049 && enabled {
+            self.erase_display(2, false);
+        }
+        // Mode 1049 restores the primary cursor on exit without copying the
+        // alternate cursor's appearance. Legacy modes copy in both directions.
+        if mode != 1049 || enabled {
+            self.screen_mut().cursor = old_cursor;
+            self.screen_mut().metadata.cursor_clear_eol = clear_eol;
+            self.screen_mut().metadata.hyperlink_implicit_id = hyperlink_implicit_id;
+            self.end_hyperlink();
+        }
+        if mode == 1049 && !enabled {
+            self.restore_cursor();
+        }
+        if self.tmux_graphics {
+            self.end_hyperlink();
+            self.screen_mut().cursor.hyperlink = tmux_link;
+        }
+        self.ensure_row_cells(self.screen().cursor.row, self.screen().cursor.col + 1);
+    }
+
+    fn esc(&mut self, intermediates: &[u8], final_byte: u8, effects: &mut Vec<Effect>) {
+        match (intermediates, final_byte) {
+            ([], b'7') => self.save_cursor(),
+            ([], b'8') => self.restore_cursor(),
+            ([], b'D') => self.index(),
+            ([], b'E') => {
+                self.index();
+                self.carriage_return();
+            }
+            ([], b'M') => self.reverse_index(),
+            ([], b'Z') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Primary,
+            ))),
+            ([], b'H') => {
+                let col = self.screen().cursor.col;
+                self.tabstops[col] = true;
+            }
+            ([], b'c') => {
+                self.reset();
+                self.clipboard.clear_grants();
+                if self.linefeed_mode_events {
+                    effects.push(Effect::LinefeedMode(self.modes.get(false, 20)));
+                }
+                if !self.tmux_graphics {
+                    effects.push(Effect::ProgressReset);
+                }
+            }
+            ([], b'=') => self.set_mode(true, 66, true),
+            ([], b'>') => self.set_mode(true, 66, false),
+            ([], b'N') => self.screen_mut().charset.single = Some(2),
+            ([], b'O') => self.screen_mut().charset.single = Some(3),
+            ([], b'V') => {
+                let screen = self.screen_mut();
+                screen.cursor.protected = true;
+                screen.iso_protection = true;
+                screen.metadata.protected_mode = 1;
+            }
+            ([], b'W') => self.screen_mut().cursor.protected = false,
+            ([], b'n') => self.screen_mut().charset.gl = 2,
+            ([], b'o') => self.screen_mut().charset.gl = 3,
+            ([], b'~') => self.screen_mut().charset.gr = 1,
+            ([], b'}') => self.screen_mut().charset.gr = 2,
+            ([], b'|') => self.screen_mut().charset.gr = 3,
+            ([b'(' | b')' | b'*' | b'+'], b'0' | b'A' | b'B') => {
+                let slot = (intermediates[0] - b'(') as usize;
+                self.screen_mut().charset.slots[slot] = match final_byte {
+                    b'0' => Charset::DecSpecial,
+                    b'A' => Charset::British,
+                    _ => Charset::Ascii,
+                };
+            }
+            ([b'#'], b'8') => {
+                self.ensure_active_columns();
+                let style = Style {
+                    foreground: self.screen().cursor.style.foreground,
+                    background: self.screen().cursor.style.background,
+                    ..Style::default()
+                };
+                self.screen_mut().release_cursor_style();
+                self.screen_mut().cursor.style = style;
+                self.screen_mut().sync_cursor_resources();
+                self.modes.set(true, 6, false);
+                self.reset_margins();
+                self.cursor_position(1, 1);
+                for y in 0..usize::from(self.rows) {
+                    self.screen_mut()
+                        .erase_row_cells(y, 0, usize::MAX, Color::Default, false);
+                }
+                for y in 0..usize::from(self.rows) {
+                    self.screen_mut().cursor.row = y;
+                    self.screen_mut().sync_cursor_resources();
+                    self.screen_mut().fill_alignment_row(y);
+                }
+                self.cursor_position(1, 1);
+            }
+            ([], b'\\') => {}
+            _ => effects.push(Effect::UnknownSequence(format!(
+                "ESC {:?} {}",
+                intermediates, final_byte as char
+            ))),
+        }
+    }
+
+    fn csi(
+        &mut self,
+        i: &[u8],
+        p: &[u16],
+        sep: u32,
+        byte: u8,
+        effects: &mut Vec<Effect>,
+        clipboard_read_enabled: bool,
+    ) {
+        if sep != 0 && byte != b'm' {
+            return;
+        }
+        // Validate before dispatch: excess parameters invalidate the whole
+        // command, rather than applying just the first value(s).
+        match (i, byte, p.len()) {
+            (
+                [],
+                b'@'
+                | b'A'..=b'G'
+                | b'I'..=b'M'
+                | b'P'
+                | b'S'
+                | b'T'
+                | b'W'
+                | b'X'
+                | b'Z'
+                | b'`'
+                | b'a'
+                | b'b'
+                | b'd'
+                | b'e'
+                | b'j'
+                | b'k',
+                2..,
+            )
+            | ([], b'H' | b'f' | b'r' | b's', 3..)
+            | ([], b'g', 0 | 2..)
+            | ([b'?'], b'J' | b'K', 2..)
+            | ([b'"'], b'q', 2..)
+            | ([b'>'], b'm', 3..) => return,
+            _ => {}
+        }
+        let n = p.first().copied().unwrap_or(0);
+        let count = usize::from(n.max(1));
+        let second = p.get(1).copied().unwrap_or(0);
+        let private = i.first() == Some(&b'?');
+        match (i, byte) {
+            ([], b'A' | b'k') => self.cursor_vertical(count, false),
+            ([], b'B') => self.cursor_vertical(count, true),
+            ([], b'C') => self.cursor_right(count),
+            ([], b'D' | b'j') => self.cursor_left(count),
+            ([], b'E' | b'F') => {
+                self.cursor_vertical(count, byte == b'E');
+                self.carriage_return();
+            }
+            ([], b'G' | b'`') => self.cursor_position(self.screen().cursor.row + 1, count),
+            ([], b'd') => self.cursor_position(count, self.screen().cursor.col + 1),
+            ([], b'a' | b'e') => {
+                // HPR/VPR retain an explicit zero and apply the same origin
+                // offsets and bounds as absolute cursor positioning.
+                let amount = usize::from(p.first().copied().unwrap_or(1));
+                let cursor = &self.screen().cursor;
+                self.cursor_position(
+                    cursor.row + 1 + if byte == b'e' { amount } else { 0 },
+                    cursor.col + 1 + if byte == b'a' { amount } else { 0 },
+                );
+            }
+            ([], b'H' | b'f') => self.cursor_position(count, second.max(1).into()),
+            ([], b'I') if self.tmux_strings => {}
+            ([], b'I' | b'Z') => {
+                self.tab(usize::from(p.first().copied().unwrap_or(1)), byte == b'Z')
+            }
+            ([], b'g') => match n {
+                0 => {
+                    let col = self.screen().cursor.col;
+                    self.tabstops[col] = false;
+                }
+                3 => self.tabstops.fill(false),
+                _ => {}
+            },
+            ([], b'W') => match n {
+                0 | 2 => {
+                    let col = self.screen().cursor.col;
+                    self.tabstops[col] = n == 0;
+                }
+                5 => self.tabstops.fill(false),
+                _ => {}
+            },
+            ([b'?'], b'W') if p == [5] => {
+                for (col, set) in self.tabstops.iter_mut().enumerate() {
+                    *set = col > 0 && col % 8 == 0;
+                }
+            }
+            ([], b'J') | ([b'?'], b'J') => self.erase_display(n, private),
+            ([], b'K') | ([b'?'], b'K') => self.erase_line(n, private),
+            ([], b'@') => self.insert_blanks(count),
+            ([], b'P') => self.delete_chars(count),
+            ([], b'X') => {
+                self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
+                let cur = self.screen().cursor.clone();
+                let protected = self.screen().iso_protection;
+                let end = cur.col.saturating_add(count).min(self.cols as usize);
+                self.screen_mut().split_cell_boundary(cur.col);
+                self.screen_mut().split_cell_boundary(end);
+                self.screen_mut().cursor_reset_wrap();
+                self.screen_mut().erase_row_cells(
+                    cur.row,
+                    cur.col,
+                    end,
+                    cur.style.background,
+                    protected,
+                );
+                self.changed();
+            }
+            ([], b'L' | b'M') => {
+                let cur = self.screen().cursor.clone();
+                if (p.is_empty() || n != 0)
+                    && cur.row >= self.margins.top
+                    && cur.row <= self.margins.bottom
+                    && cur.col >= self.margins.left
+                    && cur.col <= self.margins.right
+                {
+                    let top = self.margins.top;
+                    self.margins.top = cur.row;
+                    if byte == b'L' {
+                        self.scroll_down(count);
+                    } else {
+                        self.scroll_up(count, false);
+                    }
+                    self.margins.top = top;
+                    self.carriage_return();
+                }
+            }
+            ([], b'S' | b'T') => {
+                // Scrolling defaults to one only when the parameter is omitted.
+                if p.is_empty() || n != 0 {
+                    self.scroll_region(count, byte == b'S');
+                }
+            }
+            ([], b'b') => {
+                if let Some(cp) = self.previous_char {
+                    for _ in 0..count {
+                        self.print(cp);
+                    }
+                }
+            }
+            ([], b'm') => {
+                let tmux = self.tmux_graphics;
+                sgr(self.screen_mut(), p, sep, tmux);
+                self.changed();
+            }
+            ([b'>'], b'm') => {
+                if let Some((policy, mode)) = &mut self.tmux_extended_keys {
+                    if n == 4 && *policy != 0 {
+                        *mode = if second == 2 {
+                            2
+                        } else {
+                            u8::from(second == 1 || *policy == 2)
+                        };
+                    }
+                } else {
+                    self.modify_other_keys = n == 4 && second == 2;
+                }
+            }
+            ([b'>'], b'n') => {
+                if let Some((policy, mode)) = &mut self.tmux_extended_keys {
+                    if n == 4 {
+                        *mode = u8::from(*policy == 2);
+                    }
+                } else {
+                    self.modify_other_keys = false;
+                }
+            }
+            ([], b'h' | b'l') | ([b'?'], b'h' | b'l') => {
+                for &mode in p {
+                    self.set_stream_mode(private, mode, byte == b'h', effects);
+                }
+            }
+            ([b'?'], b's') => {
+                for &mode in p {
+                    self.modes.save(true, mode);
+                }
+            }
+            ([b'>'], b's') if p.len() <= 1 && n <= 1 => {
+                self.metadata.mouse_shift_capture = Some(n == 1);
+            }
+            ([b'?'], b'r') => {
+                for &mode in p {
+                    let value = self.modes.restore(true, mode);
+                    self.set_stream_mode(true, mode, value, effects);
+                }
+            }
+            ([], b'r') => {
+                let top = n.max(1) as usize - 1;
+                let bottom = if second == 0 {
+                    self.rows
+                } else {
+                    second.min(self.rows)
+                } as usize
+                    - 1;
+                if top < bottom {
+                    self.margins.top = top;
+                    self.margins.bottom = bottom;
+                    self.cursor_position(1, 1);
+                }
+            }
+            ([], b's') => {
+                if self.modes.dec(69) {
+                    let left = n.max(1) as usize - 1;
+                    let right = if second == 0 {
+                        self.cols
+                    } else {
+                        second.min(self.cols)
+                    } as usize
+                        - 1;
+                    if left < right {
+                        self.margins.left = left;
+                        self.margins.right = right;
+                        self.cursor_position(1, 1);
+                    }
+                } else {
+                    self.save_cursor();
+                }
+            }
+            ([], b'u') => self.restore_cursor(),
+            ([b' '], b'q') => {
+                if p.len() <= 1 && n <= 6 {
+                    if self.tmux_graphics {
+                        if n == 0 {
+                            self.tmux_state.cursor_blinking_set = false;
+                        } else {
+                            self.tmux_state.cursor_blinking = n % 2 == 1;
+                        }
+                    }
+                    self.set_cursor_style(n);
+                }
+            }
+            ([b'"'], b'q') if n <= 2 => {
+                let screen = self.screen_mut();
+                screen.cursor.protected = n == 1;
+                if n == 1 {
+                    screen.iso_protection = false;
+                    screen.metadata.protected_mode = 2;
+                }
+            }
+            ([b'!'], b'p') if p.is_empty() => self.soft_reset(),
+            ([b'!'] | [b'$'], b'p') => {}
+            ([b'?', b'$'], b'p') => {
+                if p.len() != 1 {
+                    return;
+                }
+                let report = if n == 5522 && !clipboard_read_enabled {
+                    0
+                } else {
+                    self.modes.report(true, n)
+                };
+                effects.push(Effect::Write(
+                    format!("\x1b[?{};{report}$y", n & 0x7fff).into_bytes(),
+                ));
+            }
+            ([], b'n') | ([b'?'], b'n') if p.len() == 1 => match (private, n) {
+                (false, 5) => effects.push(Effect::Write(b"\x1b[0n".to_vec())),
+                (false, 6) => {
+                    let cur = &self.screen().cursor;
+                    let row = cur.row.saturating_sub(if self.modes.dec(6) {
+                        self.margins.top
+                    } else {
+                        0
+                    }) + 1;
+                    let col = cur.col.saturating_sub(if self.modes.dec(6) {
+                        self.margins.left
+                    } else {
+                        0
+                    }) + 1;
+                    effects.push(Effect::Write(format!("\x1b[{row};{col}R").into_bytes()));
+                }
+                (true, 996) => effects.push(Effect::Query(Query::ColorScheme)),
+                (true, 998) => effects.push(Effect::Write(query::visibility(self.visible))),
+                _ => {}
+            },
+            ([], b'c') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Primary,
+            ))),
+            ([b'>'], b'c') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Secondary,
+            ))),
+            ([b'='], b'c') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Tertiary,
+            ))),
+            ([b'>'], b'q') => effects.push(Effect::Query(Query::Xtversion)),
+            ([b'?'], b'u') => effects.push(Effect::Write(
+                format!("\x1b[?{}u", self.screen().kitty_keyboard.current()).into_bytes(),
+            )),
+            ([b'>'], b'u') => {
+                self.screen_mut().kitty_keyboard.push((n & 31) as u8);
+            }
+            ([b'<'], b'u') => {
+                self.screen_mut().kitty_keyboard.pop(count);
+            }
+            ([b'='], b'u') => {
+                self.screen_mut().kitty_keyboard.set((n & 31) as u8, second);
+            }
+            ([b'$'], b'}') => self.status_display = n == 1,
+            ([b'$'], b'~') => {}
+            ([], b't') => match n {
+                14 if p.len() == 1 => {
+                    effects.push(Effect::Query(Query::Size(query::SizeStyle::TextPixels)))
+                }
+                16 if p.len() == 1 => {
+                    effects.push(Effect::Query(Query::Size(query::SizeStyle::CellPixels)))
+                }
+                18 if p.len() == 1 => {
+                    effects.push(Effect::Query(Query::Size(query::SizeStyle::Cells)))
+                }
+                21 if p.len() == 1 && self.title_report => {
+                    let mut reply = b"\x1b]l".to_vec();
+                    reply.extend_from_slice(self.title_bytes());
+                    reply.extend_from_slice(b"\x1b\\");
+                    effects.push(Effect::Write(reply));
+                }
+                22 | 23 => {}
+                _ => {}
+            },
+            _ => effects.push(Effect::UnknownSequence(format!(
+                "CSI {:?} {:?} {}",
+                i, p, byte as char
+            ))),
+        }
+    }
+
+    fn osc(
+        &mut self,
+        data: &[u8],
+        bell: bool,
+        effects: &mut Vec<Effect>,
+        clipboard_write_enabled: bool,
+        clipboard_read_enabled: bool,
+    ) {
+        let split = data.iter().position(|&b| b == b';').unwrap_or(data.len());
+        let Ok(number) = std::str::from_utf8(&data[..split])
+            .unwrap_or("")
+            .parse::<u16>()
+        else {
+            return;
+        };
+        if data[..split] != *number.to_string().as_bytes() {
+            return;
+        }
+        let has_separator = split < data.len();
+        if matches!(number, 4 | 5 | 10..=19 | 21 | 104 | 105 | 110..=119) {
+            let reply = crate::color::osc(
+                self,
+                number,
+                data.get(split + 1..).unwrap_or_default(),
+                bell,
+            );
+            if !reply.is_empty() {
+                effects.push(Effect::Write(reply));
+            }
+            return;
+        }
+        let data = data.get(split + 1..).unwrap_or_default();
+        match number {
+            0 | 2 if self.tmux_strings => {
+                if data.len().saturating_add(split + 1) >= 1024 * 1024 {
+                    return;
+                }
+            }
+            // These fixed captures append a NUL before dispatch.
+            0 | 2 | 7 | 8 | 22 | 777 | 1337 if !has_separator || data.len() >= 2048 => return,
+            9 | 133 if !has_separator || data.len() > 2048 => return,
+            // Allocating captures count only bytes after the numeric prefix.
+            // OSC 52 and 66 reserve a byte for the parser's trailing NUL.
+            52 | 66 if !has_separator || data.len() >= MAX_OSC_BYTES => return,
+            72 | 99 | 5522 if !has_separator || data.len() > MAX_OSC_BYTES => return,
+            _ => {}
+        }
+        match number {
+            0 | 2 => {
+                // The stream validates the full title before the host handler
+                // keeps its first 1024 bytes, even across a UTF-8 boundary.
+                if !self.allow_set_title || std::str::from_utf8(data).is_err() {
+                    return;
+                }
+                self.set_title(if self.tmux_strings {
+                    data
+                } else {
+                    &data[..data.len().min(1024)]
+                });
+                effects.push(Effect::Title(self.title_bytes().to_vec()));
+            }
+            7 => {
+                self.set_working_directory(data);
+                effects.push(Effect::WorkingDirectory(data.to_vec()));
+            }
+            8 => {
+                if self.tmux_graphics {
+                    let Some(split) = data.iter().position(|&b| b == b';') else {
+                        return;
+                    };
+                    let mut explicit = None;
+                    for field in data[..split].split(|&b| b == b':') {
+                        if let Some(id) = field.strip_prefix(b"id=").filter(|id| !id.is_empty()) {
+                            if explicit.is_some() {
+                                return;
+                            }
+                            explicit = Some(id);
+                        }
+                    }
+                    self.end_hyperlink();
+                    if !data[split + 1..].is_empty() {
+                        self.screen_mut()
+                            .start_hyperlink(&data[split + 1..], explicit);
+                    }
+                    return;
+                }
+                if let Some(split) = data.iter().position(|&b| b == b';') {
+                    let uri = &data[split + 1..];
+                    let params = &data[..split];
+                    let mut explicit = None;
+                    let mut start = 0;
+                    while start < params.len() {
+                        // Native option traversal searches past the first
+                        // byte, so an empty field prefixes the next option.
+                        let end = params[start + 1..]
+                            .iter()
+                            .position(|&byte| matches!(byte, b':' | 0))
+                            .map_or(params.len(), |offset| start + 1 + offset);
+                        let option = &params[start..end];
+                        let Some(equal) = option.iter().position(|&byte| byte == b'=') else {
+                            break;
+                        };
+                        if option[..equal] == *b"id" && equal + 1 < option.len() {
+                            explicit = Some(&option[equal + 1..]);
+                        }
+                        start = end + 1;
+                    }
+                    if uri.is_empty() && explicit.is_some() {
+                        return;
+                    }
+                    self.end_hyperlink();
+                    if !uri.is_empty() {
+                        self.screen_mut().start_hyperlink(uri, explicit);
+                    }
+                }
+            }
+            9 => self.osc9(data, effects),
+            22 => {
+                if let Ok(name) = std::str::from_utf8(data)
+                    && let Some(shape) = crate::input::mouse_shape_index(name)
+                {
+                    self.metadata.mouse_shape = shape;
+                }
+            }
+            777 => {
+                if let Some(payload) = data.strip_prefix(b"rustty-agent;") {
+                    if self.agent_status_events
+                        && let Some(event) = crate::agent::Event::decode(payload)
+                    {
+                        effects.push(Effect::AgentStatus(event));
+                    }
+                    return;
+                }
+                if let Some(notification) = data.strip_prefix(b"notify;")
+                    && let Some(split) = notification.iter().position(|&b| b == b';')
+                {
+                    effects.push(Effect::Notification {
+                        title: notification[..split].to_vec(),
+                        body: notification[split + 1..].to_vec(),
+                    });
+                }
+            }
+            1337 => {
+                if let Some(split) = data.iter().position(|&byte| byte == b'=')
+                    && split + 1 < data.len()
+                {
+                    let value = &data[split + 1..];
+                    if data[..split].eq_ignore_ascii_case(b"CurrentDir") {
+                        self.set_working_directory(value);
+                        effects.push(Effect::WorkingDirectory(value.to_vec()));
+                    } else if data[..split].eq_ignore_ascii_case(b"Copy")
+                        && let Some(encoded) = value.strip_prefix(b":")
+                        && !encoded.is_empty()
+                        && let Some(write) =
+                            clipboard::Write::decode_osc52(clipboard::Location::Standard, encoded)
+                    {
+                        effects.push(Effect::ClipboardWrite(write));
+                    }
+                }
+            }
+            52 => {
+                if let Some(split) = data.iter().position(|&b| b == b';')
+                    && (self.tmux_clipboard || split <= 1)
+                {
+                    let selector = data[..split]
+                        .iter()
+                        .copied()
+                        .find(|b| b"cpqs01234567".contains(b))
+                        .unwrap_or(0);
+                    let location = clipboard::Location::from_selector(if self.tmux_clipboard {
+                        selector
+                    } else if split == 0 {
+                        b'c'
+                    } else {
+                        data[0]
+                    });
+                    let encoded = &data[split + 1..];
+                    if encoded == b"?" {
+                        let mut request = clipboard::Read::osc52(
+                            location,
+                            if bell {
+                                clipboard::Terminator::Bell
+                            } else {
+                                clipboard::Terminator::St
+                            },
+                        );
+                        request.tmux_selector = self.tmux_clipboard.then_some(selector);
+                        effects.push(Effect::ClipboardRead(request));
+                    } else if let Some(write) = if self.tmux_clipboard {
+                        clipboard::Write::decode_tmux_osc52(location, encoded)
+                    } else {
+                        clipboard::Write::decode_osc52(location, encoded)
+                    } {
+                        effects.push(Effect::ClipboardWrite(write));
+                    }
+                }
+            }
+            5522 => self.clipboard.handle(
+                data,
+                if bell {
+                    clipboard::Terminator::Bell
+                } else {
+                    clipboard::Terminator::St
+                },
+                self.clipboard_write_limit,
+                clipboard_write_enabled,
+                clipboard_read_enabled,
+                effects,
+            ),
+            72 => dnd::handle(&mut self.kitty_dnd, data, bell, effects),
+            133 => self.osc133(data, effects),
+            1 => {}
+            _ => effects.push(Effect::UnknownSequence(format!("OSC {number}"))),
+        }
+    }
+
+    fn semantic_fresh_line(&mut self) {
+        let col = self.screen().cursor.col;
+        let left = if col < self.margins.left {
+            0
+        } else {
+            self.margins.left
+        };
+        if col != left {
+            self.carriage_return();
+            self.index();
+        }
+    }
+
+    fn semantic_prompt(&mut self, continuation: bool) {
+        let screen = self.screen_mut();
+        screen.cursor.semantic = SemanticContent::Prompt;
+        screen.metadata.cursor_clear_eol = false;
+        screen
+            .row_header_mut(screen.cursor.row)
+            .set_semantic(if continuation {
+                SemanticContent::Input
+            } else {
+                SemanticContent::Prompt
+            });
+    }
+
+    fn osc133(&mut self, data: &[u8], effects: &mut Vec<Effect>) {
+        if self.tmux_strings {
+            self.tmux_osc133(data, effects);
+            return;
+        }
+        let Some(&action) = data.first() else { return };
+        if data.len() > 1 && (action == b'L' || data[1] != b';') {
+            return;
+        }
+        let options = data.get(2..).unwrap_or_default();
+        // The first matching key wins, even when its value is invalid.
+        let option = |prefix| {
+            options
+                .split(|&byte| byte == b';')
+                .find_map(|part| part.strip_prefix(prefix))
+        };
+        match action {
+            b'L' => self.semantic_fresh_line(),
+            b'A' | b'N' | b'P' => {
+                if action != b'P' {
+                    self.semantic_fresh_line();
+                }
+                self.semantic_prompt(matches!(option(b"k=".as_slice()), Some(b"c" | b"s")));
+                if action != b'P' {
+                    if let Some(redraw) = match option(b"redraw=") {
+                        Some(b"0") => Some(1),
+                        Some(b"1") => Some(0),
+                        Some(b"last") => Some(2),
+                        _ => None,
+                    } {
+                        self.metadata.shell_redraw = redraw;
+                    }
+                    let click = match option(b"click_events=") {
+                        Some(b"1") => Some([1, 0]),
+                        Some(b"2") => Some([1, 1]),
+                        _ => match option(b"cl=") {
+                            Some(b"line") => Some([2, 0]),
+                            Some(b"m") => Some([2, 1]),
+                            Some(b"v") => Some([2, 2]),
+                            Some(b"w") => Some([2, 3]),
+                            _ => None,
+                        },
+                    };
+                    if let Some(click) = click {
+                        self.screen_mut().metadata.semantic_click = click;
+                    }
+                }
+            }
+            b'B' | b'I' => {
+                let screen = self.screen_mut();
+                screen.cursor.semantic = SemanticContent::Input;
+                screen.metadata.cursor_clear_eol = action == b'I';
+            }
+            b'C' | b'D' => {
+                let screen = self.screen_mut();
+                screen.cursor.semantic = SemanticContent::Output;
+                screen.metadata.cursor_clear_eol = false;
+                if action == b'C' && screen.cursor.col == 0 {
+                    screen
+                        .row_header_mut(screen.cursor.row)
+                        .set_semantic(SemanticContent::Output);
+                }
+                if self.shell_command_events {
+                    effects.push(if action == b'C' {
+                        Effect::CommandStart
+                    } else {
+                        Effect::CommandEnd {
+                            exit_code: options
+                                .split(|&byte| byte == b';')
+                                .next()
+                                .and_then(|value| std::str::from_utf8(value).ok())
+                                .and_then(|value| value.parse().ok()),
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn osc9(&mut self, data: &[u8], effects: &mut Vec<Effect>) {
+        if self.tmux_graphics {
+            self.tmux_progress(data, effects);
+            return;
+        }
+        if data.starts_with(b"12") {
+            self.semantic_fresh_line();
+            self.semantic_prompt(false);
+            return;
+        }
+        if let Some(progress) = data.strip_prefix(b"4;")
+            && let Some(&state @ b'0'..=b'4') = progress.first()
+        {
+            let state = state - b'0';
+            let value = match state {
+                0 | 3 => None,
+                _ if progress.get(1) == Some(&b';') => {
+                    parse_unsigned(&progress[2..]).map(|v| v.min(100) as u8)
+                }
+                1 => Some(0),
+                _ => None,
+            };
+            effects.push(Effect::Progress { state, value });
+            return;
+        }
+        if let Some(directory) = data.strip_prefix(b"9;") {
+            if data.len() < 2048 {
+                self.set_working_directory(directory);
+                effects.push(Effect::WorkingDirectory(directory.to_vec()));
+            }
+            return;
+        }
+        if matches!(
+            data,
+            [b'1', b';', ..]
+                | [b'1', b'0']
+                | [b'1', b'0', b';', b'0'..=b'3', ..]
+                | [b'1', b'1', b';', ..]
+                | [b'2' | b'3' | b'6' | b'7' | b'8', b';', ..]
+                | [b'5', ..]
+        ) {
+            // Recognized ConEmu extensions are ignored by libghostty.
+            return;
+        }
+        if data.len() < 2048 {
+            effects.push(Effect::Notification {
+                title: Vec::new(),
+                body: data.to_vec(),
+            });
+        }
+    }
+
+    fn dcs_end(&mut self, effects: &mut Vec<Effect>) {
+        if self.string_overflow {
+            return;
+        }
+        if self.tmux_graphics && self.dcs_header.0.is_empty() && self.dcs_header.2 == b'q' {
+            let data = std::mem::take(&mut self.dcs);
+            let transparent = self.dcs_header.1.get(1) == Some(&1);
+            self.sixel_command(&data, transparent);
+            self.dcs = data;
+        } else if self.dcs_header.0 == b"$" && self.dcs_header.2 == b'q' {
+            let value = match self.dcs.as_slice() {
+                b"m" => Some(sgr_report(self.screen().cursor.style)),
+                b"r" => Some(format!(
+                    "{};{}r",
+                    self.margins.top + 1,
+                    self.margins.bottom + 1
+                )),
+                b"s" if self.modes.dec(69) => Some(format!(
+                    "{};{}s",
+                    self.margins.left + 1,
+                    self.margins.right + 1
+                )),
+                b" q" => {
+                    let cursor = &self.screen().cursor;
+                    let shape = match cursor.shape {
+                        CursorShape::Block | CursorShape::HollowBlock => 2,
+                        CursorShape::Underline => 4,
+                        CursorShape::Bar => 6,
+                    };
+                    let style = if self.tmux_graphics && self.metadata.cursor_is_default {
+                        self.tmux_cursor_style
+                    } else {
+                        u16::from(shape - u8::from(cursor.blink))
+                    };
+                    Some(if self.tmux_graphics {
+                        format!(" q{style} q")
+                    } else {
+                        format!("{style} q")
+                    })
+                }
+                _ => None,
+            };
+            effects.push(Effect::Write(match value {
+                Some(value) => format!("\x1bP1$r{value}\x1b\\").into_bytes(),
+                None => b"\x1bP0$r\x1b\\".to_vec(),
+            }));
+        } else if self.dcs_header.0 == b"+" && self.dcs_header.2 == b'q' {
+            let queries = String::from_utf8_lossy(&self.dcs).to_ascii_uppercase();
+            for key in queries.split(';') {
+                let value = if key == "544E" {
+                    let Some(name) = self
+                        .terminfo_name
+                        .as_ref()
+                        .filter(|name| !name.is_empty() && name.len() <= 128)
+                    else {
+                        continue;
+                    };
+                    name.iter()
+                        .map(|byte| format!("{byte:02X}"))
+                        .collect::<String>()
+                } else {
+                    let table = crate::terminfo::CAPABILITIES;
+                    let Ok(index) = table.binary_search_by_key(&key, |(name, _)| *name) else {
+                        continue;
+                    };
+                    table[index].1.to_owned()
+                };
+                effects.push(Effect::Write(
+                    if value.is_empty() {
+                        format!("\x1bP1+r{key}\x1b\\")
+                    } else {
+                        format!("\x1bP1+r{key}={value}\x1b\\")
+                    }
+                    .into_bytes(),
+                ));
+            }
+        } else {
+            effects.push(Effect::UnknownSequence("DCS".into()));
+        }
+        self.dcs.clear();
+    }
+}
+
+/// Match Zig's decimal unsigned parser, including internal underscore separators.
+fn parse_unsigned(bytes: &[u8]) -> Option<usize> {
+    if !bytes.first()?.is_ascii_digit() || !bytes.last()?.is_ascii_digit() {
+        return None;
+    }
+    bytes
+        .iter()
+        .filter(|&&byte| byte != b'_')
+        .try_fold(0usize, |value, &byte| {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value.checked_mul(10)?.checked_add(usize::from(byte - b'0'))
+        })
+}
+
+fn sgr_report(style: Style) -> String {
+    let mut result = String::from("0");
+    for (enabled, code) in [(style.bold, 1), (style.faint, 2), (style.italic, 3)] {
+        if enabled {
+            result.push_str(&format!(";{code}"));
+        }
+    }
+    match style.underline {
+        Underline::None => {}
+        Underline::Single => result.push_str(";4"),
+        underline => result.push_str(&format!(
+            ";4:{}",
+            match underline {
+                Underline::Double => 2,
+                Underline::Curly => 3,
+                Underline::Dotted => 4,
+                Underline::Dashed => 5,
+                _ => unreachable!(),
+            }
+        )),
+    }
+    for (enabled, code) in [
+        (style.overline, 53),
+        (style.blink, 5),
+        (style.inverse, 7),
+        (style.invisible, 8),
+        (style.strikethrough, 9),
+    ] {
+        if enabled {
+            result.push_str(&format!(";{code}"));
+        }
+    }
+    for (color, base) in [(style.foreground, 30), (style.background, 40)] {
+        match color {
+            Color::Default => {}
+            Color::Indexed(index) if index < 8 => {
+                result.push_str(&format!(";{}", base + u16::from(index)))
+            }
+            Color::Indexed(index) if index < 16 => {
+                result.push_str(&format!(";{}", base + 60 + u16::from(index) - 8))
+            }
+            Color::Indexed(index) => result.push_str(&format!(";{}:5:{index}", base + 8)),
+            Color::Rgb(r, g, b) => result.push_str(&format!(";{}:2::{r}:{g}:{b}", base + 8)),
+        }
+    }
+    result.push('m');
+    result
+}
+
+pub fn default_palette() -> Vec<[u8; 3]> {
+    let named: [u32; 16] = [
+        0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, 0x666666,
+        0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
+    ];
+    let mut colors: Vec<_> = named
+        .into_iter()
+        .map(|n| [(n >> 16) as u8, (n >> 8) as u8, n as u8])
+        .collect();
+    for r in 0..6 {
+        for g in 0..6 {
+            for b in 0..6 {
+                colors.push([r, g, b].map(|n| if n == 0 { 0 } else { n * 40 + 55 }));
+            }
+        }
+    }
+    for i in 0..24 {
+        colors.push([i * 10 + 8; 3]);
+    }
+    colors
+}
+
+fn sgr(screen: &mut Screen, params: &[u16], separators: u32, tmux: bool) {
+    let mut style = screen.cursor.style;
+    if params.is_empty() {
+        screen.set_cursor_style(Style::default());
+        return;
+    }
+    let is_colon = |index: usize| separators & (1 << index) != 0;
+    let colon_count = |start: usize| {
+        (start..params.len() - 1)
+            .take_while(|&index| is_colon(index))
+            .count()
+    };
+    let mut i = 0;
+    while i < params.len() {
+        let slice = &params[i..];
+        let n = slice[0];
+        let colon = is_colon(i);
+        i += 1;
+        if colon && !matches!(n, 4 | 38 | 48 | 58) {
+            // Unknown colon groups form one attribute. Their values must not
+            // accidentally reset or enable unrelated styles.
+            while is_colon(i) {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        match n {
+            0 => style = Style::default(),
+            1 => style.bold = true,
+            2 => style.faint = true,
+            3 => style.italic = true,
+            4 => {
+                let kind = if colon {
+                    if slice.len() < 2 {
+                        continue;
+                    }
+                    if is_colon(i) {
+                        i += colon_count(i) + 1;
+                        continue;
+                    }
+                    i += 1;
+                    slice[1]
+                } else {
+                    1
+                };
+                style.underline = match kind {
+                    0 => Underline::None,
+                    2 => Underline::Double,
+                    3 => Underline::Curly,
+                    4 => Underline::Dotted,
+                    5 => Underline::Dashed,
+                    _ => Underline::Single,
+                };
+            }
+            5 | 6 => style.blink = true,
+            7 => style.inverse = true,
+            8 => style.invisible = true,
+            9 => style.strikethrough = true,
+            21 => style.underline = Underline::Double,
+            22 => {
+                style.bold = false;
+                style.faint = false;
+            }
+            23 => style.italic = false,
+            24 => style.underline = Underline::None,
+            25 => style.blink = false,
+            27 => style.inverse = false,
+            28 => style.invisible = false,
+            29 => style.strikethrough = false,
+            30..=37 | 90..=97 => {
+                style.foreground = Color::Indexed(if n < 90 { n - 30 } else { n - 90 + 8 } as u8);
+                if tmux {
+                    style.tmux_ansi |= 1;
+                }
+            }
+            40..=47 | 100..=107 => {
+                style.background = Color::Indexed(if n < 100 { n - 40 } else { n - 100 + 8 } as u8);
+                if tmux {
+                    style.tmux_ansi |= 2;
+                }
+            }
+            39 => {
+                style.foreground = Color::Default;
+                style.tmux_ansi &= !1;
+            }
+            49 => {
+                style.background = Color::Default;
+                style.tmux_ansi &= !2;
+            }
+            53 => style.overline = true,
+            55 => style.overline = false,
+            59 => style.underline_color = Color::Default,
+            38 | 48 | 58 => {
+                let color = match slice.get(1) {
+                    Some(5) if slice.len() >= 3 => {
+                        i += 2;
+                        Some(Color::Indexed(slice[2] as u8))
+                    }
+                    Some(2) if slice.len() >= 5 => {
+                        let start = if colon {
+                            match colon_count(i) {
+                                3 => 2,
+                                4 => 3, // Skip the optional colorspace.
+                                count => {
+                                    i += count + 1;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            2
+                        };
+                        i += start + 2;
+                        Some(Color::Rgb(
+                            slice[start] as u8,
+                            slice[start + 1] as u8,
+                            slice[start + 2] as u8,
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some(color) = color {
+                    match n {
+                        38 => {
+                            style.foreground = color;
+                            style.tmux_ansi &= !1;
+                        }
+                        48 => {
+                            style.background = color;
+                            style.tmux_ansi &= !2;
+                        }
+                        _ => style.underline_color = color,
+                    }
+                }
+            }
+            _ => {}
+        }
+        screen.set_cursor_style(style);
+        style = screen.cursor.style;
+    }
+}
+
+// Modifier bases in tmux utf8-combined.c; scalar widths alone do not imply this.
+fn tmux_emoji_modifier_base(cp: char) -> bool {
+    matches!(cp as u32,
+        0x261d | 0x26f9 | 0x270a..=0x270d | 0x1f44b..=0x1f450 |
+        0x1f466..=0x1f469 | 0x1f46e | 0x1f470..=0x1f478 | 0x1f47c |
+        0x1f481..=0x1f483 | 0x1f485..=0x1f487 | 0x1f4aa | 0x1f575 |
+        0x1f57a | 0x1f590 | 0x1f595..=0x1f596 | 0x1f645..=0x1f647 |
+        0x1f64b..=0x1f64f | 0x1f6b4..=0x1f6b6 | 0x1f926 |
+        0x1f937..=0x1f939 | 0x1f93d..=0x1f93e | 0x1f9b5..=0x1f9b6 |
+        0x1f9b8..=0x1f9b9 | 0x1f9cd..=0x1f9cf | 0x1f9d1..=0x1f9df)
+}

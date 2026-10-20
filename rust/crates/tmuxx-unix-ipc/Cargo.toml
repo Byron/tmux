@@ -1,0 +1,13 @@
+[package]
+name = "tmuxx-unix-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Rust implementation of tmux Unix imsg command/control transport"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tmuxx-protocol = { path = "../tmuxx-protocol" }

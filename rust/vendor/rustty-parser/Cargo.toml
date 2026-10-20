@@ -1,0 +1,17 @@
+[package]
+name = "tmuxx-vendored-rustty-parser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[features]
+scalar-kernels = []
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+simdutf8 = "0.1.5"
+wide = "1.7"
+
+[lib]
+name = "rustty_parser"

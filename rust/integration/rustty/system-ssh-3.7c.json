@@ -1,0 +1,27 @@
+{
+  "reference": "/opt/homebrew/Cellar/tmux/3.7c/bin/tmux",
+  "version": "tmux 3.7c",
+  "reference_sha256": "1d101560ca3d4fb6f86bb53e6d9946e7b98444343d1fdab4a2a6e72980e232a5",
+  "exit_code": 0,
+  "status": "passed",
+  "rustty_sources": {
+    "crates/rustty/src/tmuxx.rs": "b1841f1ab8daafa2160a05dde440089be9ccbaf89d902bca7438adc42e0b99f0",
+    "crates/rustty/src/tmuxx/system.rs": "f2270120efced8dba78da390e7bd9e89228b9fd83a8ce395175674e0af124a77",
+    "crates/rustty/src/session.rs": "670f0af8d67aa1bc728cc5ff1697e55b0a0ef17aea40c04cf9a093a93fab0fe9",
+    "crates/rustty-app/src/tmuxx_workspace.rs": "e7e9341e4916ec0decb77c98a26729d6ba432cfc38d88e990716204d18e8a490"
+  },
+  "assertions": [
+    "shared-pane-independent-selection",
+    "live-input-output",
+    "dynamic-pane-create-remove",
+    "reconnect-capture",
+    "same-session-duplicate-winlinks-and-active-index",
+    "mouse-and-protocol-reply-not-synchronized",
+    "ordinary-text-synchronized",
+    "nul-rejected",
+    "temporary-buffers-cleaned-on-success-and-missing-target",
+    "existing-user-buffer-preserved",
+    "c-clipboard-buffer-replies-once-with-no-mirror-host-action",
+    "new-layouts-signed-floating-geometry"
+  ]
+}

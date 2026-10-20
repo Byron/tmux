@@ -1,0 +1,1111 @@
+//! Streaming UTF-8 and VT escape parsing.
+//!
+//! The transition machine follows Ghostty's parser. UTF-8 decoding only runs
+//! in ground state; string payloads retain their original bytes. Events borrow
+//! parser storage and must be consumed before the callback returns. APC and
+//! DCS payloads are delivered incrementally without accumulating an image or
+//! other potentially large payload in the parser.
+
+#[rustfmt::skip]
+mod table;
+
+pub const MAX_PARAMS: usize = 24;
+pub const MAX_INTERMEDIATES: usize = 4;
+pub const MAX_OSC_BYTES: usize = 8 * 1024 * 1024;
+
+#[inline]
+fn printable_ascii_prefix(bytes: &[u8]) -> usize {
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    ))]
+    let prefix = {
+        use wide::u8x16;
+        16 * bytes
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .take_while(|&&chunk| {
+                let offset = u8x16::new(chunk) - u8x16::splat(b' ');
+                !offset.simd_gt(u8x16::splat(b'~' - b' ')).any()
+            })
+            .count()
+    };
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    )))]
+    let prefix = 0;
+    prefix
+        + bytes[prefix..]
+            .iter()
+            .position(|byte| !(b' '..=b'~').contains(byte))
+            .unwrap_or(bytes.len() - prefix)
+}
+
+#[inline]
+fn valid_utf8_prefix(bytes: &[u8]) -> &str {
+    // The compat validator stops at the first error, so malformed streams do
+    // not repeatedly scan their entire remaining suffix. Keep the existing
+    // prefix recovery for errors and the scalar reference implementation.
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    ))]
+    if let Ok(text) = simdutf8::compat::from_utf8(bytes) {
+        return text;
+    }
+    bytes.utf8_chunks().next().map_or("", |chunk| chunk.valid())
+}
+
+#[inline]
+fn printable_utf8_prefix(text: &str) -> usize {
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    ))]
+    let prefix = {
+        use wide::u8x16;
+        16 * text
+            .as_bytes()
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .take_while(|&&chunk| {
+                let bytes = u8x16::new(chunk);
+                // C0 and DEL are single bytes; encoded C1 controls start with C2.
+                !(bytes.simd_lt(u8x16::splat(0x20))
+                    | bytes.simd_eq(u8x16::splat(0x7f))
+                    | bytes.simd_eq(u8x16::splat(0xc2)))
+                .any()
+            })
+            .count()
+    };
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    )))]
+    let prefix = 0;
+    // A byte group may end within a scalar. Keep the mixed group and tail scalar.
+    let prefix = text.floor_char_boundary(prefix);
+    prefix
+        + text[prefix..]
+            .find(char::is_control)
+            .unwrap_or(text.len() - prefix)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContinuationError {
+    LimitExceeded,
+    NoPendingState,
+    NonCanonical,
+    ReplayWouldCommit,
+}
+
+impl std::fmt::Display for ContinuationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::LimitExceeded => "unfinished parser state exceeded the continuation budget",
+            Self::NoPendingState => "continuation contains no unfinished parser state",
+            Self::NonCanonical => "continuation contains bytes before its effective replay start",
+            Self::ReplayWouldCommit => "continuation would repeat a completed terminal action",
+        })
+    }
+}
+impl std::error::Error for ContinuationError {}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum State {
+    #[default]
+    Ground,
+    Escape,
+    EscapeIntermediate,
+    CsiEntry,
+    CsiIntermediate,
+    CsiParam,
+    CsiIgnore,
+    DcsEntry,
+    DcsParam,
+    DcsIntermediate,
+    DcsPassthrough,
+    DcsIgnore,
+    OscString,
+    SosPmApcString,
+}
+
+#[derive(Clone, Copy)]
+enum TransitionAction {
+    None,
+    Ignore,
+    Print,
+    Execute,
+    Collect,
+    Param,
+    EscDispatch,
+    CsiDispatch,
+    Put,
+    OscPut,
+    ApcPut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Event<'a> {
+    Print(char),
+    Execute(u8),
+    Esc {
+        intermediates: &'a [u8],
+        final_byte: u8,
+    },
+    Csi {
+        intermediates: &'a [u8],
+        params: &'a [u16],
+        colon_separators: u32,
+        final_byte: u8,
+    },
+    /// Raw OSC command, including its numeric prefix. Command-specific
+    /// validation and storage limits belong to the consumer.
+    Osc {
+        data: &'a [u8],
+        terminated_by_bell: bool,
+    },
+    DcsHook {
+        intermediates: &'a [u8],
+        params: &'a [u16],
+        final_byte: u8,
+    },
+    DcsPut(u8),
+    DcsUnhook,
+    ApcStart,
+    ApcPut(u8),
+    ApcEnd,
+    /// tmux distinguishes rename, APC-title and ignored strings.
+    TmuxStringStart(u8),
+    TmuxStringEnd,
+    /// A complete OSC exceeded the configured capture limit and was discarded.
+    OscOverflow,
+}
+
+/// Parser events with text and APC payload runs borrowed directly from the input.
+/// Controls and text split across input boundaries retain scalar [`Event`]s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BatchEvent<'a> {
+    PrintAscii(&'a [u8]),
+    /// Valid printable UTF-8, which may also contain ASCII characters.
+    PrintUtf8(&'a str),
+    /// Printable ASCII in an APC payload; control bytes retain scalar events.
+    ApcPut(&'a [u8]),
+    Event(Event<'a>),
+}
+
+#[derive(Clone, Debug)]
+pub struct Parser {
+    state: State,
+    intermediates: [u8; MAX_INTERMEDIATES],
+    intermediate_count: usize,
+    params: [u16; MAX_PARAMS],
+    param_count: usize,
+    colon_separators: u32,
+    accumulator: u16,
+    digits: bool,
+    osc: Vec<u8>,
+    osc_limit: usize,
+    osc_overflow: bool,
+    utf8: Utf8Decoder,
+    continuation: Vec<u8>,
+    continuation_limit: usize,
+    continuation_broken: bool,
+    capture_pending: Vec<u8>,
+    capture_pending_broken: bool,
+    tmux_strings: bool,
+    tmux_dcs_escape: bool,
+}
+
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Parser {
+    pub fn new() -> Self {
+        Self {
+            state: State::Ground,
+            intermediates: [0; MAX_INTERMEDIATES],
+            intermediate_count: 0,
+            params: [0; MAX_PARAMS],
+            param_count: 0,
+            colon_separators: 0,
+            accumulator: 0,
+            digits: false,
+            osc: Vec::new(),
+            osc_limit: MAX_OSC_BYTES,
+            osc_overflow: false,
+            utf8: Utf8Decoder::default(),
+            continuation: Vec::new(),
+            continuation_limit: MAX_OSC_BYTES,
+            continuation_broken: false,
+            capture_pending: Vec::new(),
+            capture_pending_broken: false,
+            tmux_strings: false,
+            tmux_dcs_escape: false,
+        }
+    }
+
+    pub fn state(&self) -> State {
+        self.state
+    }
+
+    pub fn set_tmux_strings(&mut self, enabled: bool) {
+        self.tmux_strings = enabled;
+    }
+
+    fn scanner(&self) -> Self {
+        let mut parser = Self::new();
+        parser.tmux_strings = self.tmux_strings;
+        parser
+    }
+
+    pub fn is_ground(&self) -> bool {
+        self.state == State::Ground && self.utf8.state == 0
+    }
+
+    pub fn reset(&mut self) {
+        self.state = State::Ground;
+        self.tmux_dcs_escape = false;
+        self.utf8 = Utf8Decoder::default();
+        self.clear();
+        self.osc.clear();
+        self.osc_overflow = false;
+        self.continuation.clear();
+        self.continuation_broken = false;
+        self.capture_pending.clear();
+        self.capture_pending_broken = false;
+    }
+
+    /// tmux input_reset enters ground but leaves its capture-only buffer intact.
+    pub fn reset_preserving_pending_input(&mut self) {
+        let pending = std::mem::take(&mut self.capture_pending);
+        let broken = self.capture_pending_broken;
+        self.reset();
+        if self.tmux_strings {
+            self.capture_pending = pending;
+            self.capture_pending_broken = broken;
+        }
+    }
+
+    /// Bound the replay state retained for snapshots. Zero permits ground-only
+    /// snapshots. An overflow heals after reaching ground or a fresh replay start.
+    pub fn set_continuation_limit(&mut self, limit: usize) {
+        self.continuation_limit = limit;
+        if self.continuation.len() > limit {
+            self.continuation.clear();
+            self.continuation_broken = true;
+        }
+        if self.capture_pending.len() > limit {
+            self.capture_pending.clear();
+            self.capture_pending_broken = true;
+        }
+    }
+
+    /// Return the canonical unfinished input tail used by GHOSTSNP version 1.
+    /// Controls whose effects already committed inside a sequence are omitted.
+    pub fn continuation(&self) -> Result<Vec<u8>, ContinuationError> {
+        if self.continuation_broken {
+            return Err(ContinuationError::LimitExceeded);
+        }
+        let mut scanner = self.scanner();
+        let mut result = Vec::with_capacity(self.continuation.len());
+        for &byte in &self.continuation {
+            let state = (scanner.state, scanner.utf8.state);
+            let committed = scanner.scan_byte(byte);
+            if committed && state == (scanner.state, scanner.utf8.state) && !scanner.is_ground() {
+                continue;
+            }
+            result.push(byte);
+        }
+        Ok(result)
+    }
+
+    /// Unfinished input including controls already executed within a sequence.
+    /// This is for capture output; replay must use `continuation` instead.
+    pub fn pending_input(&self) -> Result<&[u8], ContinuationError> {
+        if self.capture_pending_broken {
+            Err(ContinuationError::LimitExceeded)
+        } else {
+            Ok(&self.capture_pending)
+        }
+    }
+
+    /// Install capture-only bytes without repeating controls that already ran.
+    pub fn restore_pending_input(&mut self, bytes: Option<&[u8]>) -> Result<(), ContinuationError> {
+        let Some(bytes) = bytes else {
+            self.capture_pending.clear();
+            self.capture_pending_broken = true;
+            return Ok(());
+        };
+        if bytes.len() > self.continuation_limit {
+            return Err(ContinuationError::LimitExceeded);
+        }
+        if self.state == State::Ground {
+            if !self.tmux_strings && !bytes.is_empty() {
+                return Err(ContinuationError::NoPendingState);
+            }
+        } else {
+            let mut scanner = self.scanner();
+            scanner.advance(bytes, |_| {});
+            if scanner.continuation()? != self.continuation()? {
+                return Err(ContinuationError::NonCanonical);
+            }
+        }
+        self.capture_pending = bytes.to_vec();
+        self.capture_pending_broken = false;
+        Ok(())
+    }
+
+    fn retain_pending(&mut self, bytes: &[u8]) {
+        if self.state == State::Ground {
+            self.capture_pending.clear();
+            self.capture_pending_broken = false;
+        } else if !self.capture_pending_broken {
+            if bytes.len()
+                > self
+                    .continuation_limit
+                    .saturating_sub(self.capture_pending.len())
+                || self.capture_pending.try_reserve(bytes.len()).is_err()
+            {
+                self.capture_pending.clear();
+                self.capture_pending_broken = true;
+            } else {
+                self.capture_pending.extend_from_slice(bytes);
+            }
+        }
+    }
+
+    pub fn validate_continuation(bytes: &[u8]) -> Result<(), ContinuationError> {
+        Self::validate_continuation_with_tmux(bytes, false)
+    }
+
+    pub fn validate_continuation_with_tmux(
+        bytes: &[u8],
+        tmux_strings: bool,
+    ) -> Result<(), ContinuationError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut scanner = Self::new();
+        scanner.tmux_strings = tmux_strings;
+        let mut committed = false;
+        for &byte in bytes {
+            committed |= scanner.scan_byte(byte);
+        }
+        if scanner.is_ground() {
+            return Err(ContinuationError::NoPendingState);
+        }
+        if scanner.replay_start(bytes) != Some(0) {
+            return Err(ContinuationError::NonCanonical);
+        }
+        if committed {
+            return Err(ContinuationError::ReplayWouldCommit);
+        }
+        Ok(())
+    }
+
+    fn scan_byte(&mut self, byte: u8) -> bool {
+        let mut committed = false;
+        self.advance_byte(byte, &mut |event| {
+            committed |= !matches!(
+                event,
+                Event::DcsHook { .. }
+                    | Event::DcsPut(_)
+                    | Event::ApcStart
+                    | Event::ApcPut(_)
+                    | Event::TmuxStringStart(_)
+            );
+        });
+        committed
+    }
+
+    fn replay_start(&self, bytes: &[u8]) -> Option<usize> {
+        if self.tmux_strings && self.state == State::DcsPassthrough {
+            return bytes.windows(2).position(|pair| pair == b"\x1bP");
+        }
+        if self.state != State::Ground {
+            bytes.iter().rposition(|&b| b == 0x1b)
+        } else if self.tmux_strings && self.utf8.state != 0 {
+            // tmux consumes invalid high bytes as part of the declared UTF-8
+            // sequence, so a new lead byte is not necessarily a replay start.
+            bytes
+                .len()
+                .checked_sub(usize::from(self.utf8.tmux_width - self.utf8.state))
+        } else {
+            bytes.iter().rposition(|&b| b & 0xc0 != 0x80)
+        }
+    }
+
+    fn retain_continuation(&mut self, bytes: &[u8]) {
+        if self.tmux_strings && self.state == State::DcsPassthrough {
+            self.continuation.clone_from(&self.capture_pending);
+            self.continuation_broken = self.capture_pending_broken;
+            return;
+        }
+        if self.is_ground() {
+            self.continuation.clear();
+            self.continuation_broken = false;
+            return;
+        }
+        let bytes = if let Some(start) = self.replay_start(bytes) {
+            self.continuation.clear();
+            self.continuation_broken = false;
+            &bytes[start..]
+        } else {
+            bytes
+        };
+        if self.continuation_broken {
+            return;
+        }
+        if bytes.len()
+            > self
+                .continuation_limit
+                .saturating_sub(self.continuation.len())
+            || self.continuation.try_reserve(bytes.len()).is_err()
+        {
+            self.continuation.clear();
+            self.continuation_broken = true;
+        } else {
+            self.continuation.extend_from_slice(bytes);
+        }
+    }
+
+    /// Limit retained raw OSC bytes, including the numeric command prefix.
+    /// A lower limit also discards any oversized capture already in flight;
+    /// subsequent bytes are consumed until exit. Snapshot replay has its own limit.
+    pub fn set_osc_limit(&mut self, limit: usize) {
+        self.osc_limit = limit;
+        if self.osc.len() > self.osc_limit {
+            self.osc.clear();
+            self.osc_overflow = true;
+        }
+    }
+
+    pub fn advance(&mut self, bytes: &[u8], mut handler: impl FnMut(Event<'_>)) {
+        for &byte in bytes {
+            self.advance_byte(byte, &mut handler);
+        }
+        self.retain_continuation(bytes);
+    }
+
+    /// Like [`Self::advance`], but emit printable text and APC data as borrowed runs.
+    /// Pending UTF-8 and escape sequences keep their scalar path.
+    pub fn advance_batched(&mut self, bytes: &[u8], mut handler: impl FnMut(BatchEvent<'_>)) {
+        let mut remaining = bytes;
+        while let Some(&byte) = remaining.first() {
+            if (b' '..=b'~').contains(&byte)
+                && (self.is_ground() || self.state == State::SosPmApcString)
+            {
+                let len = printable_ascii_prefix(remaining);
+                handler(if self.state == State::SosPmApcString {
+                    BatchEvent::ApcPut(&remaining[..len])
+                } else {
+                    BatchEvent::PrintAscii(&remaining[..len])
+                });
+                self.retain_pending(&remaining[..len]);
+                remaining = &remaining[len..];
+            } else {
+                if (0xc2..=0xf4).contains(&byte) && self.is_ground() {
+                    let text = valid_utf8_prefix(remaining);
+                    if !text.is_empty() {
+                        self.advance_valid_utf8(text, &mut handler);
+                        remaining = &remaining[text.len()..];
+                        continue;
+                    }
+                }
+                self.advance_byte(byte, &mut |event| handler(BatchEvent::Event(event)));
+                remaining = &remaining[1..];
+            }
+        }
+        self.retain_continuation(bytes);
+    }
+
+    fn advance_valid_utf8(&mut self, text: &str, handler: &mut impl FnMut(BatchEvent<'_>)) {
+        // Consume the validated prefix completely, including control sequences,
+        // so a stream of short runs never revalidates overlapping suffixes.
+        let mut offset = 0;
+        while offset < text.len() {
+            if self.is_ground()
+                // Raw VT parsing can reach ground inside a UTF-8 codepoint.
+                && let Some(remaining) = text.get(offset..)
+            {
+                let len = printable_utf8_prefix(remaining);
+                if len > 0 {
+                    handler(BatchEvent::PrintUtf8(&remaining[..len]));
+                    offset += len;
+                    continue;
+                }
+            }
+            self.advance_byte(text.as_bytes()[offset], &mut |event| {
+                handler(BatchEvent::Event(event))
+            });
+            offset += 1;
+        }
+    }
+
+    fn advance_byte(&mut self, byte: u8, handler: &mut impl FnMut(Event<'_>)) {
+        self.advance_byte_inner(byte, handler);
+        self.retain_pending(&[byte]);
+    }
+
+    fn advance_byte_inner(&mut self, byte: u8, handler: &mut impl FnMut(Event<'_>)) {
+        if self.state != State::Ground {
+            self.control(byte, handler);
+            return;
+        }
+        let (codepoint, consumed) = if self.tmux_strings {
+            self.utf8.next_tmux(byte)
+        } else {
+            self.utf8.next(byte)
+        };
+        if let Some(codepoint) = codepoint {
+            self.codepoint(codepoint, handler);
+        }
+        if !consumed {
+            let (codepoint, consumed) = if self.tmux_strings {
+                self.utf8.next_tmux(byte)
+            } else {
+                self.utf8.next(byte)
+            };
+            debug_assert!(consumed);
+            if let Some(codepoint) = codepoint {
+                self.codepoint(codepoint, handler);
+            }
+        }
+    }
+
+    fn codepoint(&mut self, codepoint: char, handler: &mut impl FnMut(Event<'_>)) {
+        match codepoint as u32 {
+            0x1b => {
+                self.state = State::Escape;
+                self.clear();
+            }
+            0..=0x1f => handler(Event::Execute(codepoint as u8)),
+            0x80..=0x9f => {} // UTF-8-encoded C1 controls are ignored by Ghostty.
+            _ => handler(Event::Print(codepoint)),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.intermediate_count = 0;
+        self.param_count = 0;
+        self.colon_separators = 0;
+        self.accumulator = 0;
+        self.digits = false;
+    }
+
+    fn finalize_params(&mut self) -> bool {
+        if self.param_count >= MAX_PARAMS {
+            return false;
+        }
+        if self.digits {
+            self.params[self.param_count] = self.accumulator;
+            self.param_count += 1;
+        }
+        true
+    }
+
+    fn control(&mut self, byte: u8, handler: &mut impl FnMut(Event<'_>)) {
+        if self.tmux_strings && self.state == State::DcsPassthrough {
+            if self.tmux_dcs_escape {
+                self.tmux_dcs_escape = false;
+                if byte == b'\\' {
+                    handler(Event::DcsUnhook);
+                    self.state = State::Ground;
+                } else {
+                    handler(Event::DcsPut(byte));
+                }
+            } else if byte == 0x1b {
+                self.tmux_dcs_escape = true;
+            } else {
+                handler(Event::DcsPut(byte));
+            }
+            return;
+        }
+        if self.tmux_strings
+            && self.state == State::SosPmApcString
+            && !matches!(byte, 0x18 | 0x1a | 0x1b)
+        {
+            if byte >= 0x20 {
+                handler(Event::ApcPut(byte));
+            }
+            return;
+        }
+        let (next, action) = if self.tmux_strings && self.state == State::Escape && byte == b'k' {
+            (State::SosPmApcString, TransitionAction::None)
+        } else {
+            table::TABLE[byte as usize][self.state as usize]
+        };
+        let changed = next != self.state;
+        if changed {
+            match self.state {
+                State::OscString if self.tmux_strings || !matches!(byte, 0x18 | 0x1a) => {
+                    if self.osc_overflow {
+                        handler(Event::OscOverflow);
+                    } else {
+                        handler(Event::Osc {
+                            data: &self.osc,
+                            terminated_by_bell: byte == 7,
+                        });
+                    }
+                }
+                State::DcsPassthrough => handler(Event::DcsUnhook),
+                State::SosPmApcString if self.tmux_strings => handler(Event::TmuxStringEnd),
+                State::SosPmApcString => handler(Event::ApcEnd),
+                _ => {}
+            }
+        }
+        match action {
+            TransitionAction::None | TransitionAction::Ignore => {}
+            TransitionAction::Print => handler(Event::Print(byte as char)),
+            TransitionAction::Execute => handler(Event::Execute(byte)),
+            TransitionAction::Collect => {
+                if self.intermediate_count < MAX_INTERMEDIATES {
+                    self.intermediates[self.intermediate_count] = byte;
+                    self.intermediate_count += 1;
+                }
+            }
+            TransitionAction::Param => {
+                if byte == b';' || byte == b':' {
+                    if self.param_count < MAX_PARAMS {
+                        self.params[self.param_count] = self.accumulator;
+                        if byte == b':' {
+                            self.colon_separators |= 1 << self.param_count;
+                        }
+                        self.param_count += 1;
+                        self.accumulator = 0;
+                        self.digits = false;
+                    }
+                } else {
+                    self.accumulator = self
+                        .accumulator
+                        .saturating_mul(10)
+                        .saturating_add((byte - b'0') as u16);
+                    self.digits = true;
+                }
+            }
+            TransitionAction::EscDispatch => handler(Event::Esc {
+                intermediates: &self.intermediates[..self.intermediate_count],
+                final_byte: byte,
+            }),
+            TransitionAction::CsiDispatch => {
+                if self.finalize_params() && (byte == b'm' || self.colon_separators == 0) {
+                    handler(Event::Csi {
+                        intermediates: &self.intermediates[..self.intermediate_count],
+                        params: &self.params[..self.param_count],
+                        colon_separators: self.colon_separators,
+                        final_byte: byte,
+                    });
+                }
+            }
+            TransitionAction::OscPut => {
+                if !self.osc_overflow {
+                    if self.osc.len() < self.osc_limit && self.osc.try_reserve(1).is_ok() {
+                        self.osc.push(byte);
+                    } else {
+                        self.osc.clear();
+                        self.osc_overflow = true;
+                    }
+                }
+            }
+            TransitionAction::Put => handler(Event::DcsPut(byte)),
+            TransitionAction::ApcPut => handler(Event::ApcPut(byte)),
+        }
+        if changed {
+            match next {
+                State::Escape | State::DcsEntry | State::CsiEntry => self.clear(),
+                State::OscString => {
+                    self.osc.clear();
+                    self.osc_overflow = false;
+                }
+                State::DcsPassthrough => {
+                    if self.finalize_params() {
+                        handler(Event::DcsHook {
+                            intermediates: &self.intermediates[..self.intermediate_count],
+                            params: &self.params[..self.param_count],
+                            final_byte: byte,
+                        });
+                    }
+                }
+                State::SosPmApcString if self.tmux_strings => handler(Event::TmuxStringStart(byte)),
+                State::SosPmApcString => handler(Event::ApcStart),
+                _ => {}
+            }
+        }
+        self.state = next;
+    }
+}
+
+/// Hoehrmann DFA with Ghostty's retry-on-invalid-continuation behavior.
+#[derive(Clone, Debug, Default)]
+pub struct Utf8Decoder {
+    state: u8,
+    accumulator: u32,
+    tmux_width: u8,
+    tmux_invalid: bool,
+}
+
+impl Utf8Decoder {
+    // tmux consumes the declared high-byte sequence before validating it.
+    // ASCII interrupts it and is then processed normally by input.c.
+    fn next_tmux(&mut self, byte: u8) -> (Option<char>, bool) {
+        if self.state == 0 {
+            if byte < 0x80 {
+                return (Some(char::from(byte)), true);
+            }
+            self.tmux_width = match byte {
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf4 => 4,
+                _ => 0,
+            };
+            if self.tmux_width == 0 {
+                return (Some('\u{fffd}'), true);
+            }
+            self.accumulator = u32::from(byte & (0x7f >> self.tmux_width));
+            self.state = self.tmux_width - 1;
+            self.tmux_invalid = false;
+            return (None, true);
+        }
+        if byte < 0x80 {
+            self.state = 0;
+            return (Some('\u{fffd}'), false);
+        }
+        self.tmux_invalid |= byte & 0xc0 != 0x80;
+        self.accumulator = (self.accumulator << 6) | u32::from(byte & 0x3f);
+        self.state -= 1;
+        if self.state != 0 {
+            return (None, true);
+        }
+        let minimum = match self.tmux_width {
+            2 => 0x80,
+            3 => 0x800,
+            _ => 0x10000,
+        };
+        let ch = if self.tmux_invalid || self.accumulator < minimum {
+            '\u{fffd}'
+        } else {
+            char::from_u32(self.accumulator).unwrap_or('\u{fffd}')
+        };
+        (Some(ch), true)
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.state != 0
+    }
+
+    pub fn next(&mut self, byte: u8) -> (Option<char>, bool) {
+        let class = table::UTF8_CLASSES[byte as usize];
+        let initial = self.state;
+        self.accumulator = if initial != 0 {
+            (self.accumulator << 6) | (byte & 0x3f) as u32
+        } else {
+            (0xffu32 >> class) & byte as u32
+        };
+        self.state = table::UTF8_TRANSITIONS[(self.state + class) as usize];
+        match self.state {
+            0 => {
+                let value = char::from_u32(self.accumulator);
+                self.accumulator = 0;
+                (value, true)
+            }
+            12 => {
+                self.accumulator = 0;
+                self.state = 0;
+                (Some('\u{fffd}'), initial == 0)
+            }
+            _ => (None, true),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tmux_invalid_utf8_consumes_declared_sequence_at_every_boundary() {
+        let bytes = b"\xf0\x80\x80\x80A\xed\xa0\x80B\xe2\xc2\xa3C\xe2D\xc2\xa3";
+        for split in 0..=bytes.len() {
+            let mut parser = Parser::new();
+            parser.set_tmux_strings(true);
+            let mut text = String::new();
+            for chunk in [&bytes[..split], &bytes[split..]] {
+                parser.advance(chunk, |event| {
+                    if let Event::Print(ch) = event {
+                        text.push(ch);
+                    }
+                });
+            }
+            assert_eq!(text, "�A�B�C�D£", "split {split}");
+        }
+    }
+
+    fn events(chunks: &[&[u8]]) -> Vec<String> {
+        let mut parser = Parser::new();
+        let mut events = Vec::new();
+        for chunk in chunks {
+            parser.advance(chunk, |event| events.push(format!("{event:?}")));
+        }
+        events
+    }
+
+    #[test]
+    fn chunk_boundaries_preserve_utf8_and_all_string_protocols() {
+        let bytes = b"hi\xf0\x9f\x98\x84\x1b[38:2::1:2:3m\x1b]2;a\xc3\x9c\x07\x1bP1;2q\xc3\x9c\x1b\\\x1b_Ga=t;AAAA\x1b\\end";
+        let whole = events(&[bytes]);
+        for split in 0..=bytes.len() {
+            assert_eq!(whole, events(&[&bytes[..split], &bytes[split..]]));
+        }
+        assert_eq!(whole, events(&bytes.chunks(1).collect::<Vec<_>>()));
+        assert!(whole.iter().any(|e| e == "Print('😄')"));
+        assert!(whole.iter().any(|e| e == "DcsPut(156)"));
+        assert!(whole.iter().any(|e| e == "ApcStart"));
+        assert!(whole.iter().any(|e| e == "ApcEnd"));
+    }
+
+    #[test]
+    fn malformed_utf8_retries_control_byte_and_ignores_decoded_c1() {
+        let result = events(&[b"\xf0\x9f\x1b[31m\xed\xa0\x80\xc2\x9bX"]);
+        assert_eq!(
+            result.iter().filter(|s| s.as_str() == "Print('�')").count(),
+            4
+        );
+        assert!(result.iter().any(|s| s.contains("params: [31]")));
+        assert_eq!(result.last().unwrap(), "Print('X')");
+    }
+
+    #[test]
+    fn apc_payload_uses_a_borrowed_run() {
+        let bytes = b"\x1b_Ga=t,f=32;AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x1b\\";
+        let mut scalar_payload_events = 0;
+        Parser::new().advance_batched(bytes, |event| {
+            scalar_payload_events +=
+                usize::from(matches!(event, BatchEvent::Event(Event::ApcPut(_))));
+        });
+        assert_eq!(
+            scalar_payload_events, 0,
+            "ASCII image data must not dispatch per byte"
+        );
+    }
+
+    #[test]
+    fn printable_batches_preserve_scalar_events_and_continuations() {
+        let bytes = [
+            b"hello\x7f world\x80\xc2\x9b\xf0\x9fASCII\xed\xa0\x80\xf0\x9f\x1b[31mred\x1b[0m\x07\x1b]2;title\x07\x1bP1;2qraw ascii\x1b\\\x1b_Ga=t;AAAA\x1b\\end".as_slice(),
+            "世界 café العربية e\u{301} 👩\u{200d}💻\u{85}after C1\u{7f}".as_bytes(),
+            // ST inside these valid codepoints leaves raw ESC/APC parsing in
+            // ground, where the remaining continuation byte must decode alone.
+            b"\x1b\xe2\x9c\x80ground\x1b_\xe2\x9c\x80after APC",
+            b"\xe0\xa0\xf0\x9f\x98\x84\x1b[38:2::1:2",
+        ].concat();
+        for limit in [MAX_OSC_BYTES, 4] {
+            for split in 0..=bytes.len() {
+                let mut scalar = Parser::new();
+                scalar.set_osc_limit(limit);
+                scalar.set_continuation_limit(limit);
+                let mut batched = scalar.clone();
+                let mut expected = Vec::new();
+                let mut actual = Vec::new();
+                let mut runs = Vec::new();
+                let mut unicode_runs = 0;
+                for chunk in [&bytes[..split], &bytes[split..]] {
+                    scalar.advance(chunk, |event| expected.push(format!("{event:?}")));
+                    batched.advance_batched(chunk, |event| match event {
+                        BatchEvent::PrintAscii(run) => {
+                            assert!(!run.is_empty());
+                            assert!(run.iter().all(|byte| (b' '..=b'~').contains(byte)));
+                            assert!(run.as_ptr() >= chunk.as_ptr());
+                            assert!(run.as_ptr_range().end <= chunk.as_ptr_range().end);
+                            runs.push(run.to_vec());
+                            actual.extend(
+                                run.iter()
+                                    .map(|&byte| format!("{:?}", Event::Print(byte as char))),
+                            );
+                        }
+                        BatchEvent::PrintUtf8(run) => {
+                            assert!(!run.is_empty());
+                            assert!(!run.chars().any(char::is_control));
+                            assert!(run.as_ptr() >= chunk.as_ptr());
+                            assert!(run.as_bytes().as_ptr_range().end <= chunk.as_ptr_range().end);
+                            unicode_runs += usize::from(!run.is_ascii());
+                            actual.extend(run.chars().map(|cp| format!("{:?}", Event::Print(cp))));
+                        }
+                        BatchEvent::ApcPut(run) => {
+                            assert!(!run.is_empty());
+                            assert!(run.as_ptr() >= chunk.as_ptr());
+                            assert!(run.as_ptr_range().end <= chunk.as_ptr_range().end);
+                            actual.extend(
+                                run.iter().map(|&byte| format!("{:?}", Event::ApcPut(byte))),
+                            );
+                        }
+                        BatchEvent::Event(event) => actual.push(format!("{event:?}")),
+                    });
+                    assert_eq!(actual, expected, "split={split}");
+                    assert_eq!(batched.state(), scalar.state(), "split={split}");
+                    assert_eq!(batched.is_ground(), scalar.is_ground(), "split={split}");
+                    assert_eq!(
+                        batched.continuation(),
+                        scalar.continuation(),
+                        "split={split}"
+                    );
+                }
+                if split == 0 {
+                    assert_eq!(runs[0], b"hello");
+                    assert_eq!(runs[1], b" world");
+                }
+                assert!(unicode_runs > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn ascii_prefix_matches_all_bytes_and_boundaries() {
+        let mut bytes = [b'x'; 96];
+        for offset in 0..80 {
+            for byte in 0..=u8::MAX {
+                bytes[offset] = byte;
+                for start in 0..=offset.min(15) {
+                    let input = &bytes[start..];
+                    let expected = if (b' '..=b'~').contains(&byte) {
+                        input.len()
+                    } else {
+                        offset - start
+                    };
+                    assert_eq!(printable_ascii_prefix(input), expected);
+                }
+            }
+            bytes[offset] = b'x';
+        }
+        for len in 0..=bytes.len() {
+            assert_eq!(printable_ascii_prefix(&bytes[..len]), len);
+        }
+    }
+
+    #[test]
+    fn printable_utf8_prefix_matches_controls_boundaries_and_tails() {
+        for offset in 0..48 {
+            for cp in (0..=255).filter_map(char::from_u32).chain([
+                '界',
+                '💻',
+                '\u{200d}',
+                '\u{2028}',
+                '\u{2029}',
+                '\u{feff}',
+                '\u{10ffff}',
+            ]) {
+                let mut text = "x".repeat(offset);
+                text.push(cp);
+                text.push_str("a界💻a界💻a界💻a界💻a界💻a界💻");
+                for end in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+                    let input = &text[..end];
+                    assert_eq!(
+                        printable_utf8_prefix(input),
+                        input.find(char::is_control).unwrap_or(input.len()),
+                        "offset={offset}, cp={cp:?}, end={end}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn utf8_prefix_matches_scalar_across_block_edges_and_errors() {
+        let mut bytes = "aé界👩\u{200d}💻\u{9b}\x1b[0m".repeat(24).into_bytes();
+        for start in 0..=65 {
+            for end in start..=bytes.len() {
+                let input = &bytes[start..end];
+                assert_eq!(
+                    valid_utf8_prefix(input),
+                    input.utf8_chunks().next().map_or("", |chunk| chunk.valid()),
+                    "start={start}, end={end}"
+                );
+            }
+        }
+        for offset in 0..bytes.len() {
+            let original = bytes[offset];
+            for byte in [0x80, 0xc0, 0xc1, 0xe0, 0xed, 0xf4, 0xf5, 0xff] {
+                bytes[offset] = byte;
+                assert_eq!(
+                    valid_utf8_prefix(&bytes),
+                    bytes.utf8_chunks().next().unwrap().valid(),
+                    "offset={offset}, byte={byte}"
+                );
+            }
+            bytes[offset] = original;
+        }
+    }
+
+    #[test]
+    fn bounded_parameters_saturate_and_reject_invalid_separators() {
+        assert!(events(&[b"\x1b[999999999999999999999m"])[0].contains("65535"));
+        assert!(events(&[b"\x1b[1:2H"]).is_empty());
+        assert!(events(&[format!("\x1b[{}m", "1;".repeat(24)).as_bytes()]).is_empty());
+        assert!(events(&[b"\x1b[1;m"])[0].contains("params: [1]"));
+    }
+
+    #[test]
+    fn overflow_recovers_at_string_terminator() {
+        let mut parser = Parser::new();
+        parser.set_osc_limit(4);
+        let mut result = Vec::new();
+        parser.advance(b"\x1b]2;too long\x07ok", |e| result.push(format!("{e:?}")));
+        assert_eq!(result, ["OscOverflow", "Print('o')", "Print('k')"]);
+        assert!(parser.is_ground());
+    }
+
+    #[test]
+    fn raw_osc_budget_is_configurable_and_survives_reset() {
+        let data = vec![b'x'; MAX_OSC_BYTES + 1];
+        for limit in [MAX_OSC_BYTES, MAX_OSC_BYTES + 5] {
+            let mut parser = Parser::new();
+            if limit != MAX_OSC_BYTES {
+                parser.set_osc_limit(limit);
+            }
+            parser.reset();
+            parser.advance(b"\x1b]", |_| panic!("unfinished OSC emitted an event"));
+            parser.advance(&data, |_| panic!("unfinished OSC emitted an event"));
+            let mut emitted = false;
+            parser.advance(b"\x07", |event| {
+                emitted = true;
+                match event {
+                    Event::Osc { data, .. } => {
+                        assert!(limit > MAX_OSC_BYTES);
+                        assert_eq!(data.len(), MAX_OSC_BYTES + 1);
+                    }
+                    Event::OscOverflow => assert_eq!(limit, MAX_OSC_BYTES),
+                    event => panic!("unexpected event: {event:?}"),
+                }
+            });
+            assert!(emitted);
+            assert!(parser.is_ground());
+        }
+    }
+
+    #[test]
+    fn unfinished_utf8_is_not_ground() {
+        let mut parser = Parser::new();
+        parser.advance(b"\xf0\x9f", |_| {});
+        assert!(!parser.is_ground());
+        let mut result = String::new();
+        parser.advance(b"\x98\x84", |e| {
+            if let Event::Print(c) = e {
+                result.push(c)
+            }
+        });
+        assert_eq!(result, "😄");
+        assert!(parser.is_ground());
+    }
+}

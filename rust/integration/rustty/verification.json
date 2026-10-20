@@ -1,0 +1,524 @@
+{
+  "record_kind": "Inspection index: current macOS qualification plus source-specific historical results; gate output is recorded separately",
+  "platform": "macOS aarch64",
+  "toolchain": "1.95.0",
+  "rustty_base_revision": "cb67824a77fc00bd20e811cce40012893f79b999",
+  "patch_sha256": "cb52f7dbf3ff3b6dd96f813c099a74557842bda8a8664f19895dece285309588",
+  "manifest_sha256": "dd2d86fa682aa8ef66e229b0c6f5582c3d88589c59419e68d46e1c5ec91b6d72",
+  "applied_files_verified": 20,
+  "fingerprinted_rustty_source_count": 806,
+  "executable_contract": {
+    "status": "Passed in the complete 2026-10-20 macOS collection; see qualification for report and gate identities",
+    "checkout": "Actual integrated Rustty sibling, validated against manifest.json",
+    "suite_count": 12,
+    "expected_named_test_count": 28,
+    "definitions": [
+      "rust/conformance/rustty-evidence.toml",
+      "rust/conformance/version-evidence.toml"
+    ],
+    "collection": "python3 rust/conformance/runner.py smoke --reference /path/to/image-enabled-current-tmux --older-reference /path/to/tmux-3.7c --candidate rust/target/debug/tmuxx --suite all --report rust/conformance/artifacts/c-rust.json",
+    "gate": "python3 rust/conformance/runner.py gate --report rust/conformance/artifacts/c-rust.json --profile native-views",
+    "suites": [
+      {
+        "id": "rustty-native-adapter",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 11,
+        "tests": [
+          "tmuxx::tests::embedded_and_socket_views_share_panes_but_keep_selection_local",
+          "tmuxx::tests::native_snapshot_preserves_row_ids_and_image_anchors_after_resize",
+          "tmuxx::tests::streamed_snapshot_restores_large_image_atomically_and_abort_keeps_live_view",
+          "tmuxx::tests::restored_native_views_search_and_select_shell_output_independently",
+          "tmuxx::tests::native_typed_keys_and_paste_follow_each_pane_modes_without_broadcasting_mouse",
+          "tmuxx::tests::native_focus_is_aggregated_across_views_and_connections_and_gated_by_server_option",
+          "tmuxx::tests::native_host_actions_are_assigned_once_and_clipboard_replies_use_event_ids",
+          "tmuxx::tests::native_exit_and_respawn_replace_process_state_and_selection",
+          "tmuxx::tests::new_server_incarnation_closes_stale_views_and_resets_event_identity",
+          "tmuxx::tests::native_views_preserve_wide_cells_viewports_sync_modes_and_stationary_cursor_changes",
+          "tmuxx::tests::native_detach_closes_views_without_signalling_the_gui_parent"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty",
+          "--features",
+          "sessions",
+          "--lib",
+          "tmuxx::tests::",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-native-workspace",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 6,
+        "tests": [
+          "tmuxx_workspace::tests::linked_windows_get_independent_views_and_commands_use_server_ids",
+          "tmuxx_workspace::tests::duplicate_window_links_in_one_session_have_distinct_views_and_targets",
+          "tmuxx_workspace::tests::floating_panes_keep_signed_geometry_front_order_modal_focus_and_independent_views",
+          "tmuxx_workspace::tests::zoomed_server_view_keeps_overlay_geometry_and_hidden_membership",
+          "tmuxx_workspace::tests::server_content_rect_reserves_border_status_without_dropping_full_layout",
+          "tmuxx_workspace::tests::malformed_graph_does_not_replace_live_workspace"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-app",
+          "--lib",
+          "tmuxx_workspace::tests::",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-system-ssh",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-system-ssh",
+        "expected_named_tests": 1,
+        "tests": [
+          "tmuxx::system::tests::stock_ssh_views_share_live_panes_and_survive_connection_restart"
+        ],
+        "runner": "rust/conformance/rustty_system_ssh.py"
+      },
+      {
+        "id": "rustty-desktop-hit-testing",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 1,
+        "tests": [
+          "desktop::tests::floating_composition_clips_without_moving_origin_and_hit_testing_uses_stack_order"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-app",
+          "--bin",
+          "rustty",
+          "floating_composition_clips_without_moving_origin_and_hit_testing_uses_stack_order",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-desktop-modal-policy",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 1,
+        "tests": [
+          "desktop::tests::modal_key_and_outside_click_policies_reach_the_owner"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-app",
+          "--bin",
+          "rustty",
+          "modal_key_and_outside_click_policies_reach_the_owner",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-sixel-renderer",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 1,
+        "tests": [
+          "prepare::graphics::tests::tmux_sixel_overlap_renders_in_owner_creation_order"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-render",
+          "--lib",
+          "tmux_sixel_overlap_renders_in_owner_creation_order",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-hidden-native-frame",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-desktop-smoke",
+        "expected_named_tests": 1,
+        "tests": [
+          "desktop::hidden_native_frame"
+        ],
+        "runner": "rust/conformance/rustty_desktop_smoke.py"
+      },
+      {
+        "id": "rustty-desktop-output-pacing",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 1,
+        "tests": [
+          "desktop::tests::synchronized_output_releases_on_end_and_restarts_the_bounded_timeout"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-app",
+          "--bin",
+          "rustty",
+          "synchronized_output_releases_on_end_and_restarts_the_bounded_timeout",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-desktop-output-damage",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 1,
+        "tests": [
+          "desktop::tests::output_metadata_distinguishes_titles_and_pointer_shapes_from_terminal_changes"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-app",
+          "--bin",
+          "rustty",
+          "output_metadata_distinguishes_titles_and_pointer_shapes_from_terminal_changes",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-desktop-pane-cache",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 2,
+        "tests": [
+          "desktop::tests::prepared_panes_follow_terminal_view_and_atlas_changes",
+          "desktop::tests::prepared_panes_ignore_blink_phase_only_for_steady_content"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-app",
+          "--bin",
+          "rustty",
+          "prepared_panes_",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-render-viewport-selection",
+        "definition": "rust/conformance/rustty-evidence.toml",
+        "kind": "rustty-cargo",
+        "expected_named_tests": 1,
+        "tests": [
+          "prepare::tests::viewport_snapshots_preserve_selection_paint_while_scrolling"
+        ],
+        "argv": [
+          "cargo",
+          "+1.95.0",
+          "test",
+          "--locked",
+          "--offline",
+          "-p",
+          "rustty-render",
+          "--lib",
+          "viewport_snapshots_preserve_selection_paint_while_scrolling",
+          "--",
+          "--test-threads=1"
+        ]
+      },
+      {
+        "id": "rustty-system-ssh-3.7c",
+        "definition": "rust/conformance/version-evidence.toml",
+        "kind": "rustty-system-ssh",
+        "expected_named_tests": 1,
+        "tests": [
+          "tmuxx::system::tests::stock_ssh_views_share_live_panes_and_survive_connection_restart"
+        ],
+        "runner": "rust/conformance/rustty_system_ssh.py",
+        "reference": "older",
+        "reference_version": "tmux 3.7c"
+      }
+    ],
+    "desktop_frame_artifact": "The current hidden-frame runner verifies a temporary PNG and records state, frame dimensions and frame/executable SHA256 in suite stdout; it does not retain the PNG."
+  },
+  "latest_focused_stock_ssh_checks": [
+    {
+      "inspection_report": "tmuxx-rustty-unframed-ssh.json",
+      "scope": "Focused SSH result only; binds the recorded C binary and four listed Rustty source hashes, not the complete implementation fingerprint or profile gate.",
+      "assertion_count": 14,
+      "reference": "/private/tmp/tmuxx-c-images/tmux",
+      "version": "tmux next-3.9",
+      "reference_sha256": "a22030bba939867b9f00644f99d6b502d4fbc9e87e937c4140b62958c527f62a",
+      "exit_code": 0,
+      "status": "passed",
+      "rustty_sources": {
+        "crates/rustty/src/tmuxx.rs": "d1aa21bb63cac907698100a9d3cdda6afce312d3ffddfae1c8e117b5cce67461",
+        "crates/rustty/src/tmuxx/system.rs": "d1abbe033809041e560ba976b2b943bb7db681cb16ff34ebcd7346cdc33c7e00",
+        "crates/rustty/src/session.rs": "670f0af8d67aa1bc728cc5ff1697e55b0a0ef17aea40c04cf9a093a93fab0fe9",
+        "crates/rustty-app/src/tmuxx_workspace.rs": "e7e9341e4916ec0decb77c98a26729d6ba432cfc38d88e990716204d18e8a490"
+      },
+      "assertions": [
+        "shared-pane-independent-selection",
+        "live-input-output",
+        "dynamic-pane-create-remove",
+        "reconnect-capture",
+        "same-session-duplicate-winlinks-and-active-index",
+        "mouse-and-protocol-reply-not-synchronized",
+        "ordinary-text-synchronized",
+        "nul-rejected",
+        "temporary-buffers-cleaned-on-success-and-missing-target",
+        "existing-user-buffer-preserved",
+        "deferred-server-text-forwarding",
+        "c-clipboard-buffer-replies-once-with-no-mirror-host-action",
+        "new-layouts-signed-floating-geometry",
+        "modal-pane-discovery"
+      ]
+    },
+    {
+      "inspection_report": "tmuxx-rustty-unframed-ssh-3.7c.json",
+      "scope": "Focused SSH result only; binds the recorded C binary and four listed Rustty source hashes, not the complete implementation fingerprint or profile gate.",
+      "assertion_count": 13,
+      "reference": "/opt/homebrew/Cellar/tmux/3.7c/bin/tmux",
+      "version": "tmux 3.7c",
+      "reference_sha256": "1d101560ca3d4fb6f86bb53e6d9946e7b98444343d1fdab4a2a6e72980e232a5",
+      "exit_code": 0,
+      "status": "passed",
+      "rustty_sources": {
+        "crates/rustty/src/tmuxx.rs": "d1aa21bb63cac907698100a9d3cdda6afce312d3ffddfae1c8e117b5cce67461",
+        "crates/rustty/src/tmuxx/system.rs": "d1abbe033809041e560ba976b2b943bb7db681cb16ff34ebcd7346cdc33c7e00",
+        "crates/rustty/src/session.rs": "670f0af8d67aa1bc728cc5ff1697e55b0a0ef17aea40c04cf9a093a93fab0fe9",
+        "crates/rustty-app/src/tmuxx_workspace.rs": "e7e9341e4916ec0decb77c98a26729d6ba432cfc38d88e990716204d18e8a490"
+      },
+      "assertions": [
+        "shared-pane-independent-selection",
+        "live-input-output",
+        "dynamic-pane-create-remove",
+        "reconnect-capture",
+        "same-session-duplicate-winlinks-and-active-index",
+        "mouse-and-protocol-reply-not-synchronized",
+        "ordinary-text-synchronized",
+        "nul-rejected",
+        "temporary-buffers-cleaned-on-success-and-missing-target",
+        "existing-user-buffer-preserved",
+        "deferred-server-text-forwarding",
+        "c-clipboard-buffer-replies-once-with-no-mirror-host-action",
+        "new-layouts-signed-floating-geometry"
+      ]
+    }
+  ],
+  "historical_checks": {
+    "status": "Earlier focused runs from multiple implementation revisions; preserved for inspection, never accepted as current executable evidence",
+    "previous_index_patch_sha256": "ba9f863227cdfee02c990dc0b1cc6aeef60c3a83922ed4f0c39888e34702f58f",
+    "source_identity": "These entries did not uniformly record the complete implementation fingerprint. Their counts and source locations describe their original runs.",
+    "checks": [
+      {
+        "command": "cargo +1.95.0 test --locked --offline -p rustty --features sessions --lib tmuxx::tests::",
+        "checkout": "applied Rustty sibling",
+        "passed": 9,
+        "failed": 0,
+        "tests": [
+          "native_host_actions_are_assigned_once_and_clipboard_replies_use_event_ids",
+          "native_exit_and_respawn_replace_process_state_and_selection",
+          "native_typed_keys_and_paste_follow_each_pane_modes_without_broadcasting_mouse",
+          "native_focus_is_aggregated_across_views_and_connections_and_gated_by_server_option",
+          "embedded_and_socket_views_share_panes_but_keep_selection_local",
+          "streamed_snapshot_restores_large_image_atomically_and_abort_keeps_live_view",
+          "native_snapshot_preserves_row_ids_and_image_anchors_after_resize",
+          "new_server_incarnation_closes_stale_views_and_resets_event_identity",
+          "restored_native_views_search_and_select_shell_output_independently"
+        ]
+      },
+      {
+        "command": "cargo +1.95.0 check --locked --offline -p rustty-app",
+        "checkout": "applied Rustty sibling",
+        "exit_code": 0
+      },
+      {
+        "command": "cargo +1.95.0 test --locked --offline -p rustty-app --lib tmuxx_workspace::tests::",
+        "checkout": "applied Rustty sibling",
+        "passed": 6,
+        "failed": 0
+      },
+      {
+        "command": "cargo +1.95.0 clippy --offline --no-deps -p rustty -p rustty-app --all-targets -- -D warnings -A clippy::nonminimal_bool -A clippy::collapsible_match",
+        "checkout": "applied Rustty sibling",
+        "exit_code": 0,
+        "notes": "The two allowances cover existing upstream Rustty baseline lints."
+      },
+      {
+        "command": "cargo +1.95.0 test --locked --offline -p rustty-app --bin rustty floating_composition_clips_without_moving_origin_and_hit_testing_uses_stack_order",
+        "checkout": "applied Rustty sibling",
+        "passed": 1,
+        "failed": 0
+      },
+      {
+        "command": "cargo +1.95.0 test --locked --offline -p rustty-app --bin rustty modal_key_and_outside_click_policies_reach_the_owner",
+        "checkout": "applied Rustty sibling",
+        "passed": 1,
+        "failed": 0
+      },
+      {
+        "command": "cargo +1.95.0 test --locked --offline -p rustty --lib",
+        "checkout": "applied Rustty sibling; rerun after shared terminal changes",
+        "passed": 49,
+        "failed": 0
+      },
+      {
+        "command": "cargo +1.95.0 build --locked --offline -p rustty-app",
+        "checkout": "applied Rustty sibling",
+        "exit_code": 0
+      },
+      {
+        "command": "RUSTTY_TMUXX_SMOKE_DIR=/tmp/tmuxx-final-smoke RUSTTY_TMUXX_SMOKE_FLOATING=1 TMUXX_ENDPOINT=/tmp/tmuxx-final-smoke.native rustty --tmuxx=embedded --config-default-files=false --stream-deck=false",
+        "checkout": "applied Rustty sibling",
+        "exit_code": 0,
+        "report": "native-smoke.json",
+        "image": "native-smoke.png",
+        "panes": 2,
+        "windows": 1,
+        "floating_panes": 1,
+        "hidden": true,
+        "focused": false,
+        "errors": []
+      },
+      {
+        "command": "cargo +1.95.0 test --locked --offline -p rustty-render --lib tmux_sixel_overlap_renders_in_owner_creation_order",
+        "checkout": "staged Rustty; exact renderer file applied and hash verified in actual checkout",
+        "passed": 1,
+        "failed": 0
+      },
+      {
+        "command": "cargo +1.95.0 test --locked --offline -p tmuxx-vendored-rustty-vt --test snapshot --test selection --test selection_format",
+        "checkout": "tmuxx shared VT workspace",
+        "passed": 46,
+        "failed": 0
+      },
+      {
+        "command": "cargo +1.95.0 clippy --locked --offline -p tmuxx-terminal --all-targets -- -D warnings",
+        "checkout": "tmuxx shared VT workspace",
+        "exit_code": 0
+      },
+      {
+        "command": "TMUXX_C_TMUX=/tmp/tmuxx-c-images/tmux cargo +1.95.0 test --locked --offline -p tmuxx-terminal --test images_pixels_reference --test images_reference --test images_quota_reference -- --include-ignored --test-threads=1",
+        "checkout": "tmuxx shared VT workspace after shell, history and reset changes",
+        "passed": 15,
+        "failed": 0
+      }
+    ]
+  },
+  "historical_artifacts": {
+    "status": "Saved artifacts belong to earlier source/binary revisions; no freshness or completed-gate claim",
+    "files": [
+      "system-ssh-head.json",
+      "system-ssh-head.log",
+      "system-ssh-3.7c.json",
+      "system-ssh-3.7c.log",
+      "native-smoke.json",
+      "native-smoke.png",
+      "floating-smoke.json",
+      "shell-reference-build.json",
+      "images-reference-build.json"
+    ],
+    "ordinary_rustty_baseline": "49 passing ordinary rustty --lib tests is a historical baseline; the executable collector runs selected tmuxx integration tests instead of this complete ordinary suite.",
+    "sixel_renderer": "The historical renderer check used staging. The current rustty-sixel-renderer suite runs the actual fingerprinted sibling checkout."
+  },
+  "limitations": [
+    "Linux and Windows execution deferred",
+    "Full native desktop gesture suite not run; hidden Metal composition and targeted modal/hit testing passed",
+    "Stock C reconstruction remains best effort",
+    "App-owned live PTY migration to standalone daemon is not implemented"
+  ],
+  "architecture": [
+    "Rustty aliases rustty-vt to tmuxx-vendored-rustty-vt; local sessions leave tmux profile disabled",
+    "Native restore uses tmuxx-terminal validated snapshots then the shared VT backend",
+    "Socket and SSH snapshot streams spool and validate before atomic publication; tested with 16 MiB RGBA image",
+    "Native views preserve row identities after resize/reflow, pane content offsets, modal policies, floating stack order and physical cell geometry",
+    "Native OSC133 command output selection uses retained row markers, C output ranges and newline semantics across history eviction, reflow and snapshots"
+  ],
+  "shared_vendor_modules": [
+    "rust/vendor/rustty-vt/src/tmux_shell.rs",
+    "rust/vendor/rustty-vt/src/tmux_state.rs",
+    "rust/vendor/rustty-vt/src/graphics/sixel.rs"
+  ],
+  "qualification": {
+    "status": "passed",
+    "qualified_at": "2026-10-20T02:46:47.703039+00:00",
+    "platform": "darwin",
+    "report": "rust/conformance/artifacts/c-rust.json",
+    "report_sha256": "d62a686461616cbbceda98390a68ccb32c4cc58c5b59311a0188e3d2a7d3bcd4",
+    "gate_report": "rust/conformance/artifacts/gates.json",
+    "gate_report_sha256": "1d3e6092e7245cdda8a867e334e8fc382c8307462a1c46b3d0c883b82d3c49f2",
+    "implementation_fingerprint": "1f01300d42cd4ea0a9456434b96f5cdd68398eac44a6accffe02f853c56d04da",
+    "profiles": {
+      "command-control": "pass",
+      "system-client": "pass",
+      "native-views": "pass",
+      "standalone": "pass",
+      "app-owned": "pass",
+      "unix-ipc": "pass"
+    },
+    "complete_suite_count": 149,
+    "assertion_summary": {
+      "deferred": 4,
+      "outside-profile": 18,
+      "pass": 430
+    },
+    "rustty_suite_count": 12,
+    "rustty_named_test_count": 28,
+    "references": {
+      "reference": {
+        "version": "tmux next-3.9",
+        "sha256": "a22030bba939867b9f00644f99d6b502d4fbc9e87e937c4140b62958c527f62a"
+      },
+      "older_reference": {
+        "version": "tmux 3.7c",
+        "sha256": "1d101560ca3d4fb6f86bb53e6d9946e7b98444343d1fdab4a2a6e72980e232a5"
+      }
+    },
+    "checks": {
+      "workspace_tests": 219,
+      "python_tests": 28,
+      "formatting": "pass",
+      "strict_workspace_clippy": "pass",
+      "generated_metadata": "pass",
+      "cc_calibration_scenarios": 12,
+      "additional_3_7c_suites": 12,
+      "post_run_test_processes": 0
+    },
+    "freshness": "These results bind the recorded source and binary identities. Source changes or rebases require fresh collection and gates."
+  }
+}

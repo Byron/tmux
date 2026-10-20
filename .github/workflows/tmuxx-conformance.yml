@@ -1,0 +1,118 @@
+name: tmuxx conformance evidence
+
+on:
+  pull_request:
+    paths: ['rust/**', '*.c', '*.h', '*.y', '*.l', 'regress/**', '.github/workflows/tmuxx-conformance.yml']
+  push:
+    paths: ['rust/**', '*.c', '*.h', '*.y', '*.l', 'regress/**', '.github/workflows/tmuxx-conformance.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tmuxx-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence:
+    defaults:
+      run:
+        working-directory: sources/tmux/tmux
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux and Windows execution are user-deferred; requirements remain.
+        os: [macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: sources/tmux/tmux
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Byron/rustty
+          ref: cb67824a77fc00bd20e811cce40012893f79b999
+          path: sources/ghostty-org/ghostty
+          persist-credentials: false
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install autoconf automake bison libevent libpng ncurses utf8proc pkg-config
+      - name: Rust toolchain
+        working-directory: sources/tmux/tmux/rust
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.95.0
+          cargo fetch --locked
+      - name: Prepare pinned actual Rustty integration
+        run: |
+          git -C ../../ghostty-org/ghostty apply --check "$PWD/rust/integration/rustty/rustty.patch"
+          git -C ../../ghostty-org/ghostty apply "$PWD/rust/integration/rustty/rustty.patch"
+          python3 -c 'import sys; sys.path.insert(0, "rust/conformance"); import runner; runner.rustty_identity()'
+          cd ../../ghostty-org/ghostty
+          cargo +1.95.0 fetch --locked
+      - name: Build separate C reference
+        run: |
+          sh autogen.sh
+          ./configure --enable-utf8proc --enable-images
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+      - name: Build C 3.7c interoperability reference
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/tmux-3.7c" 3.7c
+          cd "$RUNNER_TEMP/tmux-3.7c"
+          sh autogen.sh
+          ./configure --enable-utf8proc --enable-images
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+      - name: Build and verify Rust workspace
+        working-directory: sources/tmux/tmux/rust
+        run: |
+          cargo fmt --all -- --check
+          cargo build --locked --offline --workspace
+          cargo test --locked --offline --workspace --all-targets
+          cargo clippy --locked --offline --workspace --all-targets -- -D warnings
+      - name: Verify evidence gate and reviewed upstream inventory
+        run: |
+          python3 rust/conformance/generate_command_metadata.py --check
+          python3 rust/conformance/generate_option_metadata.py --check
+          python3 rust/conformance/generate_format_metadata.py --check
+          python3 -m unittest discover -s rust/conformance -p 'test_*.py'
+          python3 rust/conformance/runner.py inventory
+      - name: Calibrate C reference against itself
+        run: >-
+          python3 -u rust/conformance/runner.py smoke
+          --reference ./tmux --candidate ./tmux --candidate-kind c
+          --report rust/conformance/artifacts/c-c.json
+      - name: Collect exact tests and C/R comparisons
+        run: >-
+          python3 -u rust/conformance/runner.py smoke
+          --reference ./tmux --candidate rust/target/debug/tmuxx --suite all
+          --older-reference "$RUNNER_TEMP/tmux-3.7c/tmux"
+          --report rust/conformance/artifacts/c-rust.json
+      - name: Verify 3.7c interoperability and differential behavior
+        run: >-
+          python3 -u rust/conformance/runner.py smoke
+          --reference "$RUNNER_TEMP/tmux-3.7c/tmux" --candidate rust/target/debug/tmuxx
+          --suite ipc-c-reference --suite config-preparation-c-reference
+          --suite parser-text-c-reference --suite regex-c-reference --suite cli-socket-c-reference
+          --suite cli-runtime-defaults-c-reference
+          --suite scheduler-c-reference --suite source-c-reference
+          --suite hooks-after-c-reference --suite options-c-reference
+          --suite cli-selector-c-reference
+          --suite rustty-system-ssh
+          --report rust/conformance/artifacts/c-3.7c-rust.json
+      - name: Gate every scoped macOS profile
+        run: |
+          for profile in command-control system-client native-views standalone app-owned unix-ipc; do
+            python3 rust/conformance/runner.py gate \
+              --report rust/conformance/artifacts/c-rust.json --profile "$profile"
+          done
+      - name: Preserve passing and failing evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tmuxx-evidence-${{ matrix.os }}
+          path: sources/tmux/tmux/rust/conformance/artifacts/*.json
+          if-no-files-found: warn

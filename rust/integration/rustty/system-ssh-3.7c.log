@@ -1,0 +1,9 @@
+
+running 1 test
+test tmuxx::system::tests::stock_ssh_views_share_live_panes_and_survive_connection_restart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 79 filtered out; finished in 2.06s
+
+    Blocking waiting for file lock on artifact directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.95s
+     Running unittests src/lib.rs (/tmp/tmuxx-rustty-integration/target/debug/deps/rustty-838acb1546c920e1)

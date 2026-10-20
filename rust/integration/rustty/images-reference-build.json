@@ -1,0 +1,25 @@
+{
+  "reference_revision": "22f34d3fa984e03719b0a1b2ac4677aaf61cd53d",
+  "reference_binary": "/tmp/tmuxx-c-images/tmux",
+  "reference_sha256": "a22030bba939867b9f00644f99d6b502d4fbc9e87e937c4140b62958c527f62a",
+  "configure": [
+    "--disable-debug",
+    "--enable-images"
+  ],
+  "feature": "image_support=1",
+  "build_log": "/tmp/tmuxx-c-images/build.log",
+  "terminal_sources": {
+    "rust/crates/tmuxx-terminal/tests/images_reference.rs": "cc4d08e65c59fc6a580747317beb7f7c4b382fec40b36d5ca7257b3871a8af71",
+    "rust/crates/tmuxx-terminal/tests/images_pixels_reference.rs": "5b16e65398bcadf7737f1ee39941f1a141edefd3e90fb101ddda0ac160138422",
+    "rust/crates/tmuxx-terminal/tests/images_quota_reference.rs": "de4983d88e7aa57cd729fa87ebc6b610676bd5eb85a64675ec31c051aa577284",
+    "rust/crates/tmuxx-core/tests/terminal_options_reference.rs": "2ecd1ad0c9bc25e8bd00758628a32ae99cedc1b85918e685afeb5154ea027c68",
+    "rust/conformance/image_pixels.py": "cbfba74b6aa9e96dc288e5ae37c57e2576a1be536512ac802de8ccb4ddce817b",
+    "rust/conformance/image_quota.py": "debd0a685b9b78f2c55086dc3373e2265bfd69a81102a4380d90681733ad5368"
+  },
+  "tests": {
+    "pixels": 8,
+    "quota": 3,
+    "protocol": 4
+  },
+  "rerun_after_shell_history_and_reset": true
+}

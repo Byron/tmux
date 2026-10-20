@@ -1,0 +1,352 @@
+#![cfg(unix)]
+//! Opt-in actual SSH: temporary loopback sshd, test keys, and a stock C tmux.
+use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use tmuxx_client::system::{SystemClient, SystemEvent};
+use tmuxx_command::Command as TmuxCommand;
+
+struct Fixture {
+    directory: PathBuf,
+    tmux: PathBuf,
+    ssh: PathBuf,
+    socket: PathBuf,
+    port: u16,
+    user: String,
+    daemon: Option<Child>,
+}
+impl Fixture {
+    fn start() -> Self {
+        let directory = std::env::temp_dir().join(format!("tmuxx-ssh-{}", std::process::id()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let tmux = std::env::var_os("TMUXX_C_TMUX")
+            .expect("set TMUXX_C_TMUX")
+            .into();
+        let ssh = std::env::var_os("TMUXX_SSH")
+            .unwrap_or_else(|| "/usr/bin/ssh".into())
+            .into();
+        let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut fixture = Self {
+            socket: directory.join("tmux"),
+            directory,
+            tmux,
+            ssh,
+            port,
+            user,
+            daemon: None,
+        };
+        for name in ["host", "client"] {
+            let result = Command::new(
+                std::env::var_os("TMUXX_SSH_KEYGEN")
+                    .unwrap_or_else(|| "/usr/bin/ssh-keygen".into()),
+            )
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(fixture.directory.join(name))
+            .output()
+            .unwrap();
+            assert!(
+                result.status.success(),
+                "ssh-keygen: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let host_key = fs::read_to_string(fixture.directory.join("host.pub")).unwrap();
+        let parts = host_key.split_whitespace().collect::<Vec<_>>();
+        fs::write(
+            fixture.directory.join("known_hosts"),
+            format!("[127.0.0.1]:{port} {} {}\n", parts[0], parts[1]),
+        )
+        .unwrap();
+        let config = format!(
+            "Port {port}\nListenAddress 127.0.0.1\nHostKey {dir}/host\nPidFile {dir}/pid\nAuthorizedKeysFile {dir}/client.pub\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nAllowUsers {user}\nLogLevel ERROR\nPermitTTY no\nAllowTcpForwarding no\nX11Forwarding no\n",
+            dir = fixture.directory.display(),
+            user = fixture.user
+        );
+        fs::write(fixture.directory.join("sshd.conf"), config).unwrap();
+        let daemon =
+            Command::new(std::env::var_os("TMUXX_SSHD").unwrap_or_else(|| "/usr/sbin/sshd".into()))
+                .args(["-D", "-e", "-f"])
+                .arg(fixture.directory.join("sshd.conf"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(fs::File::create(fixture.directory.join("sshd.log")).unwrap())
+                .spawn()
+                .expect("sshd must be installed");
+        fixture.daemon = Some(daemon);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let probe = fixture.ssh_command("true").output().unwrap();
+            if probe.status.success() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "SSH fixture failed: {}\n{}",
+                String::from_utf8_lossy(&probe.stderr),
+                fs::read_to_string(fixture.directory.join("sshd.log")).unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let result = fixture.run(&["new-session", "-d", "-s", "test", "-x", "80", "-y", "24", "/bin/sh", "-c", "printf 'READY\\n'; while IFS= read -r value; do printf '\\001\\377:%s\\n' \"$value\"; done"]);
+        assert!(
+            result.status.success(),
+            "remote tmux start: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        fixture
+    }
+    fn ssh_command(&self, command: &str) -> Command {
+        let mut ssh = Command::new(&self.ssh);
+        ssh.args(["-T", "-F", "/dev/null", "-p"])
+            .arg(self.port.to_string())
+            .arg("-i")
+            .arg(self.directory.join("client"))
+            .args([
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "ConnectTimeout=2",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+            ])
+            .arg(format!(
+                "UserKnownHostsFile={}",
+                self.directory.join("known_hosts").display()
+            ))
+            .arg(format!("{}@127.0.0.1", self.user))
+            .arg(command);
+        ssh
+    }
+    fn command_text(&self, args: &[&str]) -> String {
+        let mut words = vec![
+            self.tmux.to_str().unwrap(),
+            "-f",
+            "/dev/null",
+            "-S",
+            self.socket.to_str().unwrap(),
+        ];
+        words.extend_from_slice(args);
+        format!(
+            "exec {}",
+            words.into_iter().map(quote).collect::<Vec<_>>().join(" ")
+        )
+    }
+    fn run(&self, args: &[&str]) -> Output {
+        self.ssh_command(&self.command_text(args)).output().unwrap()
+    }
+    fn connect(&self, nonce: &[u8]) -> Remote {
+        let mut child = self
+            .ssh_command(&self.command_text(&["-C", "attach-session", "-t", "test"]))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut output = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0; 8192];
+            while let Ok(n) = output.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                if tx.send(chunk[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut model = SystemClient::new(nonce.to_vec()).unwrap();
+        model.bootstrap().unwrap();
+        Remote {
+            child: Some(child),
+            input: Some(input),
+            reader: Some(reader),
+            rx,
+            model,
+        }
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.tmux)
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .output();
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+        }
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+struct Remote {
+    child: Option<Child>,
+    input: Option<ChildStdin>,
+    reader: Option<JoinHandle<()>>,
+    rx: Receiver<Vec<u8>>,
+    model: SystemClient,
+}
+impl Remote {
+    fn write_pending(&mut self) {
+        for bytes in self.model.take_writes() {
+            self.input.as_mut().unwrap().write_all(&bytes).unwrap();
+        }
+    }
+    fn until(&mut self, mut done: impl FnMut(&SystemEvent) -> bool) -> Vec<SystemEvent> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut all = Vec::new();
+        loop {
+            self.write_pending();
+            let bytes = self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("SSH control response timed out/disconnected");
+            let mut found = false;
+            // Exercise framing independently of SSH's actual packet boundaries.
+            for chunk in bytes.chunks(7) {
+                for event in self.model.feed(chunk) {
+                    assert!(
+                        !matches!(event, SystemEvent::Error(_)),
+                        "{event:?}; input {:?}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                    found |= done(&event);
+                    all.push(event);
+                }
+            }
+            if found {
+                return all;
+            }
+        }
+    }
+    fn command(&mut self, args: &[&str]) -> Vec<u8> {
+        let id = self
+            .model
+            .queue(vec![TmuxCommand {
+                blocks: Default::default(),
+                args: args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+            }])
+            .unwrap();
+        self.until(|event| matches!(event, SystemEvent::CommandFinished { request_id, .. } if *request_id == id)).into_iter()
+            .find_map(|event| match event { SystemEvent::CommandFinished { request_id, output, failed } if request_id == id => { assert!(!failed); Some(output) }, _ => None }).unwrap()
+    }
+    fn close(&mut self) -> Vec<SystemEvent> {
+        drop(self.input.take());
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        self.model.finish()
+    }
+}
+impl Drop for Remote {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[test]
+#[ignore = "requires explicit C tmux, ssh/sshd/keygen, loopback sockets and PTYs"]
+fn ssh_stock_tmux_discovery_bytes_reconnect_and_ambiguous_mutation() {
+    let fixture = Fixture::start();
+    let mut first = fixture.connect(b"ssh-test-first-unique-nonce");
+    let bootstrap =
+        first.until(|event| matches!(event, SystemEvent::PaneCapture { pane_id: 0, .. }));
+    assert!(bootstrap.iter().any(|e| matches!(e, SystemEvent::PaneCapture { data, .. } if data.windows(5).any(|w| w == b"READY"))));
+    assert_eq!(first.model.state().sessions.len(), 1);
+    let pid = first.command(&["display-message", "-p", "-t", "%0", "#{pane_pid}"]);
+    assert!(!pid.is_empty());
+    first
+        .model
+        .queue(vec![TmuxCommand {
+            blocks: Default::default(),
+            args: ["send-keys", "-t", "%0", "-H", "53", "53", "48", "0d"]
+                .map(|a| a.as_bytes().to_vec())
+                .to_vec(),
+        }])
+        .unwrap();
+    let mut bytes = Vec::new();
+    first.until(|event| {
+        if let SystemEvent::PaneOutput { pane_id: 0, data } = event {
+            bytes.extend_from_slice(data);
+        }
+        bytes.windows(6).any(|w| w == b"\x01\xff:SSH")
+    });
+    // Drain a known read-only barrier before sending the deliberately unobserved mutation.
+    assert_eq!(
+        first.command(&["display-message", "-p", "ready-to-disconnect"]),
+        b"ready-to-disconnect\n"
+    );
+    let ambiguous = first
+        .model
+        .queue(vec![TmuxCommand {
+            blocks: Default::default(),
+            args: ["new-window", "-d", "-n", "ambiguous", "sleep 30"]
+                .map(|a| a.as_bytes().to_vec())
+                .to_vec(),
+        }])
+        .unwrap();
+    first.write_pending();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let windows = fixture.run(&["list-windows", "-t", "test", "-F", "#{window_name}"]);
+        if windows
+            .stdout
+            .split(|b| *b == b'\n')
+            .any(|line| line == b"ambiguous")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "mutation was not sent");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let unresolved = first.close();
+    assert!(unresolved.contains(&SystemEvent::Indeterminate {
+        request_id: ambiguous
+    }));
+    let mut second = fixture.connect(b"ssh-test-second-unique-nonce");
+    second.until(|event| matches!(event, SystemEvent::PaneCapture { pane_id: 0, .. }));
+    assert_eq!(
+        second.command(&["display-message", "-p", "-t", "%0", "#{pane_pid}"]),
+        pid
+    );
+    let windows = second.command(&["list-windows", "-t", "test", "-F", "#{window_name}"]);
+    assert_eq!(
+        windows
+            .split(|b| *b == b'\n')
+            .filter(|line| *line == b"ambiguous")
+            .count(),
+        1
+    );
+    assert_eq!(second.model.state().panes.len(), 2);
+    second.close();
+}
