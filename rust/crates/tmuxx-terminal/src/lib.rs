@@ -13,6 +13,8 @@ pub use rustty_vt::{
 pub use rustty_vt::{CursorShape, clipboard, parse_color};
 use serde::{Deserialize, Serialize};
 use std::io;
+mod agent;
+pub use agent::AgentStatus;
 mod capture;
 mod capture_raw;
 pub use capture::CaptureOptions;
@@ -58,6 +60,7 @@ impl HostAction {
 #[derive(Clone, Debug)]
 pub struct Terminal {
     inner: rustty_vt::Terminal,
+    agent_status: AgentStatus,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -105,6 +108,8 @@ impl Default for TerminalSettings {
 /// or clipboard actions. Graphics retain display state and pending upload bytes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub agent_status: AgentStatus,
     pub version: u32,
     pub cols: u16,
     pub rows: u16,
@@ -220,11 +225,18 @@ impl Snapshot {
                 .restore_tmux_pending_input(self.capture_pending.as_deref())
                 .map_err(io::Error::other)?;
         }
+        self.agent_status.validate().map_err(io::Error::other)?;
+        inner.agent_status_events = true;
+        inner.shell_command_events = true;
+        inner.linefeed_mode_events = true;
         inner.generation = self.generation;
         inner.tmux_clipboard = true;
         inner.tmux_graphics = true;
         inner.set_tmux_image_quota(ImageQuota::default());
-        Ok(Terminal { inner })
+        Ok(Terminal {
+            inner,
+            agent_status: self.agent_status.clone(),
+        })
     }
 }
 
@@ -383,6 +395,12 @@ impl Terminal {
             Vec::new()
         }
     }
+    pub fn agent_status(&self) -> &AgentStatus {
+        &self.agent_status
+    }
+    pub fn clear_agent_status(&mut self) {
+        self.agent_status = AgentStatus::default();
+    }
     /// Transfer a native view to Rustty without changing its terminal type or profile.
     pub fn into_backend(self) -> rustty_vt::Terminal {
         self.inner
@@ -453,10 +471,15 @@ impl Terminal {
         inner.set_tmux_strings(true);
         inner.terminfo_name = Some(b"tmux-256color".to_vec());
         inner.shell_command_events = true;
+        inner.agent_status_events = true;
+        inner.linefeed_mode_events = true;
         inner.tmux_clipboard = true;
         inner.tmux_graphics = true;
         inner.set_tmux_image_quota(ImageQuota::default());
-        Self { inner }
+        Self {
+            inner,
+            agent_status: AgentStatus::default(),
+        }
     }
 
     /// The owner sends each `Effect::Write` to the application's PTY exactly once.
@@ -465,6 +488,9 @@ impl Terminal {
         self.inner.prune_tmux_images();
         let old = self.inner.tmux_color_scheme();
         let mut effects = self.inner.feed(bytes);
+        for effect in &effects {
+            let _ = self.agent_status.observe(effect);
+        }
         self.inner.prune_tmux_images();
         effects.extend(self.theme_update(old));
         effects
@@ -634,6 +660,7 @@ impl Terminal {
         let capture_pending = terminal.parser().pending_input();
         let checkpoint = rustty_vt::snapshot::encode_to_vec(terminal);
         Snapshot {
+            agent_status: self.agent_status.clone(),
             version: 1,
             cols: terminal.cols,
             rows: terminal.rows,
@@ -695,6 +722,71 @@ impl Terminal {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agent_status_survives_fragmented_snapshots_without_replaying_host_actions() {
+        use rustty_vt::agent::Event;
+        let begin =
+            Event::from_json(br#"{"op":"begin","state":"working","thread_id":"thread"}"#).unwrap();
+        let update =
+            Event::from_json(br#"{"op":"update","state":"done","turn_id":"turn"}"#).unwrap();
+        let mut stream = b"\x1b]133;C\x07".to_vec();
+        stream.extend(begin.frame().unwrap());
+        stream.extend(b"\x07\x1b]52;c;Y2xpcGJvYXJk\x07");
+        stream.extend(update.frame().unwrap());
+        for split in 0..=stream.len() {
+            let mut owner = Terminal::new(20, 4, 20);
+            owner.feed(&stream[..split]);
+            let snapshot = owner.snapshot();
+            let mut restored = snapshot.restore().unwrap();
+            assert!(restored.feed(b"").is_empty());
+            owner.feed(&stream[split..]);
+            restored.feed(&stream[split..]);
+            assert_eq!(restored.agent_status(), owner.agent_status());
+            assert!(restored.agent_status().enclosing_command);
+            assert!(matches!(
+                restored.agent_status().snapshot.as_ref().unwrap().state,
+                rustty_vt::agent::State::Done
+            ));
+            restored.feed(b"\x1b]133;D;0\x07");
+            assert!(restored.agent_status().snapshot.is_none());
+        }
+    }
+
+    #[test]
+    fn agent_registration_replacement_end_and_invalid_snapshot_are_explicit() {
+        use rustty_vt::agent::Event;
+        let begin = Event::from_json(br#"{"op":"begin","state":"idle"}"#).unwrap();
+        let update = Event::from_json(br#"{"op":"update","state":"working"}"#).unwrap();
+        let mut terminal = Terminal::new(20, 4, 20);
+        terminal.feed(&update.frame().unwrap());
+        assert!(terminal.agent_status().snapshot.is_none());
+        terminal.feed(&begin.frame().unwrap());
+        let first = terminal.agent_status().clone();
+        assert!(first.event_since(&first).is_none());
+        terminal.feed(&begin.frame().unwrap());
+        assert!(matches!(
+            terminal.agent_status().event_since(&first),
+            Some(Event::Begin(_))
+        ));
+        let mut invalid = terminal.snapshot();
+        invalid.agent_status.snapshot.as_mut().unwrap().label = Some("x".repeat(129));
+        assert!(invalid.restore().is_err());
+        terminal.feed(&Event::End.frame().unwrap());
+        assert_eq!(
+            terminal.agent_status().event_since(&first),
+            Some(Event::End)
+        );
+        assert!(
+            terminal
+                .snapshot()
+                .restore()
+                .unwrap()
+                .agent_status()
+                .snapshot
+                .is_none()
+        );
+    }
+
     #[test]
     fn legacy_rename_and_apc_title_resume_across_snapshot_boundaries() {
         use super::*;

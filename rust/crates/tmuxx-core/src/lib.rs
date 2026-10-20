@@ -2318,6 +2318,7 @@ impl Engine {
         let mut out = Outcome::default();
         if let Some(p) = self.panes.get_mut(&pane) {
             p.status = Some(status);
+            p.terminal.clear_agent_status();
             let remain = p
                 .options
                 .get("remain-on-exit")

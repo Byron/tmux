@@ -1070,3 +1070,69 @@ fn buffer_clipboard_flags_target_exact_native_view_and_keep_binary_data() {
     }
     host.shutdown().unwrap();
 }
+
+#[test]
+fn agent_status_is_retained_without_views_and_reconnect_keeps_the_process() {
+    let host = host();
+    let admin = host.connect().unwrap();
+    let frame = "\x1b]777;rustty-agent;1;eyJvcCI6ImJlZ2luIiwic3RhdGUiOiJuZWVkc19pbnB1dCIsInRocmVhZF9pZCI6InJlbW90ZSJ9\x07";
+    assert_eq!(
+        command(
+            &admin,
+            &[
+                "new-session",
+                "-d",
+                "-s",
+                "agent",
+                "/bin/sh",
+                "-c",
+                "printf '%s' \"$1\"; printf READY; sleep 30",
+                "sh",
+                frame,
+            ],
+            None,
+            false
+        )
+        .error,
+        None
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !command(&admin, &["capture-pane", "-p", "-t", "%0"], None, false)
+        .output
+        .starts_with(b"READY")
+    {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut pid = None;
+    for _ in 0..2 {
+        let view = host.connect().unwrap();
+        assert_eq!(
+            command(&view, &["attach-session", "-t", "agent"], None, true).error,
+            None
+        );
+        let state = receive(&view, |message| match message {
+            ServerMessage::Snapshot { state, .. } => Some(state),
+            ServerMessage::HostEffect { .. } => panic!("attachment replayed a host action"),
+            _ => None,
+        });
+        let terminal: tmuxx_terminal::Snapshot =
+            serde_json::from_value(state["panes"][0]["terminal"].clone()).unwrap();
+        assert_eq!(
+            terminal
+                .agent_status
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .thread_id
+                .as_deref(),
+            Some("remote")
+        );
+        assert_eq!(terminal.agent_status.generation, 1);
+        if let Some(previous) = &pid {
+            assert_eq!(previous, &state["panes"][0]["pid"]);
+        }
+        pid = Some(state["panes"][0]["pid"].clone());
+    }
+    host.shutdown().unwrap();
+}
