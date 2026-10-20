@@ -21,6 +21,71 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Linux fixtures get a private session so nested process groups and reparented
+// descendants remain attributable after the script exits. Other platforms keep
+// their existing process-group contract.
+fn isolate_script(command: &mut Command) -> &mut Command {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    command.process_group(0)
+}
+
+#[cfg(target_os = "linux")]
+fn kill_script_session(session: u32) {
+    // The caller has not reaped the leader, reserving its session/PID identity.
+    // Pin each member before checking membership again; never signal recycled
+    // numeric PIDs or groups. A deliberate independent setsid session is outside
+    // this ownership boundary.
+    for _ in 0..3 {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            break;
+        };
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            if descriptor < 0 {
+                continue;
+            }
+            let process = unsafe { File::from_raw_fd(descriptor as i32) };
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let Some((_, fields)) = stat.rsplit_once(") ") else {
+                continue;
+            };
+            if fields
+                .split_whitespace()
+                .nth(3)
+                .and_then(|value| value.parse::<u32>().ok())
+                != Some(session)
+            {
+                continue;
+            }
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    process.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct ScriptChild(Child, bool);
 
 impl ScriptChild {
@@ -48,7 +113,10 @@ impl ScriptChild {
     fn finish(&mut self) -> io::Result<ExitStatus> {
         if !self.1 {
             self.1 = true;
-            // The Rust owner inherits this group; its separate watchdog cleans PTYs.
+            #[cfg(target_os = "linux")]
+            kill_script_session(self.0.id());
+            // Non-Linux owners inherit this group; their watchdog cleans PTYs.
+            #[cfg(not(target_os = "linux"))]
             unsafe {
                 libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL);
             }
@@ -115,6 +183,34 @@ fn process_start(pid: libc::pid_t) -> Option<(u64, u64)> {
     {
         let _ = pid;
         None
+    }
+}
+
+fn kill_matching_process(pid: libc::pid_t, started: (u64, u64)) {
+    #[cfg(target_os = "linux")]
+    {
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if descriptor < 0 {
+            return;
+        }
+        let process = unsafe { File::from_raw_fd(descriptor as i32) };
+        if process_start(pid) == Some(started) {
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    process.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    if process_start(pid) == Some(started) {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
     }
 }
 
@@ -229,22 +325,23 @@ impl Run {
         let output_path = self.directory.join("transcript");
         let output = File::create(&output_path).unwrap();
         let mut child = ScriptChild::new(
-            Command::new("/bin/sh")
-                .arg(script)
-                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../regress"))
-                .env_remove("TMUX")
-                .env_remove("TMUXX_ENDPOINT")
-                .env("TEST_TMUX", &self.binary)
-                .env("TMUX_TMPDIR", &self.directory)
-                .env("TMPDIR", &self.directory)
-                .env("SHELL", "/bin/sh")
-                .env("LC_ALL", "C.UTF-8")
-                .stdin(Stdio::null())
-                .stdout(output.try_clone().unwrap())
-                .stderr(output)
-                .process_group(0)
-                .spawn()
-                .unwrap(),
+            isolate_script(
+                Command::new("/bin/sh")
+                    .arg(script)
+                    .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../regress"))
+                    .env_remove("TMUX")
+                    .env_remove("TMUXX_ENDPOINT")
+                    .env("TEST_TMUX", &self.binary)
+                    .env("TMUX_TMPDIR", &self.directory)
+                    .env("TMPDIR", &self.directory)
+                    .env("SHELL", "/bin/sh")
+                    .env("LC_ALL", "C.UTF-8")
+                    .stdin(Stdio::null())
+                    .stdout(output.try_clone().unwrap())
+                    .stderr(output),
+            )
+            .spawn()
+            .unwrap(),
         );
         let deadline = Instant::now() + timeout;
         loop {
@@ -306,12 +403,8 @@ impl Drop for Run {
                     while process_start(pid) == Some(started) && Instant::now() < deadline {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    // The start time prevents signaling a recycled PID.
-                    if process_start(pid) == Some(started) {
-                        unsafe {
-                            libc::kill(pid, libc::SIGKILL);
-                        }
-                    }
+                    // Revalidate the start identity after acquiring a Linux pidfd.
+                    kill_matching_process(pid, started);
                 }
             }
         }
@@ -344,15 +437,16 @@ fn harness_cleans_flooding_owners_after_script_exit_and_timeout() {
     let independent = Run::new(binary);
     let endpoint = independent.directory.join("independent.native");
     let owner = ScriptChild::new(
-        Command::new(binary)
-            .args(["-D", "-f", "/dev/null", "--native-endpoint"])
-            .arg(&endpoint)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap(),
+        isolate_script(
+            Command::new(binary)
+                .args(["-D", "-f", "/dev/null", "--native-endpoint"])
+                .arg(&endpoint)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .spawn()
+        .unwrap(),
     );
     let owner_pid = owner.0.id() as libc::pid_t;
     let owner_start = process_start(owner_pid).unwrap();
@@ -364,6 +458,40 @@ fn harness_cleans_flooding_owners_after_script_exit_and_timeout() {
     for ending in ["exit 0", "exit 1", "sleep 60"] {
         let run = Run::new(binary);
         let script = run.directory.join("forced-cleanup.sh");
+        #[cfg(target_os = "linux")]
+        let nested = {
+            std::fs::write(
+                run.directory.join("nested.py"),
+                r#"import os, signal, time
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+os.setpgid(0, 0)
+with open(os.environ['TMUX_TMPDIR'] + '/nested-pids', 'a') as log:
+    print(os.getpid(), file=log, flush=True)
+if os.fork() == 0:
+    os.setpgid(0, 0)
+    parent = os.getpid()
+    if os.fork():
+        os._exit(0)
+    while os.getppid() == parent:
+        time.sleep(0.01)
+    with open(os.environ['TMUX_TMPDIR'] + '/nested-pids', 'a') as log:
+        print(os.getpid(), file=log, flush=True)
+while True:
+    time.sleep(1)
+"#,
+            )
+            .unwrap();
+            r#"python3 "$TMUX_TMPDIR/nested.py" &
+n=0
+while [ ! -f "$TMUX_TMPDIR/nested-pids" ] || [ "$(wc -l < "$TMUX_TMPDIR/nested-pids")" -ne 2 ]; do
+    n=$((n + 1))
+    [ "$n" -lt 200 ] || exit 93
+    sleep 0.01
+done
+"#
+        };
+        #[cfg(not(target_os = "linux"))]
+        let nested = "";
         std::fs::write(&script, format!(r#"
 "$TEST_TMUX" -Lleak -f /dev/null new -d -s flood 'mkfifo "$TMUX_TMPDIR/flood"; cat /dev/zero > "$TMUX_TMPDIR/flood" & printf "%s\n" "$$" "$!" > "$TMUX_TMPDIR/pane-pids"; tr "\000" x < "$TMUX_TMPDIR/flood" & echo "$!" >> "$TMUX_TMPDIR/pane-pids"; wait' || exit 90
 "$TEST_TMUX" -Lleak display -p '#{{pid}}' > "$TMUX_TMPDIR/owner-pid" || exit 91
@@ -373,6 +501,7 @@ while [ ! -f "$TMUX_TMPDIR/pane-pids" ] || [ "$(wc -l < "$TMUX_TMPDIR/pane-pids"
     [ "$n" -lt 200 ] || exit 92
     sleep 0.01
 done
+{nested}
 {ending}
 "#)).unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -387,23 +516,29 @@ done
             let (success, transcript) = result.unwrap();
             assert_eq!(success, ending == "exit 0", "{transcript}");
         }
-        let pids = ["owner-pid", "pane-pids"]
+        #[cfg(target_os = "linux")]
+        let pid_files = ["owner-pid", "pane-pids", "nested-pids"];
+        #[cfg(not(target_os = "linux"))]
+        let pid_files = ["owner-pid", "pane-pids"];
+        let pids = pid_files
+            .iter()
             .map(|name| std::fs::read_to_string(run.directory.join(name)).unwrap())
+            .collect::<Vec<_>>()
             .join(" ")
             .split_whitespace()
             .map(|pid| pid.parse::<libc::pid_t>().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(pids.len(), 4, "owner, pane shell, cat and tr");
+        assert_eq!(
+            pids.len(),
+            if cfg!(target_os = "linux") { 6 } else { 4 },
+            "owner, pane shell, cat, tr and Linux nested/orphan script descendants"
+        );
         // Preserve exact identities for emergency cleanup if the assertion fails.
         struct Remaining(Vec<(libc::pid_t, (u64, u64))>);
         impl Drop for Remaining {
             fn drop(&mut self) {
                 for &(pid, started) in &self.0 {
-                    if process_start(pid) == Some(started) {
-                        unsafe {
-                            libc::kill(pid, libc::SIGKILL);
-                        }
-                    }
+                    kill_matching_process(pid, started);
                 }
             }
         }
@@ -444,19 +579,20 @@ done
     std::fs::create_dir(&sockets).unwrap();
     let socket = sockets.join("unresponsive");
     let stalled = ScriptChild::new(
-        Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "harness_cleans_flooding_owners_after_script_exit_and_timeout",
-            ])
-            .env("TMUXX_TEST_UNRESPONSIVE_SOCKET", &socket)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap(),
+        isolate_script(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "harness_cleans_flooding_owners_after_script_exit_and_timeout",
+                ])
+                .env("TMUXX_TEST_UNRESPONSIVE_SOCKET", &socket)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .spawn()
+        .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     while !socket.exists() {

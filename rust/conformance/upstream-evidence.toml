@@ -9,7 +9,7 @@ env = {}
 [[suites.assertions]]
 id = "harness.script-exit-timeout-and-detached-owner-cleanup"
 tests = ["harness_cleans_flooding_owners_after_script_exit_and_timeout"]
-description = "Synthetic scripts leave a real Rust pane flooding after success, early failure and timeout/unwind. The harness reserves the unreaped script group until termination, reaps the shell, and requires owner/pane/cat/tr exit while an independent daemon remains queryable. A detached unresponsive socket owner verifies bounded/reaped shutdown clients and kernel-peer/start-identity kill fallback; native socket entries are excluded."
+description = "Synthetic scripts leave a real Rust pane flooding after success, early failure and timeout/unwind. The harness reserves the unreaped script identity; Linux additionally cleans its private session's nested process groups and reparented SIGHUP-ignoring descendants through pidfds. Owner/pane/cat/tr and nested helpers must exit while an independent daemon remains queryable. A detached unresponsive socket owner verifies bounded/reaped shutdown clients and kernel-peer/start-identity kill fallback; native socket entries are excluded."
 
 [[suites]]
 id = "upstream-layout-nesting"
