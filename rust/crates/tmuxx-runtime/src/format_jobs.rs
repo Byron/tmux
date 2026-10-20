@@ -56,7 +56,11 @@ impl Host {
                 })
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect::<BTreeMap<_, _>>();
-            environment.insert("PWD".into(), cwd.to_string_lossy().into());
+            let Some(cwd_text) = cwd.to_str() else {
+                self.engine.format_job_output(request.id, &[], true, true);
+                continue;
+            };
+            environment.insert("PWD".into(), cwd_text.into());
             environment.insert(
                 "TERM".into(),
                 self.engine
@@ -74,7 +78,7 @@ impl Host {
             match scheduler::spawn_job(
                 job_id,
                 request.command.clone(),
-                "/bin/sh".into(),
+                super::defaults::system_shell(),
                 cwd,
                 environment,
                 Duration::ZERO,

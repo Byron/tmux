@@ -109,6 +109,8 @@ pub(super) struct StdinStream {
 }
 
 pub(super) struct PipeProcess {
+    #[cfg(windows)]
+    _ownership: Arc<super::windows_job::Job>,
     pid: u32,
     pub(super) generation: u64,
     pub(super) input: bool,
@@ -199,27 +201,51 @@ impl Host {
         if self.retired_pipes.len() >= 256 {
             return Err("pipe child limit exceeded".into());
         }
-        let mut builder = std::process::Command::new("/bin/sh");
-        builder
-            .arg("-c")
-            .arg(os_string(&command))
-            .stdin(if output {
-                std::process::Stdio::piped()
-            } else {
-                std::process::Stdio::null()
-            })
-            .stdout(if input {
-                std::process::Stdio::piped()
-            } else {
-                std::process::Stdio::null()
-            })
-            .stderr(std::process::Stdio::null());
         #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            builder.process_group(0);
-        }
-        let mut child = builder.spawn().map_err(|error| error.to_string())?;
+        let mut child = {
+            let mut builder = std::process::Command::new("/bin/sh");
+            builder
+                .arg("-c")
+                .arg(os_string(&command).map_err(|error| error.to_string())?)
+                .stdin(if output {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
+                .stdout(if input {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
+                .stderr(std::process::Stdio::null());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                builder.process_group(0);
+            }
+            builder.spawn().map_err(|error| error.to_string())?
+        };
+        #[cfg(windows)]
+        let mut child = {
+            let cwd = self
+                .engine
+                .panes
+                .get(&pane)
+                .and_then(|pane| pane.cwd.as_deref())
+                .map(PathBuf::from)
+                .or_else(|| std::env::current_dir().ok())
+                .ok_or("pipe working directory unavailable")?;
+            super::windows_job::spawn_shell(
+                &super::defaults::system_shell(),
+                &command,
+                &cwd,
+                &self.engine.environment,
+                output,
+                input,
+                false,
+            )
+            .map_err(|error| error.to_string())?
+        };
         let writer = child.stdin.take();
         let reader = child.stdout.take();
         let generation = self.next_process;
@@ -232,6 +258,8 @@ impl Host {
         let cancel = Arc::new(AtomicBool::new(false));
         let bytes = Arc::new(AtomicUsize::new(0));
         let process = PipeProcess {
+            #[cfg(windows)]
+            _ownership: child.ownership(),
             pid: child.id(),
             generation,
             input,
@@ -319,7 +347,15 @@ impl Host {
                                     return;
                                 }
                             }
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                                ) =>
+                            {
+                                thread::sleep(Duration::from_millis(1));
+                                continue;
+                            }
                             Err(_) => break,
                         }
                     }
@@ -421,6 +457,8 @@ mod tests {
         host.pipes.insert(
             0,
             PipeProcess {
+                #[cfg(windows)]
+                _ownership: super::super::windows_job::Job::new().unwrap(),
                 pid: 0,
                 generation: 1,
                 input: false,

@@ -46,7 +46,7 @@ impl Engine {
             && !session.environment.contains_key("PATH")
             && !session.removed_environment.contains("PATH")
         {
-            environment.insert("PATH".into(), "/usr/bin:/bin".into());
+            environment.insert("PATH".into(), self.default_child_path.clone());
         }
         environment
     }

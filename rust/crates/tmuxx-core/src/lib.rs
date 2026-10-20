@@ -334,6 +334,9 @@ pub struct Engine {
     pub started: u64,
     /// OS identity is supplied by the owner; the core performs no OS lookups.
     pub identity: BTreeMap<String, String>,
+    /// Owner-supplied search path used only when PATH is absent at every level.
+    /// Explicit hidden/removed values and pane/client overrides still win.
+    pub default_child_path: String,
     pub sessions: BTreeMap<Id, Session>,
     pub windows: BTreeMap<Id, Window>,
     pub panes: BTreeMap<Id, Pane>,
@@ -370,6 +373,7 @@ impl Default for Engine {
             now,
             started: now,
             identity: BTreeMap::new(),
+            default_child_path: "/usr/bin:/bin".into(),
             sessions: BTreeMap::new(),
             windows: BTreeMap::new(),
             panes: BTreeMap::new(),

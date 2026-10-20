@@ -15,6 +15,12 @@ pub const VERSION: u32 = 1;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
     pub version: u32,
+    /// Server incarnation, supplied by owners before any mutation is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// Instance selection for a fixed Windows SSH stdio bridge command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -33,6 +39,8 @@ impl Default for Hello {
     fn default() -> Self {
         Self {
             version: VERSION,
+            instance_id: None,
+            instance: None,
             cwd: None,
             environment: Default::default(),
             host_effects: false,

@@ -1,6 +1,7 @@
 //! Per-client command queues. Waiting never holds the process owner loop.
 use super::*;
 use std::collections::VecDeque;
+#[cfg(unix)]
 use std::process::{Command as ProcessCommand, Stdio};
 use tmuxx_command::{Args, Command};
 
@@ -1225,7 +1226,7 @@ impl Host {
                     source.paths.push_back(PathBuf::from("-"));
                     continue;
                 }
-                let mut path = PathBuf::from(os_string(&raw));
+                let mut path = PathBuf::from(os_string(&raw).map_err(|error| error.to_string())?);
                 if path.is_relative()
                     && let Some(cwd) = &context.cwd
                 {
@@ -1314,15 +1315,14 @@ impl Host {
                     unreachable!()
                 };
                 if path != b"-"
-                    && std::path::Path::new(&os_string(path)).is_relative()
+                    && std::path::Path::new(&os_string(path).map_err(|error| error.to_string())?)
+                        .is_relative()
                     && let Some(cwd) = &context.cwd
                 {
-                    use std::os::unix::ffi::OsStrExt;
-                    *path = PathBuf::from(cwd)
-                        .join(os_string(path))
-                        .as_os_str()
-                        .as_bytes()
-                        .to_vec();
+                    *path = path_bytes(
+                        &PathBuf::from(cwd)
+                            .join(os_string(path).map_err(|error| error.to_string())?),
+                    )?;
                 }
                 if self.file_clients.contains(&id) {
                     return Ok(Step::File(PendingFile::Buffer(effect)));
@@ -1414,14 +1414,7 @@ impl Host {
                 }
                 Ok(_) => return Err("configuration exceeds size limit".into()),
                 Err(error) => {
-                    let error = error
-                        .raw_os_error()
-                        .map(|code| {
-                            unsafe { std::ffi::CStr::from_ptr(libc::strerror(code)) }
-                                .to_string_lossy()
-                                .into_owned()
-                        })
-                        .unwrap_or_else(|| error.to_string());
+                    let error = os_error_message(&error);
                     source.error(format!("{error}: {}", path.display()));
                 }
             }
@@ -1967,9 +1960,10 @@ impl Host {
             return Err("job limit exceeded".into());
         }
         let cwd = if let Some(path) = args.get(b'c') {
-            PathBuf::from(os_string(
-                &self.expand_job(path, target, context, &args.rest)?,
-            ))
+            PathBuf::from(
+                os_string(&self.expand_job(path, target, context, &args.rest)?)
+                    .map_err(|error| error.to_string())?,
+            )
         } else if let Some(path) = &context.cwd {
             PathBuf::from(path)
         } else {
@@ -2024,7 +2018,7 @@ impl Host {
         let thread = spawn_job(
             job_id,
             command.clone(),
-            "/bin/sh".into(),
+            super::defaults::system_shell(),
             cwd,
             environment,
             delay,
@@ -2273,7 +2267,7 @@ fn native_control_file(effect: Effect) -> Result<Vec<u8>, String> {
                     let mut data = Vec::new();
                     files::open(
                         std::fs::OpenOptions::new().read(true),
-                        Path::new(&os_string(&path)),
+                        Path::new(&os_string(&path)?),
                     )?
                     .take((MAX_REQUEST_BYTES + 1) as u64)
                     .read_to_end(&mut data)?;
@@ -2292,7 +2286,7 @@ fn native_control_file(effect: Effect) -> Result<Vec<u8>, String> {
                         .create(true)
                         .truncate(!append)
                         .append(append),
-                    Path::new(&os_string(&path)),
+                    Path::new(&os_string(&path).map_err(|error| error.to_string())?),
                 )
                 .and_then(|mut file| file.write_all(&data))
                 .map(|()| Vec::new())
@@ -2302,14 +2296,7 @@ fn native_control_file(effect: Effect) -> Result<Vec<u8>, String> {
         _ => unreachable!(),
     };
     let data = result.map_err(|error| {
-        let message = error
-            .raw_os_error()
-            .map(|code| {
-                unsafe { std::ffi::CStr::from_ptr(libc::strerror(code)) }
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_else(|| error.to_string());
+        let message = os_error_message(&error);
         format!("{message}: {}", String::from_utf8_lossy(&path))
     })?;
     if data.len() > MAX_REQUEST_BYTES {
@@ -2338,7 +2325,9 @@ pub(super) fn spawn_job(
     thread::Builder::new()
         .name(format!("tmuxx-job-{id}"))
         .spawn(move || {
+            #[cfg(unix)]
             use std::os::fd::OwnedFd;
+            #[cfg(unix)]
             use std::os::unix::process::{CommandExt, ExitStatusExt};
             let mut result = JobResult {
                 id,
@@ -2360,45 +2349,80 @@ pub(super) fn spawn_job(
             }
             if !commands_only && !command.is_empty() {
                 let execution = (|| -> io::Result<()> {
-                    let (mut reader, writer) = std::os::unix::net::UnixStream::pair()?;
-                    reader.set_nonblocking(true)?;
-                    let mut process = ProcessCommand::new(&shell);
-                    process
-                        .arg0(
-                            Path::new(&shell)
-                                .file_name()
-                                .unwrap_or_else(|| shell.as_ref()),
-                        )
-                        .arg("-c")
-                        .arg(os_string(&command))
-                        .current_dir(&cwd)
-                        .env_clear()
-                        .envs(environment)
-                        .env("PWD", &cwd)
-                        .stdin(Stdio::from(OwnedFd::from(writer.try_clone()?)))
-                        .stderr(if stderr {
-                            Stdio::from(OwnedFd::from(writer.try_clone()?))
-                        } else {
-                            Stdio::null()
-                        })
-                        .stdout(Stdio::from(OwnedFd::from(writer)))
-                        .process_group(0);
-                    let mut child = process.spawn().or_else(|_| {
+                    #[cfg(unix)]
+                    let (mut reader, mut child) = {
+                        let (mut reader, writer) = std::os::unix::net::UnixStream::pair()?;
+                        reader.set_nonblocking(true)?;
+                        let mut process = ProcessCommand::new(&shell);
+                        process
+                            .arg0(
+                                Path::new(&shell)
+                                    .file_name()
+                                    .unwrap_or_else(|| shell.as_ref()),
+                            )
+                            .arg("-c")
+                            .arg(os_string(&command)?)
+                            .current_dir(&cwd)
+                            .env_clear()
+                            .envs(&environment)
+                            .env("PWD", &cwd)
+                            .stdin(Stdio::from(OwnedFd::from(writer.try_clone()?)))
+                            .stderr(if stderr {
+                                Stdio::from(OwnedFd::from(writer.try_clone()?))
+                            } else {
+                                Stdio::null()
+                            })
+                            .stdout(Stdio::from(OwnedFd::from(writer)))
+                            .process_group(0);
+                        let mut child = process.spawn().or_else(|_| {
+                            let home = std::env::var_os("HOME")
+                                .filter(|home| !home.is_empty())
+                                .or_else(|| {
+                                    super::defaults::user_home(b"")
+                                        .and_then(|home| os_string(&home).ok())
+                                });
+                            if let Some(home) = home {
+                                process.current_dir(&home).env("PWD", &home);
+                                if let Ok(child) = process.spawn() {
+                                    return Ok(child);
+                                }
+                            }
+                            process.current_dir("/").env("PWD", "/").spawn()
+                        })?;
+                        drop(process);
+                        reader.shutdown(std::net::Shutdown::Write)?;
+                        (reader, child)
+                    };
+                    #[cfg(windows)]
+                    let (mut reader, mut child) = {
+                        let mut directories = vec![cwd];
                         let home = std::env::var_os("HOME")
                             .filter(|home| !home.is_empty())
                             .or_else(|| {
-                                super::defaults::user_home(b"").map(|home| os_string(&home))
+                                super::defaults::user_home(b"")
+                                    .and_then(|home| os_string(&home).ok())
                             });
                         if let Some(home) = home {
-                            process.current_dir(&home).env("PWD", &home);
-                            if let Ok(child) = process.spawn() {
-                                return Ok(child);
-                            }
+                            directories.push(PathBuf::from(home));
                         }
-                        process.current_dir("/").env("PWD", "/").spawn()
-                    })?;
-                    drop(process);
-                    reader.shutdown(std::net::Shutdown::Write)?;
+                        // The native counterpart of / is the system volume's
+                        // root, not the owner's arbitrary working directory.
+                        let system_shell = PathBuf::from(super::defaults::system_shell());
+                        directories.push(system_shell.ancestors().last().unwrap().to_path_buf());
+                        let mut child = spawn_windows_job_in_directories(
+                            &shell,
+                            &command,
+                            &environment,
+                            stderr,
+                            &directories,
+                        )?;
+                        let reader = child
+                            .stdout
+                            .take()
+                            .ok_or_else(|| io::Error::other("job output pipe missing"))?;
+                        (reader, child)
+                    };
+                    #[cfg(unix)]
                     let child_id = child.id();
                     let completion = (|| -> io::Result<std::process::ExitStatus> {
                         let mut eof = false;
@@ -2469,16 +2493,26 @@ pub(super) fn spawn_job(
                     })();
                     // Descendants can keep stdout open after the shell exits.
                     if completion.is_err() {
+                        #[cfg(unix)]
                         unsafe {
                             libc::kill(-(child_id as i32), libc::SIGKILL);
                         }
+                        #[cfg(windows)]
+                        let _ = child.kill();
                         let _ = child.wait();
                     }
                     let status = completion?;
-                    result.status = status
-                        .code()
-                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
-                    result.signal = status.signal();
+                    #[cfg(unix)]
+                    {
+                        result.status = status
+                            .code()
+                            .unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
+                        result.signal = status.signal();
+                    }
+                    #[cfg(windows)]
+                    {
+                        result.status = status.code().unwrap_or(1);
+                    }
                     Ok(())
                 })();
                 if let Err(error) = execution {
@@ -2500,6 +2534,125 @@ pub(super) fn spawn_job(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(windows)]
+fn spawn_windows_job_in_directories(
+    shell: &str,
+    command: &[u8],
+    environment: &BTreeMap<String, String>,
+    stderr: bool,
+    directories: &[PathBuf],
+) -> io::Result<super::windows_job::Child> {
+    let mut environment = environment.clone();
+    let mut last_error =
+        io::Error::new(io::ErrorKind::InvalidInput, "job needs a working directory");
+    for directory in directories {
+        // Reject unrepresentable paths instead of silently selecting a fallback
+        // that would alias malformed input onto a different working directory.
+        let cwd = directory.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "job directory must be Unicode")
+        })?;
+        if cwd.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "NUL in job directory",
+            ));
+        }
+        environment.insert("PWD".into(), cwd.into());
+        match super::windows_job::spawn_shell(
+            shell,
+            command,
+            directory,
+            &environment,
+            false,
+            true,
+            stderr,
+        ) {
+            Ok(child) => return Ok(child),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
+
+#[cfg(all(test, windows))]
+mod windows_job_directory_tests {
+    use super::*;
+
+    #[test]
+    fn scheduled_shell_falls_back_to_home_then_volume_root_with_matching_pwd() {
+        let root = std::env::temp_dir().join(format!(
+            "tmuxx-job-directory-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home 雪 &^");
+        std::fs::create_dir_all(&home).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let shell = super::super::defaults::system_shell();
+        let volume = Path::new(&shell).ancestors().last().unwrap().to_path_buf();
+        let shell = Path::new(&shell)
+            .parent()
+            .unwrap()
+            .join("WindowsPowerShell/v1.0/powershell.exe")
+            .into_os_string()
+            .into_string()
+            .unwrap();
+        let missing = root.join("missing");
+        let mut environment: BTreeMap<String, String> = std::env::vars().collect();
+        environment.insert("PWD".into(), "stale value".into());
+        for (directories, expected) in [
+            (vec![missing.clone(), home.clone(), volume.clone()], home),
+            (
+                vec![
+                    missing.clone(),
+                    missing.join("also-missing"),
+                    volume.clone(),
+                ],
+                volume,
+            ),
+        ] {
+            let mut child = spawn_windows_job_in_directories(
+                &shell,
+                b"$b=[Text.Encoding]::UTF8.GetBytes([Environment]::CurrentDirectory+[Environment]::NewLine+$env:PWD+[Environment]::NewLine); [Console]::OpenStandardOutput().Write($b,0,$b.Length)",
+                &environment,
+                true,
+                &directories,
+            )
+            .unwrap();
+            let mut reader = child.stdout.take().unwrap();
+            let mut output = Vec::new();
+            let mut buffer = [0; 4096];
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(Instant::now() < deadline, "scheduled job did not finish");
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => output.extend_from_slice(&buffer[..n]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(error) => panic!("job output: {error}"),
+                }
+            }
+            assert!(child.wait().unwrap().success());
+            let expected = expected.to_str().unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("{expected}\r\n{expected}\r\n")
+            );
+        }
+    }
+}
+
 fn job_delay(raw: &[u8]) -> Result<Duration, String> {
     let input = std::ffi::CString::new(raw).map_err(|_| "NUL in delay")?;
     let mut end = std::ptr::null_mut();
@@ -2517,6 +2670,109 @@ fn job_delay(raw: &[u8]) -> Result<Duration, String> {
     Ok(Duration::from_secs_f64(seconds))
 }
 
+fn path_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(path.as_os_str().as_bytes().to_vec())
+    }
+    #[cfg(windows)]
+    path.to_str()
+        .map(|value| value.as_bytes().to_vec())
+        .ok_or_else(|| "Windows paths must be Unicode".into())
+}
+
+fn os_error_message(error: &io::Error) -> String {
+    #[cfg(unix)]
+    if let Some(code) = error.raw_os_error() {
+        return unsafe { std::ffi::CStr::from_ptr(libc::strerror(code)) }
+            .to_string_lossy()
+            .into_owned();
+    }
+    error.to_string()
+}
+
+#[cfg(windows)]
+fn source_paths(path: &Path, quiet: bool) -> Result<Vec<PathBuf>, String> {
+    use std::path::Component;
+    // Expand one directory component at a time. This does not delegate shell
+    // parsing, and every returned filename preserves its original Unicode.
+    let has_glob = path.components().any(|component| matches!(component, Component::Normal(value) if value.to_str().is_some_and(|value| value.contains(['*', '?', '[']))));
+    let mut paths = vec![if has_glob {
+        PathBuf::new()
+    } else {
+        path.to_path_buf()
+    }];
+    for component in path.components().filter(|_| has_glob) {
+        let Component::Normal(component) = component else {
+            for path in &mut paths {
+                path.push(component.as_os_str());
+            }
+            continue;
+        };
+        let pattern = component
+            .to_str()
+            .ok_or("Windows source paths must be Unicode")?;
+        if !pattern.contains(['*', '?', '[']) {
+            for path in &mut paths {
+                path.push(component);
+            }
+            continue;
+        }
+        let mut expanded = Vec::new();
+        for directory in paths {
+            let entries = match std::fs::read_dir(if directory.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                &directory
+            }) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            for entry in entries {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let name = entry.file_name();
+                let name = name
+                    .to_str()
+                    .ok_or("source glob encountered a non-Unicode filename")?;
+                if name.starts_with('.') && !pattern.starts_with('.') {
+                    continue;
+                }
+                if tmuxx_format::glob_match(pattern.as_bytes(), name.as_bytes())
+                    .map_err(str::to_owned)?
+                {
+                    expanded.push(directory.join(entry.file_name()));
+                    if expanded.len() > 4096 {
+                        return Err("source-file glob exceeds path limit".into());
+                    }
+                }
+            }
+        }
+        paths = expanded;
+    }
+    let mut existing = Vec::new();
+    for path in paths {
+        if files::validate_windows_path(&path).map_err(|error| error.to_string())? {
+            existing.push(path);
+            continue;
+        }
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => existing.push(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let mut paths = existing;
+    paths.sort();
+    if paths.is_empty() && !quiet {
+        Err(format!("No such file or directory: {}", path.display()))
+    } else {
+        Ok(paths)
+    }
+}
+
+#[cfg(unix)]
 fn source_paths(path: &Path, quiet: bool) -> Result<Vec<PathBuf>, String> {
     use std::ffi::{CStr, CString};
     let pattern =
@@ -2529,11 +2785,11 @@ fn source_paths(path: &Path, quiet: bool) -> Result<Vec<PathBuf>, String> {
         } else {
             Ok((0..found.gl_pathc)
                 .map(|index| unsafe {
-                    PathBuf::from(os_string(
-                        CStr::from_ptr(*found.gl_pathv.add(index)).to_bytes(),
-                    ))
+                    os_string(CStr::from_ptr(*found.gl_pathv.add(index)).to_bytes())
+                        .map(PathBuf::from)
+                        .map_err(|error| error.to_string())
                 })
-                .collect())
+                .collect::<Result<Vec<_>, _>>()?)
         }
     } else if result == libc::GLOB_NOMATCH && quiet {
         Ok(Vec::new())
@@ -2554,6 +2810,7 @@ fn source_paths(path: &Path, quiet: bool) -> Result<Vec<PathBuf>, String> {
     paths
 }
 
+#[cfg(unix)]
 pub(super) fn suitable_shell(value: &[u8]) -> bool {
     let Some(basename) = value.rsplit(|byte| *byte == b'/').next() else {
         return false;
@@ -2563,4 +2820,28 @@ pub(super) fn suitable_shell(value: &[u8]) -> bool {
     }
     std::ffi::CString::new(value)
         .is_ok_and(|value| unsafe { libc::access(value.as_ptr(), libc::X_OK) } == 0)
+}
+
+#[cfg(windows)]
+pub(super) fn suitable_shell(value: &[u8]) -> bool {
+    let Ok(value) = std::str::from_utf8(value) else {
+        return false;
+    };
+    if value.contains('\0') {
+        return false;
+    }
+    let path = Path::new(value);
+    let Some(name) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    path.is_absolute()
+        && path.is_file()
+        && !name.eq_ignore_ascii_case("tmux")
+        && !name.eq_ignore_ascii_case("tmuxx")
+        && path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("com")
+            })
 }

@@ -38,6 +38,22 @@ mod view_state;
 #[cfg(target_os = "linux")]
 #[path = "linux_watchdog.rs"]
 mod watchdog;
+#[cfg(windows)]
+pub mod windows;
+#[cfg(windows)]
+mod windows_conpty;
+#[cfg(windows)]
+mod windows_host;
+#[cfg(windows)]
+mod windows_job;
+#[cfg(windows)]
+pub use windows_conpty::{ConptyIdentity, initialize_conpty};
+#[cfg(windows)]
+pub use windows_job::{OwnedStdioChild, spawn_owned_stdio, spawn_owned_stdio_piped_stderr};
+#[cfg(unix)]
+type NativeStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type NativeStream = windows::PipeStream;
 #[cfg(target_os = "macos")]
 mod watchdog;
 
@@ -90,11 +106,13 @@ enum Event {
         id: u64,
         request: Request,
     },
+    #[cfg(unix)]
     PrepareControlLine {
         id: u64,
         source: Vec<u8>,
         reply: SyncSender<Result<Vec<tmuxx_command::Command>, String>>,
     },
+    #[cfg(unix)]
     ControlRequest {
         id: u64,
         request: Request,
@@ -129,9 +147,11 @@ struct Client {
 }
 
 struct Process {
+    #[cfg(windows)]
+    handle: Option<std::os::windows::io::OwnedHandle>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     _watchdog: Option<watchdog::Registration>,
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     pid: Option<u32>,
     generation: u64,
     master: Box<dyn MasterPty + Send>,
@@ -284,6 +304,31 @@ impl LocalClient {
                 )
             })
     }
+    /// Submit a native control request through the owner's parser and command
+    /// queue, retaining per-command control guards and prepared source blocks.
+    pub fn send_control(&self, request: tmuxx_protocol::native::ControlRequest) -> io::Result<()> {
+        if request.source.is_some() && !request.argv.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "control source and argv are mutually exclusive",
+            ));
+        }
+        self.tx
+            .try_send(Event::ControlSource {
+                id: self.id,
+                request,
+            })
+            .map_err(|error| {
+                io::Error::new(
+                    match error {
+                        TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+                        TrySendError::Disconnected(_) => io::ErrorKind::BrokenPipe,
+                    },
+                    "server control request queue unavailable",
+                )
+            })
+    }
+    #[cfg(unix)]
     fn send_wait(&self, request: Request) -> io::Result<()> {
         // External transport readers can wait; only the owner thread executes requests.
         self.tx
@@ -293,6 +338,7 @@ impl LocalClient {
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "server stopped"))
     }
+    #[cfg(unix)]
     fn prepare_control_line(
         &self,
         source: Vec<u8>,
@@ -309,6 +355,7 @@ impl LocalClient {
             .recv()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "server stopped"))
     }
+    #[cfg(unix)]
     fn send_control_wait(
         &self,
         request: Request,
@@ -549,7 +596,7 @@ pub fn start(options: Options) -> io::Result<ServerHandle> {
                                     let result = if ipc {
                                         unix_ipc::serve(stream, id, tx)
                                     } else {
-                                        serve_connection(stream, id, tx)
+                                        serve_connection(stream, id, tx, None)
                                     };
                                     if let Err(error) = result {
                                         eprintln!("tmuxx: connection {id}: {error}");
@@ -600,7 +647,12 @@ pub fn start(options: Options) -> io::Result<ServerHandle> {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn start(options: Options) -> io::Result<ServerHandle> {
+    windows_host::start(options)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn start(_options: Options) -> io::Result<ServerHandle> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -689,8 +741,7 @@ pub fn command_argv(commands: &[tmuxx_command::Command]) -> Vec<Vec<u8>> {
 }
 
 /// Negotiate a native connection before sending any requests.
-#[cfg(unix)]
-pub fn native_handshake(stream: &mut std::os::unix::net::UnixStream) -> io::Result<Hello> {
+pub fn native_handshake(stream: &mut (impl Read + Write)) -> io::Result<Hello> {
     let cwd = std::env::current_dir()?
         .into_os_string()
         .into_string()
@@ -774,11 +825,12 @@ pub fn read_record(reader: &mut impl BufRead, limit: usize) -> io::Result<Option
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn serve_connection(
-    stream: std::os::unix::net::UnixStream,
+    stream: NativeStream,
     id: u64,
     tx: SyncSender<Event>,
+    instance_id: Option<String>,
 ) -> io::Result<()> {
     use std::net::Shutdown;
     let mut output = stream.try_clone()?;
@@ -795,12 +847,30 @@ fn serve_connection(
     })?;
     let hello: Hello = serde_json::from_slice(&hello)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    serde_json::to_writer(&mut output, &Hello::default())?;
+    #[cfg(windows)]
+    let (client_pid, client_sid, client_user) = reader.get_ref().verify_client()?;
+    serde_json::to_writer(
+        &mut output,
+        &Hello {
+            instance_id: instance_id.clone(),
+            ..Hello::default()
+        },
+    )?;
     output.write_all(b"\n")?;
     if hello.version != VERSION {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "native protocol version mismatch",
+        ));
+    }
+    if hello
+        .instance_id
+        .as_ref()
+        .is_some_and(|expected| Some(expected) != instance_id.as_ref())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "server incarnation changed; requests were not submitted",
         ));
     }
     reader.get_ref().set_read_timeout(None)?;
@@ -810,6 +880,20 @@ fn serve_connection(
         environment: hello.environment,
         host_effects: hello.host_effects,
         ..ClientContext::default()
+    };
+    #[cfg(windows)]
+    let context = {
+        let mut context = context;
+        context.identity.extend([
+            ("client_pid".into(), client_pid.to_string()),
+            ("client_uid".into(), client_sid),
+            ("client_user".into(), client_user),
+            (
+                "client_termname".into(),
+                context.environment.get("TERM").cloned().unwrap_or_default(),
+            ),
+        ]);
+        context
     };
     let control_commands = hello.control_commands;
     let delivery_bytes = Arc::new(AtomicUsize::new(0));
@@ -876,6 +960,10 @@ fn serve_connection(
         while let Some(line) = read_record(&mut reader, MAX_REQUEST_BYTES)? {
             let value: serde_json::Value = serde_json::from_slice(&line)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            #[cfg(windows)]
+            if value == serde_json::json!({"type": "end_of_input"}) {
+                break;
+            }
             let event = if value.get("type").is_some() {
                 if !control_commands {
                     return Err(io::Error::new(
@@ -1154,9 +1242,11 @@ impl Host {
                 }
                 Event::Disconnect(id) => self.disconnect(id),
                 Event::Request { id, request } => self.request(id, request),
+                #[cfg(unix)]
                 Event::PrepareControlLine { id, source, reply } => {
                     let _ = reply.send(self.prepare_control_commands(id, &source));
                 }
+                #[cfg(unix)]
                 Event::ControlRequest {
                     id,
                     request,
@@ -1855,7 +1945,7 @@ impl Host {
                         self.processes
                             .get(&pane)
                             .and_then(|p| p.status)
-                            .unwrap_or(128 + libc::SIGHUP),
+                            .unwrap_or(129),
                     );
                     self.close_pipe(pane);
                     self.processes.remove(&pane);
@@ -1872,7 +1962,7 @@ impl Host {
                         let mut data = Vec::new();
                         files::open(
                             std::fs::OpenOptions::new().read(true),
-                            Path::new(&os_string(&path)),
+                            Path::new(&os_string(&path).map_err(|e| e.to_string())?),
                         )
                         .map_err(|e| e.to_string())?
                         .take((MAX_REQUEST_BYTES + 1) as u64)
@@ -1906,7 +1996,7 @@ impl Host {
                             .create(true)
                             .truncate(!append)
                             .append(append),
-                        Path::new(&os_string(&path)),
+                        Path::new(&os_string(&path).map_err(|e| e.to_string())?),
                     )
                     .map_err(|e| e.to_string())?;
                     file.write_all(&data).map_err(|e| e.to_string())?;
@@ -1937,18 +2027,33 @@ impl Host {
             .map_err(|e| e.to_string())?;
         let mut command = if argv.len() == 1 {
             let mut c = CommandBuilder::new(&shell);
-            c.arg("-c");
-            c.arg(os_string(&argv[0]));
+            #[cfg(unix)]
+            {
+                c.arg("-c");
+                c.arg(os_string(&argv[0]).map_err(|e| e.to_string())?);
+            }
+            #[cfg(windows)]
+            c.windows_raw_arguments(
+                windows_job::shell_tail(&shell, &argv[0]).map_err(|e| e.to_string())?,
+            );
             c
         } else if argv.is_empty() {
             CommandBuilder::new(&shell)
         } else {
-            let mut c = CommandBuilder::new(os_string(&argv[0]));
+            let mut c = CommandBuilder::new(os_string(&argv[0]).map_err(|e| e.to_string())?);
             for arg in &argv[1..] {
-                c.arg(os_string(arg));
+                c.arg(os_string(arg).map_err(|e| e.to_string())?);
             }
             c
         };
+        #[cfg(unix)]
+        let fallback_cwd = "/".to_owned();
+        #[cfg(windows)]
+        let fallback_cwd = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "Windows current directory must be Unicode")?;
         let cwd = cwd
             .filter(|path| Path::new(path).is_dir())
             .or_else(|| {
@@ -1956,7 +2061,7 @@ impl Host {
                     .filter(|path| Path::new(path).is_dir())
                     .cloned()
             })
-            .unwrap_or_else(|| "/".into());
+            .unwrap_or(fallback_cwd);
         command.env_clear();
         for (key, value) in env {
             command.env(key, value);
@@ -2005,13 +2110,25 @@ impl Host {
             (child, Some(registration))
         };
         #[cfg(not(target_os = "linux"))]
-        let mut child = pair
+        let child = pair
             .slave
             .spawn_command(command)
             .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        let mut child = child;
         let pid = child.process_id();
+        #[cfg(windows)]
+        let handle = child
+            .as_raw_handle()
+            .map(|handle| {
+                unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(handle) }
+                    .try_clone_to_owned()
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?;
         // macOS retains its acknowledged registration boundary. Linux's broker
-        // owns the child before exec and also covers a lost spawn reply.
+        // owns the child before exec and also covers a lost spawn reply. The
+        // Windows portable-pty backend assigns Job ownership before execution.
         #[cfg(target_os = "macos")]
         let registration = match (&self.watchdog, pid) {
             (Some(watchdog), Some(pid)) => match watchdog.register(pid) {
@@ -2030,9 +2147,11 @@ impl Host {
         let (stop, stop_rx) = mpsc::sync_channel(1);
         let (done_tx, finished) = mpsc::sync_channel(1);
         let process = Process {
+            #[cfg(windows)]
+            handle,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _watchdog: registration,
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(all(unix, not(target_os = "linux")))]
             pid,
             generation,
             master: pair.master,
@@ -2134,13 +2253,20 @@ impl Host {
 }
 
 #[cfg(unix)]
-fn os_string(bytes: &[u8]) -> std::ffi::OsString {
+fn os_string(bytes: &[u8]) -> io::Result<std::ffi::OsString> {
     use std::os::unix::ffi::OsStringExt;
-    std::ffi::OsString::from_vec(bytes.to_vec())
+    Ok(std::ffi::OsString::from_vec(bytes.to_vec()))
 }
 #[cfg(not(unix))]
-fn os_string(bytes: &[u8]) -> std::ffi::OsString {
-    String::from_utf8_lossy(bytes).into_owned().into()
+fn os_string(bytes: &[u8]) -> io::Result<std::ffi::OsString> {
+    String::from_utf8(bytes.to_vec())
+        .map(Into::into)
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native Windows arguments and paths must be UTF-8",
+            )
+        })
 }
 
 #[cfg(test)]

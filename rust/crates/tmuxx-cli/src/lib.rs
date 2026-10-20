@@ -2,11 +2,19 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use std::ffi::OsString;
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use tmuxx_protocol::encode_output;
 use tmuxx_protocol::native::{Request, ServerMessage};
 #[cfg(test)]
 mod arguments_tests;
+#[cfg(windows)]
+mod windows;
+#[cfg(unix)]
+type NativeStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type NativeStream = tmuxx_runtime::windows::PipeStream;
 
 const STARTUP_BUSY_EXIT: i32 = 75;
 
@@ -38,6 +46,7 @@ struct Cli {
     #[arg(short = 'c')]
     shell_command: Option<OsString>,
     #[arg(skip)]
+    #[cfg(unix)]
     feature_bits: i32,
     #[arg(short='C',action=clap::ArgAction::Count)]
     control: u8,
@@ -200,6 +209,7 @@ fn socket_path(
     Ok(dir.join(label))
 }
 
+#[cfg(unix)]
 fn native_path(socket: &std::path::Path) -> PathBuf {
     let mut native = socket.as_os_str().to_os_string();
     native.push(".native");
@@ -215,10 +225,11 @@ pub fn default_native_endpoint() -> io::Result<PathBuf> {
     #[cfg(unix)]
     return socket_path(None, None, None, std::env::var_os("TMUX_TMPDIR"))
         .map(|path| native_path(&path));
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    return tmuxx_runtime::windows::endpoint("default");
+    #[cfg(not(any(unix, windows)))]
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        // TODO: implement Windows named-pipe endpoints together with ConPTY ownership.
         "native tmux hosting is not implemented on this platform",
     ))
 }
@@ -234,6 +245,28 @@ fn run(mut cli: Cli) -> io::Result<()> {
             "-l, -c shell replacement and -v log files are outside the native profile",
         ));
     }
+    #[cfg(windows)]
+    if cli.native_stdio {
+        if cli.foreground
+            || cli.control != 0
+            || !cli.command.is_empty()
+            || cli.socket.is_some()
+            || cli.label.is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--native-stdio accepts instance selection through its hello only",
+            ));
+        }
+        return windows::native_stdio_bridge(cli.native_endpoint.as_deref());
+    }
+    #[cfg(windows)]
+    if cli.socket.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "-S is Unix tmux IPC; use -L INSTANCE or --native-endpoint on Windows",
+        ));
+    }
     let explicit_native = if cli.socket.is_none() && cli.label.is_none() {
         match cli.native_endpoint.clone() {
             Some(path) => Some(path),
@@ -243,6 +276,7 @@ fn run(mut cli: Cli) -> io::Result<()> {
     } else {
         cli.native_endpoint.clone()
     };
+    #[cfg(unix)]
     let native_only = explicit_native.is_some() && cli.socket.is_none() && cli.label.is_none();
     #[cfg(unix)]
     let socket = if native_only {
@@ -257,6 +291,7 @@ fn run(mut cli: Cli) -> io::Result<()> {
     };
     #[cfg(not(unix))]
     let socket: Option<PathBuf> = None;
+    #[cfg(not(windows))]
     let endpoint = explicit_native
         .or_else(|| socket.as_deref().map(native_path))
         .ok_or_else(|| {
@@ -265,6 +300,17 @@ fn run(mut cli: Cli) -> io::Result<()> {
                 "no native endpoint on this platform",
             )
         })?;
+    #[cfg(windows)]
+    let endpoint = match explicit_native {
+        Some(_) if cli.label.is_some() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "-L and --native-endpoint are mutually exclusive",
+            ));
+        }
+        Some(endpoint) => endpoint,
+        None => tmuxx_runtime::windows::endpoint(cli.label.as_deref().unwrap_or("default"))?,
+    };
     cli.socket = socket;
     #[cfg(unix)]
     if cli.native_stdio {
@@ -295,7 +341,19 @@ fn run(mut cli: Cli) -> io::Result<()> {
     } else {
         run_unix(cli, endpoint)
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let mut stream = tmuxx_runtime::windows::connect(&endpoint)?;
+        let hello = tmuxx_runtime::native_handshake(&mut stream)?;
+        if cli.control > 0 && !hello.control_commands {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "server does not support control command framing",
+            ));
+        }
+        native_client(cli, stream)
+    }
+    #[cfg(not(any(unix, windows)))]
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "native client transport is not implemented on this platform",
@@ -411,12 +469,15 @@ fn connect_or_start(
 
 /// Prepare an independent native daemon using this executable and its CLI prefix.
 /// The caller may append `-f` options before spawning; stdio is disconnected.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn native_daemon_command(
     endpoint: &std::path::Path,
     launcher_prefix: &[&str],
 ) -> io::Result<std::process::Command> {
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
     let mut process = std::process::Command::new(std::env::current_exe()?);
     process
         .args(launcher_prefix)
@@ -427,6 +488,7 @@ pub fn native_daemon_command(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // Only the async-signal-safe setsid syscall runs between fork and exec.
+    #[cfg(unix)]
     unsafe {
         process.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -436,6 +498,13 @@ pub fn native_daemon_command(
             }
         });
     }
+    // An explicit retained owner must not inherit the GUI's console or its
+    // console-control group. Pane Job Objects remain owned by this new process.
+    #[cfg(windows)]
+    process.creation_flags(
+        windows_sys::Win32::System::Threading::DETACHED_PROCESS
+            | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+    );
     Ok(process)
 }
 
@@ -462,10 +531,25 @@ fn server_command(
     Ok(process)
 }
 
-#[cfg(unix)]
-fn native_client(cli: Cli, mut stream: std::os::unix::net::UnixStream) -> io::Result<()> {
+#[cfg(any(unix, windows))]
+fn native_client(cli: Cli, mut stream: NativeStream) -> io::Result<()> {
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(unix)]
     let argv: Vec<Vec<u8>> = cli.command.iter().map(|s| s.as_bytes().to_vec()).collect();
+    #[cfg(windows)]
+    let argv = cli
+        .command
+        .iter()
+        .map(|s| {
+            s.to_str().map(|s| s.as_bytes().to_vec()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Windows command arguments must be Unicode",
+                )
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     if cli.control > 1 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -565,6 +649,13 @@ fn native_client(cli: Cli, mut stream: std::os::unix::net::UnixStream) -> io::Re
             serde_json::from_slice(&line)?
         } else {
             snapshots.finish()?;
+            // End-of-input drains the native delivery queue and then closes
+            // the transport. The CLI still owns the terminal control record,
+            // including when a deferred job outlives the input connection.
+            if cli.control > 0 {
+                writeln!(stdout, "%exit")?;
+                stdout.flush()?;
+            }
             break;
         };
         let Some(message) = snapshots.push(message)? else {
@@ -577,7 +668,10 @@ fn native_client(cli: Cli, mut stream: std::os::unix::net::UnixStream) -> io::Re
                 ));
             }
             ServerMessage::Stdin { request_id, .. } => {
+                #[cfg(unix)]
                 native_stdin(&mut reader, request_id, &mut deferred, &mut snapshots)?;
+                #[cfg(windows)]
+                windows::native_stdin(&mut reader, request_id, &mut deferred, &mut snapshots)?;
             }
             ServerMessage::Reply(response) => {
                 if cli.control == 0 {

@@ -22,4 +22,8 @@ tmuxx-unix-ipc = { path = "../tmuxx-unix-ipc" }
 
 [dev-dependencies]
 portable-pty.workspace = true
+serde.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Threading"] }
 

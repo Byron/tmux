@@ -57,3 +57,29 @@ fn embedded_daemon_launch_keeps_subcommand_and_native_endpoint() {
     assert_eq!(args[0], "-D");
     assert!(args.windows(2).any(|args| args == ["-S", "/tmp/tmux-test"]));
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_daemon_launch_keeps_subcommand_and_exact_pipe_endpoint() {
+    let endpoint = tmuxx_runtime::windows::endpoint("owner 雪 &;!^ %").unwrap();
+    let mut command = native_daemon_command(&endpoint, &["tmux"]).unwrap();
+    let config = PathBuf::from(r"C:\private fixtures\config 雪 &;!^ %.conf");
+    command.arg("-f").arg(&config);
+    assert_eq!(command.get_program(), std::env::current_exe().unwrap());
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        [
+            std::ffi::OsStr::new("tmux"),
+            std::ffi::OsStr::new("-D"),
+            std::ffi::OsStr::new("--native-endpoint"),
+            endpoint.as_os_str(),
+            std::ffi::OsStr::new("-f"),
+            config.as_os_str(),
+        ]
+    );
+    let standalone = native_daemon_command(&endpoint, &[]).unwrap();
+    assert_eq!(
+        standalone.get_args().next(),
+        Some(std::ffi::OsStr::new("-D"))
+    );
+}
