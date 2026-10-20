@@ -422,6 +422,77 @@ impl Drop for Run {
 #[test]
 #[ignore = "requires real Unix sockets and PTYs"]
 fn harness_cleans_flooding_owners_after_script_exit_and_timeout() {
+    #[cfg(target_os = "linux")]
+    if let Some(pids) = std::env::var_os("TMUXX_TEST_ABRUPT_HARNESS") {
+        let run = Run::new(Path::new(env!("CARGO_BIN_EXE_tmuxx")));
+        if std::env::var_os("TMUXX_TEST_ABRUPT_EMBEDDED").is_some() {
+            use std::io::Write;
+            // Force the collector to use SIGKILL on the embedding host. Its
+            // broker must still get time to kill an env-cleared, HUP-ignoring pane.
+            unsafe {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            }
+            let host =
+                tmuxx_runtime::start(tmuxx_runtime::Options::new(run.directory.join("embedded")))
+                    .unwrap();
+            let client = host.connect().unwrap();
+            let python = "import os,signal,sys,time\nsignal.signal(signal.SIGHUP,signal.SIG_IGN)\nwith open(sys.argv[1],'a') as log: log.write('pane %s\\nbroker %s\\n' % (os.getpid(),os.getppid()))\nwhile True: time.sleep(1)";
+            client
+                .send(tmuxx_protocol::native::Request {
+                    request_id: 1,
+                    argv: [
+                        "new-session",
+                        "-d",
+                        "-s",
+                        "embedded",
+                        "/usr/bin/env",
+                        "-i",
+                        "/usr/bin/python3",
+                        "-c",
+                        python,
+                        pids.to_str().unwrap(),
+                    ]
+                    .map(|argument| argument.as_bytes().to_vec())
+                    .to_vec(),
+                    stdin: None,
+                    subscribe: false,
+                    control: false,
+                })
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(tmuxx_protocol::native::ServerMessage::Reply(reply)) = client.try_recv() {
+                    assert_eq!(reply.error, None);
+                    break;
+                }
+                assert!(Instant::now() < deadline, "embedded spawn timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&pids)
+                .unwrap();
+            writeln!(log, "owner {}", std::process::id()).unwrap();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let script = run.directory.join("outer-timeout.sh");
+        std::fs::write(&script, r#"
+"$TEST_TMUX" -Labrupt -f/dev/null new-session -d -s abrupt /usr/bin/env -i /usr/bin/python3 -c 'import os,signal,sys,time
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+with open(sys.argv[1], "a") as log:
+ log.write("pane %s\nbroker %s\n" % (os.getpid(), os.getppid()))
+while True: time.sleep(1)' "$TMUXX_TEST_ABRUPT_HARNESS" || exit 90
+owner=$("$TEST_TMUX" -Labrupt display -p '#{pid}') || exit 91
+printf 'owner %s\n' "$owner" >> "$TMUXX_TEST_ABRUPT_HARNESS"
+sleep 60
+"#).unwrap();
+        assert!(Path::new(&pids).parent().unwrap().is_dir());
+        run.script_with_timeout(script.to_str().unwrap(), Duration::from_secs(60));
+        return;
+    }
     if let Some(path) = std::env::var_os("TMUXX_TEST_UNRESPONSIVE_SOCKET") {
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let mut native = path.clone();
@@ -492,6 +563,21 @@ done
         };
         #[cfg(not(target_os = "linux"))]
         let nested = "";
+        #[cfg(target_os = "linux")]
+        let cleared = r#"
+"$TEST_TMUX" -Lleak split-window -d /usr/bin/env -i /usr/bin/python3 -c 'import os,signal,sys,time
+signal.signal(signal.SIGHUP,signal.SIG_IGN)
+with open(sys.argv[1], "w") as log: log.write("%s\n%s\n" % (os.getpid(),os.getppid()))
+while True: time.sleep(1)' "$TMUX_TMPDIR/cleared-pids" || exit 94
+n=0
+while [ ! -f "$TMUX_TMPDIR/cleared-pids" ] || [ "$(wc -l < "$TMUX_TMPDIR/cleared-pids")" -ne 2 ]; do
+    n=$((n + 1))
+    [ "$n" -lt 200 ] || exit 95
+    sleep 0.01
+done
+"#;
+        #[cfg(not(target_os = "linux"))]
+        let cleared = "";
         std::fs::write(&script, format!(r#"
 "$TEST_TMUX" -Lleak -f /dev/null new -d -s flood 'mkfifo "$TMUX_TMPDIR/flood"; cat /dev/zero > "$TMUX_TMPDIR/flood" & printf "%s\n" "$$" "$!" > "$TMUX_TMPDIR/pane-pids"; tr "\000" x < "$TMUX_TMPDIR/flood" & echo "$!" >> "$TMUX_TMPDIR/pane-pids"; wait' || exit 90
 "$TEST_TMUX" -Lleak display -p '#{{pid}}' > "$TMUX_TMPDIR/owner-pid" || exit 91
@@ -502,6 +588,7 @@ while [ ! -f "$TMUX_TMPDIR/pane-pids" ] || [ "$(wc -l < "$TMUX_TMPDIR/pane-pids"
     sleep 0.01
 done
 {nested}
+{cleared}
 {ending}
 "#)).unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -517,7 +604,7 @@ done
             assert_eq!(success, ending == "exit 0", "{transcript}");
         }
         #[cfg(target_os = "linux")]
-        let pid_files = ["owner-pid", "pane-pids", "nested-pids"];
+        let pid_files = ["owner-pid", "pane-pids", "nested-pids", "cleared-pids"];
         #[cfg(not(target_os = "linux"))]
         let pid_files = ["owner-pid", "pane-pids"];
         let pids = pid_files
@@ -530,8 +617,8 @@ done
             .collect::<Vec<_>>();
         assert_eq!(
             pids.len(),
-            if cfg!(target_os = "linux") { 6 } else { 4 },
-            "owner, pane shell, cat, tr and Linux nested/orphan script descendants"
+            if cfg!(target_os = "linux") { 8 } else { 4 },
+            "owner, pane shell, cat, tr and Linux nested/orphan and env-cleared pane/broker"
         );
         // Preserve exact identities for emergency cleanup if the assertion fails.
         struct Remaining(Vec<(libc::pid_t, (u64, u64))>);
@@ -570,6 +657,66 @@ done
         let output = query.wait_with_output().unwrap();
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, b"independent\n");
+    }
+    #[cfg(target_os = "linux")]
+    for embedded in [false, true] {
+        // The outer collector kills this nested Rust test before its Run/Child
+        // destructors execute. Its private script session and broker inherit
+        // the collector marker, while the HUP-ignoring pane clears its env.
+        let outer = Run::new(binary);
+        let pids = outer.directory.join("outer-pids");
+        let transcript = File::create(outer.directory.join("transcript")).unwrap();
+        let python = r#"import os, subprocess, sys
+sys.path.insert(0, os.environ['TMUXX_CONFORMANCE_DIRECTORY'])
+import runner
+try:
+    runner.run_suite_process([os.environ['TMUXX_ABRUPT_EXECUTABLE'], '--ignored', '--exact',
+        'harness_cleans_flooding_owners_after_script_exit_and_timeout'],
+        cwd=os.getcwd(), env=dict(os.environ), timeout=2)
+except subprocess.TimeoutExpired as error:
+    assert not error.cleanup_errors, error.cleanup_errors
+    print('outer timeout cleaned private script, owner, broker and env-cleared pane')
+else:
+    raise AssertionError('nested harness did not time out')
+"#;
+        let mut command = Command::new("python3");
+        if embedded {
+            command.env("TMUXX_TEST_ABRUPT_EMBEDDED", "1");
+        }
+        let mut child = command
+            .args(["-c", python])
+            .env(
+                "TMUXX_CONFORMANCE_DIRECTORY",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance"),
+            )
+            .env("TMUXX_ABRUPT_EXECUTABLE", std::env::current_exe().unwrap())
+            .env("TMUXX_TEST_ABRUPT_HARNESS", &pids)
+            .stdout(transcript.try_clone().unwrap())
+            .stderr(transcript)
+            .spawn()
+            .unwrap();
+        bounded_wait(&mut child, Duration::from_secs(16));
+        let status = child.wait().unwrap();
+        let transcript = std::fs::read_to_string(outer.directory.join("transcript")).unwrap();
+        assert!(status.success(), "{transcript}");
+        let records = std::fs::read_to_string(pids).unwrap();
+        let pids = records
+            .lines()
+            .map(|line| {
+                let (kind, pid) = line.split_once(' ').unwrap();
+                (kind, pid.parse::<libc::pid_t>().unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pids.len(), 3, "{records}");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pids.iter().any(|(_, pid)| process_start(*pid).is_some()) {
+            assert!(
+                Instant::now() < deadline,
+                "outer timeout leaked {pids:?}; {transcript}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(process_start(owner_pid), Some(owner_start));
     }
     // A detached owner that never answers must not trap the destructor.
     let unresponsive = Run::new(binary);

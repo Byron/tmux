@@ -451,8 +451,12 @@ subprocess.Popen([sys.executable, os.environ['SUITE_ORPHAN']], process_group=0).
 while 'orphan' not in open(os.environ['SUITE_PID_LOG']).read():
     time.sleep(0.01)
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+cleared = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], env={})
+private = subprocess.Popen([sys.executable, '-c',
+    'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)'], start_new_session=sys.platform == 'linux')
 with open(os.environ['SUITE_PID_LOG'], 'a') as log:
-    print('child', child.pid, os.getpgid(child.pid), os.getsid(child.pid), file=log, flush=True)
+    for name, process in [('child', child), ('cleared', cleared), ('private', private)]:
+        print(name, process.pid, os.getpgid(process.pid), os.getsid(process.pid), file=log, flush=True)
 print('test timeout_case ... ok', flush=True)
 os.write(1, bytes([255]) + b'stdout' + bytes([10]))
 os.write(2, bytes([254]) + b'stderr' + bytes([10]))
@@ -471,9 +475,10 @@ time.sleep(60)
                     observations, details = runner.run_suite(suite, "/unused")
                     records = {name: (int(pid), int(group), int(session))
                                for name, pid, group, session in (line.split() for line in log.read_text().splitlines())}
-                    self.assertEqual(set(records), {"suite", "orphan", "child"})
+                    self.assertEqual(set(records), {"suite", "orphan", "child", "cleared", "private"})
                     session = records["suite"][0]
-                    self.assertTrue(all(record[2] == session for record in records.values()))
+                    self.assertTrue(all(record[2] == session for name, record in records.items() if name != "private"))
+                    self.assertEqual(records["private"][2], records["private"][0] if sys.platform == "linux" else session)
                     self.assertNotEqual(records["orphan"][1], session)
                     self.assertEqual(observations[0]["status"], "failure")
                     self.assertEqual(details["status"], -1)
@@ -501,10 +506,10 @@ time.sleep(60)
                     if log.exists():
                         records = [line.split() for line in log.read_text().splitlines()]
                         session = int(records[0][1]) if records else -1
-                        for _, raw_pid, raw_group, _ in records:
-                            pid, group = int(raw_pid), int(raw_group)
+                        for _, raw_pid, raw_group, raw_session in records:
+                            pid, group, expected_session = int(raw_pid), int(raw_group), int(raw_session)
                             try:
-                                if os.getsid(pid) == session and os.getpgid(pid) == group:
+                                if os.getsid(pid) == expected_session and os.getpgid(pid) == group:
                                     os.killpg(group, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass

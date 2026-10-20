@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import platform
 import re
+import secrets
+import select
 import signal
 import subprocess
 import sys
@@ -633,9 +635,100 @@ def suite_observations(suite, returncode, output):
     return observations, completed
 
 
-def stop_suite_session(process):
-    """Stop only live process groups in the Unix session created for this suite."""
+SUITE_OWNER_ENV = "TMUXX_CONFORMANCE_OWNER_TOKEN"
+
+
+def stop_marked_linux_processes(token):
+    """Clean detached fixtures without trusting mutable numeric PID identities."""
+    if sys.platform != "linux" or not token:
+        return []
+    marker = (SUITE_OWNER_ENV + "=" + token).encode()
     errors = []
+
+    def pinned_members():
+        members = []
+        for path in Path("/proc").iterdir():
+            if not path.name.isdigit():
+                continue
+            descriptor = None
+            try:
+                if marker not in (path / "environ").read_bytes().split(b"\0"):
+                    continue
+                before = (path / "stat").read_bytes().rsplit(b") ", 1)[1].split()
+                if before[0] == b"Z":
+                    continue
+                descriptor = os.pidfd_open(int(path.name))
+                after = (path / "stat").read_bytes().rsplit(b") ", 1)[1].split()
+                if after[19] != before[19] or marker not in (path / "environ").read_bytes().split(b"\0"):
+                    os.close(descriptor)
+                    descriptor = None
+                    continue
+                members.append((descriptor, int(path.name), int(after[1])))
+                descriptor = None
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                pass
+            except (OSError, IndexError, ValueError) as error:
+                errors.append(f"could not identify owned fixture {path.name}: {error}")
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+        return members
+
+    def wait_members(members, timeout):
+        deadline = time.monotonic() + timeout
+        while any(not select.select([descriptor], [], [], 0)[0] for descriptor, _, _ in members):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(.02)
+
+    def signal_members(members, signum):
+        for descriptor, pid, _ in members:
+            try:
+                signal.pidfd_send_signal(descriptor, signum)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                errors.append(f"could not signal owned fixture {pid}: {error}")
+
+    def close_members(members):
+        for descriptor, _, _ in members:
+            os.close(descriptor)
+
+    # Brokers block TERM. Give owners and their watchdogs a chance to finish
+    # before any group-wide cleanup, including owners which ignore TERM.
+    members = pinned_members()
+    try:
+        signal_members(members, signal.SIGTERM)
+        wait_members(members, 2)
+    finally:
+        close_members(members)
+    for _ in range(4):
+        members = pinned_members()
+        if not members:
+            break
+        try:
+            live = {pid for _, pid, _ in members}
+            ancestors = [member for member in members if member[2] not in live]
+            if not ancestors:
+                errors.append("owned fixture ancestry could not be resolved")
+                break
+            # Kill owners before their marked brokers. Preserve the pidfds and
+            # captured parent relation for this stage, then allow watchdog cleanup
+            # before considering descendants in a fresh scan.
+            signal_members(ancestors, signal.SIGKILL)
+            wait_members(members, 2)
+        finally:
+            close_members(members)
+    remaining = pinned_members()
+    if remaining:
+        errors.append(f"{len(remaining)} marked fixture processes remained after cleanup")
+    close_members(remaining)
+    return errors
+
+
+def stop_suite_session(process):
+    """Stop marked Linux descendants first, then remaining owned session jobs."""
+    errors = stop_marked_linux_processes(getattr(process, "tmuxx_suite_owner_token", None))
     if os.name == "posix":
         for _ in range(3):
             groups = {}
@@ -646,7 +739,7 @@ def stop_suite_session(process):
                     pid, group = int(pid), int(group)
                     try:
                         if not state.startswith(b"Z") and os.getsid(pid) == process.pid:
-                            groups[group] = pid
+                            groups[pid if sys.platform == "linux" else group] = pid
                     except ProcessLookupError:
                         pass
             except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -654,8 +747,14 @@ def stop_suite_session(process):
                 groups[process.pid] = process.pid
             for group, pid in groups.items():
                 try:
-                    # Revalidate the representative immediately before signalling.
-                    if os.getsid(pid) == process.pid and os.getpgid(pid) == group:
+                    if sys.platform == "linux":
+                        descriptor = os.pidfd_open(pid)
+                        try:
+                            if os.getsid(pid) == process.pid:
+                                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                        finally:
+                            os.close(descriptor)
+                    elif os.getsid(pid) == process.pid and os.getpgid(pid) == group:
                         os.killpg(group, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
@@ -674,8 +773,10 @@ def stop_suite_session(process):
 
 
 def run_suite_process(command, *, cwd, env, timeout):
-    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+    owner_token = secrets.token_hex(32)
+    process = subprocess.Popen(command, cwd=cwd, env={**env, SUITE_OWNER_ENV: owner_token}, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=os.name == "posix")
+    process.tmuxx_suite_owner_token = owner_token
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
