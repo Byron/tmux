@@ -108,8 +108,10 @@ fn foreground_path_and_automatic_names_follow_real_processes() {
         let expected = oracle.run(args);
         assert_eq!(actual, expected, "{args:?}");
     };
+    // Some Linux distributions ship uutils tty, which may omit the newline.
+    // Command substitution plus printf gives both oracles one explicit line.
     let script = format!(
-        "tty; cd '{}'; printf READY; read step; cd '{}'; printf SECOND; read step; exec /bin/sleep 30",
+        "printf '%s\\n' \"$(tty)\"; cd '{}'; printf READY; read step; cd '{}'; printf SECOND; read step; exec /bin/sleep 30",
         first.display(),
         second.display()
     );
@@ -126,14 +128,15 @@ fn foreground_path_and_automatic_names_follow_real_processes() {
     assert_eq!(oracle.run(&path), b"/\n");
     let tty = ["display", "-pt", "%0", "#{pane_tty}"];
     let capture = ["capture-pane", "-pt", "%0", "-S", "-", "-E", "-"];
-    for (tty, capture) in [
-        (run(&client, &tty), run(&client, &capture)),
-        (oracle.run(&tty), oracle.run(&capture)),
+    for (implementation, tty, capture) in [
+        ("Rust", run(&client, &tty), run(&client, &capture)),
+        ("C", oracle.run(&tty), oracle.run(&capture)),
     ] {
         assert!(tty.starts_with(b"/dev/"), "{tty:?}");
         assert_eq!(
             tty.strip_suffix(b"\n"),
-            capture.split(|b| *b == b'\n').next()
+            capture.split(|b| *b == b'\n').next(),
+            "{implementation} PTY first line: {capture:?}"
         );
     }
     both(&[
