@@ -61,6 +61,16 @@ fn default_and_label_sockets_use_tmux_namespace_with_separate_native_endpoint() 
     good(fixture.rust(&["new-session", "-d", "-s", "default", "sleep", "30"], None));
     assert!(fixture.socket("default").exists());
     assert!(fixture.socket("default.native").exists());
+    let server_pid = String::from_utf8(good(
+        fixture.rust(&["display-message", "-p", "#{pid}"], None),
+    ))
+    .unwrap()
+    .trim()
+    .parse::<libc::pid_t>()
+    .unwrap();
+    assert!(server_pid > 0);
+    assert_eq!(unsafe { libc::getsid(server_pid) }, server_pid);
+    assert_eq!(unsafe { libc::getpgid(server_pid) }, server_pid);
     good(fixture.rust(
         &[
             "-L",

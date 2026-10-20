@@ -34,6 +34,7 @@ checkout and also supplied as a patch with source hashes. Its launch modes are:
 | Rustty argument | Owner |
 | --- | --- |
 | `--tmuxx=embedded` | This Rustty process |
+| `--tmuxx=persistent` | Independent local native daemon |
 | `--tmuxx=unix:/path/to/socket.native` | Existing local tmuxx daemon |
 | `--tmuxx=ssh:host` | Remote tmuxx native endpoint |
 | `--tmuxx=system-ssh:host` | Remote system tmux, using SSH control mode |
@@ -43,10 +44,31 @@ local connections and optional Unix command access. Dropping the handle shuts
 down its PTYs. `tmuxx-client` consumes and produces protocol bytes with
 caller-owned I/O, so client-only consumers do not compile the engine.
 
-Choose the owner when launching panes. Standalone panes can survive GUI exit;
-Rustty's retention action preserves selected panes and their required graph
-links. App-owned panes end with the owner. Live PTY migration between those
-owners is not implemented. Stock C reconnection reconstructs only the state
+Rustty includes the CLI in the same executable: `rustty tmux` (or
+`rustty.exe tmux`) dispatches before opening a GUI. The callable
+`tmuxx_cli::run_from(args, launcher_prefix)` preserves the subcommand when it
+starts a daemon. Embedded callers default to the native endpoint; `-L` or `-S`
+explicitly selects the compatible tmux command socket. Standalone `tmuxx`
+retains its usual tmux socket defaults. `tmuxx_cli::default_native_endpoint()`
+resolves `TMUXX_ENDPOINT`, otherwise the checked per-user
+`/tmp/tmux-UID/default.native` path (`TMUX_TMPDIR` can replace `/tmp`), without
+following an inherited `TMUX` variable.
+
+For example, `rustty tmux new-session -d -s work` starts a native daemon if
+needed; later CLI invocations attach to that same owner. Auto-started daemons
+have their own process session and no controlling terminal. GUI hosts use the
+same `tmuxx_cli::native_daemon_command(endpoint, launcher_prefix)` builder.
+Explicit `rustty tmux --native-endpoint PATH -D` remains a foreground command.
+Over SSH, `rustty tmux --native-stdio` bridges to an existing owner without
+starting one. Rustty's `tmuxx-ssh-command` setting can select another remote
+helper path or endpoint; its value is a remote shell command. SSH requires
+noninteractive authentication and does not reconnect automatically. Command
+dispatch is shared across platforms; Windows native endpoint/ConPTY hosting
+remains unimplemented.
+
+Choose the owner when launching panes. Standalone panes survive GUI exit;
+app-owned panes end with the owner. Live PTY migration between those owners is
+not implemented. Stock C reconnection reconstructs only the state
 tmux exposes; complete atomic terminal checkpoints use the native protocol.
 
 ## Verify and rebase
