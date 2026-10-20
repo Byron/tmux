@@ -2,73 +2,41 @@
   "repository": "https://github.com/Byron/rustty",
   "base_revision": "cb67824a77fc00bd20e811cce40012893f79b999",
   "files": {
-    "Cargo.toml": {
-      "base_sha256": "234b1d583db6db7ee63f792d45d3839d80ddac106c70773f32d8705dbfacf531",
-      "result_sha256": "2030eb6217743a6285c289f4a016a63b4c48ade76b9c66e199d669a484acc883"
-    },
     "Cargo.lock": {
       "base_sha256": "56759827e2940163bb7ac5e7927ba17b30253e08c6afde18241301d9ce50fc48",
-      "result_sha256": "e17805eae8de87e1d000a91c35bd8acd050ed29bc4bc935ea20f92aea09a568a"
+      "result_sha256": "5d5f58c12345ca209c3c8f407aba36f3be4f935ac149384d5611cc8ea7150028"
     },
-    "crates/rustty/Cargo.toml": {
-      "base_sha256": "3fc02160a5e612074768cb8ec73280e78393a58d996268bea20c77486c47adae",
-      "result_sha256": "fe3f009dbedb9a8c793ad7c764a3ceea0488b5f4a4c21097cd6fcfe4e6252175"
+    "Cargo.toml": {
+      "base_sha256": "234b1d583db6db7ee63f792d45d3839d80ddac106c70773f32d8705dbfacf531",
+      "result_sha256": "65cb90873258dc57eab90fc2a15b40865ce8b8a85c5cc7ba712fbe9746ddff3a"
     },
-    "crates/rustty/src/lib.rs": {
-      "base_sha256": "1c46aaa1f1aecc216f4b76a748108929deeb0042117b48c7f075758ee669f43c",
-      "result_sha256": "5b20ac19d989839ec4481b00685642726670b79d79bce88a42df9d4f572ad536"
-    },
-    "crates/rustty/src/session.rs": {
-      "base_sha256": "324019d4fd4b5d6abdd87ea04c3f89178abbec4fafdbbc3522d4e97765d6c755",
-      "result_sha256": "670f0af8d67aa1bc728cc5ff1697e55b0a0ef17aea40c04cf9a093a93fab0fe9"
-    },
-    "crates/rustty/src/config/keybinding.rs": {
-      "base_sha256": "0fa497c497a2390d57e99f3b9d1cdfd595324c74d537a03898dca7a0af0f3d73",
-      "result_sha256": "e8d0fee9a08a650416e43800b14e8e751830ccee2b078807cef4783bea79c5b3"
-    },
-    "crates/rustty/src/tmuxx.rs": {
-      "base_sha256": null,
-      "result_sha256": "d1aa21bb63cac907698100a9d3cdda6afce312d3ffddfae1c8e117b5cce67461"
-    },
-    "crates/rustty/src/tmuxx/system.rs": {
-      "base_sha256": null,
-      "result_sha256": "d1abbe033809041e560ba976b2b943bb7db681cb16ff34ebcd7346cdc33c7e00"
+    "crates/rustty-app/Cargo.toml": {
+      "base_sha256": "43252367e7150cf0e204c72a4540ec8b443a14a5d6b56c343c3fc91eb1633f27",
+      "result_sha256": "93cd0968ad76d4e9d66daaedc94153104b48a5bc84b9114d227206acd4c2dd10"
     },
     "crates/rustty-app/README.md": {
       "base_sha256": "7faf5f8df511415b25370d338ffc4efd33ae9713a988f79a2fa9ab216d54fdf8",
-      "result_sha256": "67cca0537feb79266be275bd1eb9ef539726a4e7fbb240bdaa8dd9c9b2be903c"
+      "result_sha256": "ddd6ea22c5c23a26c9f62f4b38949558cdeb66ca80c719bbd34665cb8e8bde74"
     },
-    "crates/rustty-app/src/lib.rs": {
-      "base_sha256": "2d43882030499a6186312a93053a5efa25cc114ecc192f299af5d77ec51a287a",
-      "result_sha256": "329674103a5358334f75ef0f7ebd556f1f738d21a3d1abdb9540c8a022c97dd5"
-    },
-    "crates/rustty-app/src/desktop.rs": {
-      "base_sha256": "ff9cf8c31ac44d05d0c162b9731e69acfffa20b4026f654051e5039998c73ff9",
-      "result_sha256": "181538e383d2f779809e08add9980b0a5832687ed05b7d4a2e1f56fa89b13039"
-    },
-    "crates/rustty-app/src/tmuxx_workspace.rs": {
-      "base_sha256": null,
-      "result_sha256": "e7e9341e4916ec0decb77c98a26729d6ba432cfc38d88e990716204d18e8a490"
+    "crates/rustty-app/build.ps1": {
+      "base_sha256": "e65d76ad6b7da7035ff35c7516c1bf1ada43e795b90f1cee12e1e64462ca2884",
+      "result_sha256": "d1223296a74ca45d4fec627c1a9d5bc83fe0614142e327be1b4b2b3ced9ed2b5"
     },
     "crates/rustty-app/src/command_palette.rs": {
       "base_sha256": "ee0ae35ee031c7dd8d41d70802a0eca3108ce545565ccf73468b28939d516692",
       "result_sha256": "4bace9213853dd66f5a4d5aa66d011c1587554238ec5f56e139ae22ad8c02e26"
     },
-    "crates/rustty-app/src/smoke.rs": {
-      "base_sha256": "7150386a3dab2ad0e0732bb42c1c781f4c7248978d0d5bc2f6ce04ab5c980157",
-      "result_sha256": "dcfe1ad63000b359a9966c5d941bbc6312ff1e8ec498255aab8c93de16ef5eba"
-    },
-    "crates/rustty-app/src/workspace.rs": {
-      "base_sha256": "25db6ca36621e96629392158b822739c9065797f7b7d0c7ec139b9ee085cfcb5",
-      "result_sha256": "6ea91769ab6895fab0535ddbd16670e416c4e4cb6df56956607a401c2ebdcd7f"
-    },
-    "crates/rustty-app/src/workspace/saved_layout.rs": {
-      "base_sha256": "2203dcfdc600026be586b367f3c9f656cd1b5c875c8c95e973c5c98b6bad1b17",
-      "result_sha256": "23f21ff447c25a12091de32a687c5097714f8a52f7a85415d2be3f103b00ce64"
-    },
     "crates/rustty-app/src/deck.rs": {
       "base_sha256": "c5a4966eabc3f37fedc71879f2a833666b3924fd53382a840425c8a818307506",
       "result_sha256": "5817b6ba055b50302a98b40af0b795ba79feeea6c89742815d94ae28913e6521"
+    },
+    "crates/rustty-app/src/desktop.rs": {
+      "base_sha256": "ff9cf8c31ac44d05d0c162b9731e69acfffa20b4026f654051e5039998c73ff9",
+      "result_sha256": "7dd85fdf83604a3dae87155947f53238125b66271bcf3fb452be0c30792242a2"
+    },
+    "crates/rustty-app/src/lib.rs": {
+      "base_sha256": "2d43882030499a6186312a93053a5efa25cc114ecc192f299af5d77ec51a287a",
+      "result_sha256": "329674103a5358334f75ef0f7ebd556f1f738d21a3d1abdb9540c8a022c97dd5"
     },
     "crates/rustty-app/src/outliner.rs": {
       "base_sha256": "c982e1f038b6ff9d8eb975632397c7850cb6c2b231f9c5e700695590c8ed2c75",
@@ -78,9 +46,61 @@
       "base_sha256": "aee6e0dfb00fa336892d294a0fe1f5d164e365a7e2d12b8251b2eda2b24be5f3",
       "result_sha256": "55b36ba4a4f55c465f7f45867f6ab26b605e4e09adf17844bcf39ec6d26ea3a1"
     },
+    "crates/rustty-app/src/platform/windows/clipboard.rs": {
+      "base_sha256": "e9a460912788b60bf242d7d5ce2484f633f29f992a5ec2304134d0ce68d6a63b",
+      "result_sha256": "36513966a8b98a5612b9cd5ab993d9e6ced0b2a26ac6d2f21814eaa2eddc9a09"
+    },
+    "crates/rustty-app/src/platform/windows/conpty.rs": {
+      "base_sha256": "6b55d69ba65f69bb27cb457cc71bac937698550f090e7e16aed4ad037a1e62a2",
+      "result_sha256": "73810085933c6494a077b4bd36bcd35b7038744d3b2fcce14cc22ecf67e7f2cc"
+    },
+    "crates/rustty-app/src/smoke.rs": {
+      "base_sha256": "7150386a3dab2ad0e0732bb42c1c781f4c7248978d0d5bc2f6ce04ab5c980157",
+      "result_sha256": "dcfe1ad63000b359a9966c5d941bbc6312ff1e8ec498255aab8c93de16ef5eba"
+    },
+    "crates/rustty-app/src/tmuxx_workspace.rs": {
+      "base_sha256": null,
+      "result_sha256": "e7e9341e4916ec0decb77c98a26729d6ba432cfc38d88e990716204d18e8a490"
+    },
+    "crates/rustty-app/src/workspace.rs": {
+      "base_sha256": "25db6ca36621e96629392158b822739c9065797f7b7d0c7ec139b9ee085cfcb5",
+      "result_sha256": "6ea91769ab6895fab0535ddbd16670e416c4e4cb6df56956607a401c2ebdcd7f"
+    },
+    "crates/rustty-app/src/workspace/saved_layout.rs": {
+      "base_sha256": "2203dcfdc600026be586b367f3c9f656cd1b5c875c8c95e973c5c98b6bad1b17",
+      "result_sha256": "23f21ff447c25a12091de32a687c5097714f8a52f7a85415d2be3f103b00ce64"
+    },
+    "crates/rustty-app/tests/windows_conpty.rs": {
+      "base_sha256": "7acf75f6484f3750b34247f08ca4b93ec16dd8530e97413a3c5abb1ef747b364",
+      "result_sha256": "289e13140f76a27804afc3734fa04c87306a2e789bb1f55d9e586c544b1f2f4b"
+    },
     "crates/rustty-render/src/graphics.rs": {
       "base_sha256": "c31332ec615f665900864ad9334cb4b6ca69a0b619a6ff7499c8c3e97aaa2f60",
       "result_sha256": "f633baab5cb3cc6385de180c13a49f7328c704e7485e1c1d79999f9a36d530aa"
+    },
+    "crates/rustty/Cargo.toml": {
+      "base_sha256": "3fc02160a5e612074768cb8ec73280e78393a58d996268bea20c77486c47adae",
+      "result_sha256": "168efeb74866eb6965676ec28e41c8f31603384ebe5711b8389368e9166e1b09"
+    },
+    "crates/rustty/src/config/keybinding.rs": {
+      "base_sha256": "0fa497c497a2390d57e99f3b9d1cdfd595324c74d537a03898dca7a0af0f3d73",
+      "result_sha256": "e8d0fee9a08a650416e43800b14e8e751830ccee2b078807cef4783bea79c5b3"
+    },
+    "crates/rustty/src/lib.rs": {
+      "base_sha256": "1c46aaa1f1aecc216f4b76a748108929deeb0042117b48c7f075758ee669f43c",
+      "result_sha256": "5b20ac19d989839ec4481b00685642726670b79d79bce88a42df9d4f572ad536"
+    },
+    "crates/rustty/src/session.rs": {
+      "base_sha256": "324019d4fd4b5d6abdd87ea04c3f89178abbec4fafdbbc3522d4e97765d6c755",
+      "result_sha256": "670f0af8d67aa1bc728cc5ff1697e55b0a0ef17aea40c04cf9a093a93fab0fe9"
+    },
+    "crates/rustty/src/tmuxx.rs": {
+      "base_sha256": null,
+      "result_sha256": "1ca194b1a60c7716fe19509c625a8a14a141a84c51cadfce2b67087dbc0949df"
+    },
+    "crates/rustty/src/tmuxx/system.rs": {
+      "base_sha256": null,
+      "result_sha256": "339b2f5a549a8feb37dedd0fc368ab2daec25cf02dde7ab4fecca13cc21ecb8c"
     }
   }
 }

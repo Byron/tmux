@@ -2,11 +2,11 @@
 
 `rustty.patch` is the tested native integration applied to the neighboring
 `ghostty-org/ghostty` Rustty checkout. `manifest.json` records its base revision
-and every original/result file SHA-256. The patch changes only Rust sources,
-Cargo metadata and the Rustty README; no Zig production sources or commits.
+and every original/result file SHA-256. The patch changes Rust sources,
+Cargo metadata, Windows packaging and the Rustty README; no Zig production sources.
 
 The backend supports app-owned tmuxx, existing native Unix endpoints, native
-stdio over SSH, and system C tmux over SSH. Native server graph changes reconcile
+stdio over SSH, Windows per-user named pipes, and system C tmux over SSH. Native server graph changes reconcile
 into windows/tabs/split views, including duplicate links within one session.
 Pane views have independent selection and scroll;
 input and structural commands go back to the owner. One size client per native
@@ -95,7 +95,8 @@ The socket/PTY and SSH tests need ordinary OS process/socket permissions. Linux
 server execution is active; see [Linux reproduction](../../LINUX.md) and its
 fresh evidence reports. Portable Rustty adapter/workspace tests can run on the
 Linux host, while renderer and desktop tests require a supported macOS/Windows
-client. Windows hosting execution remains deferred. The smoke exercises native composition and backend
+client. Windows execution is active, and qualification requires fresh Windows
+profile evidence. The smoke exercises native composition and backend
 attachment; it does not certify every UI gesture. Stock C capture reconstruction
 remains best effort and live app-owned PTY migration remains unimplemented.
 
@@ -147,3 +148,59 @@ Resolve conflicts in the responsibility boundaries: VT snapshot extension,
 Session attachment, connection manager, and workspace mapping. Re-run the tests
 above, then regenerate the patch and manifest from the new clean Rustty base.
 Do not overwrite uncommitted user changes with a copied staging tree.
+
+## Windows execution
+
+Preserve the sibling checkout layout, or deliberately update all Cargo dependency
+paths together. Both owners use `rust/windows/conpty.json`: ConPTY package
+`1.24.260710001`, x64, archive SHA-256
+`175640566a3b59c4b132070ee96c2c77e5ab7edd2e92732a5eb3610bbf63d90e`.
+Both member hashes are checked before portable-pty initializes, and open read
+handles prevent replacement while loaded. The same vendored portable-pty binds
+the verified DLL and starts panes inside kill-on-close Job Objects.
+
+From the actual Windows Rustty checkout:
+
+```powershell
+./crates/rustty-app/build.ps1 -Offline
+$env:TMUXX_CONPTY_RESOURCES = (Resolve-Path target/debug/Rustty/resources).Path
+cargo +1.95.0 test --locked --offline -p rustty --features sessions --lib tmuxx::tests:: -- --test-threads=1
+cargo +1.95.0 test --locked --offline -p rustty-app --lib tmuxx_workspace::tests:: -- --test-threads=1
+cargo +1.95.0 test --locked --offline -p rustty-app --test windows_conpty -- --ignored
+```
+
+All 11 selected backend tests run on Windows. The custom `windows_conpty` harness
+emits `TMUXX_WINDOWS_CONPTY_RESULT` only after eight verified redraws, including
+the bundled-runtime identity; ordinary libtest output cannot prove its result.
+Build the standalone package with `rust/windows/build.ps1`, supplying the same
+cached archive through `-ConPtyPackage` for offline operation. Keep the complete
+resources folder beside each executable. Directory rename preserves the old
+bundle if an active process prevents replacement.
+
+The separate desktop fixture runs visible native windows and records every
+rendered HWND view, server graph and pane PID. It exercises external session/tab/
+split changes, shared windows and duplicate links, graceful and abrupt app-owner cleanup,
+retained standalone panes across graceful and abrupt GUI restarts, and missing/corrupt runtime
+members in both packaged executables:
+
+```powershell
+python rust/conformance/windows_native_views.py --gui PATH/TO/Rustty/rustty.exe --candidate rust/target/debug/tmuxx/tmuxx.exe --report rust/conformance/artifacts/windows-native-views.json
+```
+
+The desktop fixture checks held process handles through cleanup on failure and
+timeout. It retains its private images, logs and graph records alongside the
+report. It does not establish real keyboard/IME gestures, OS clipboard policy,
+or cross-logon SSH identity. Those remain required parts of the Windows profile;
+backend and rendering checks do not substitute for them. Historical macOS data
+and development runs do not qualify the current checkout.
+
+The separate `windows-desktop-ssh` suite launches a second real Windows Rustty
+with `--tmuxx=ssh:HOST --tmuxx-instance=NAME`, private OpenSSH configuration, and
+a restricted loopback-only bridge credential. It verifies native shared-window
+reconciliation, unchanged pane PIDs, per-window resize connections, and both
+graceful and abrupt SSH viewer exit while the desktop owner remains alive.
+Native and system SSH adapters put helpers in kill-on-close jobs atomically at
+process creation, suppress console windows, and keep binary stdout separate from
+diagnostics. `RUSTTY_TMUXX_SSH_CONFIG` selects an explicit native or system SSH config file
+without changing account-wide configuration. See `conformance/WINDOWS.md` for
+credential prerequisites and exact bridge-process cleanup accounting.

@@ -36,6 +36,10 @@ pub enum SystemEvent {
     Cancelled {
         request_id: u64,
     },
+    /// Structural churn exhausted the bounded automatic discovery attempts.
+    /// The transport and queued user commands remain valid. A consumer may
+    /// explicitly resume read-only bootstrap after a bounded quiet interval.
+    DiscoveryDeferred,
     Error(String),
     Exit {
         reason: Option<Vec<u8>>,
@@ -109,6 +113,16 @@ impl SystemClient {
     }
     pub fn state(&self) -> &State {
         &self.client.state
+    }
+    pub fn discovery_pending(&self) -> bool {
+        self.bootstrap_requested
+            || self.scan.is_some()
+            || !self.internal.is_empty()
+            || self.stale_attempts >= 3
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|job| !matches!(job.kind, Kind::User))
     }
     pub fn take_writes(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.writes)
@@ -323,7 +337,7 @@ impl SystemClient {
         if matches!(job.kind, Kind::Name(_) | Kind::Capture(_))
             && job.revision != self.client.state.revision()
         {
-            self.retry_bootstrap(Error::StaleDiscovery.to_string(), output);
+            self.retry_bootstrap(Error::StaleDiscovery.to_string(), true, output);
             return Ok(());
         }
         if failed
@@ -354,12 +368,26 @@ impl SystemClient {
                 .unwrap_or_default();
             self.retry_bootstrap(
                 format!("stock tmux bootstrap {command} failed: {diagnostic}"),
+                false,
                 output,
             );
             return Ok(());
         }
         let mut replies = job.replies.into_iter();
         let lines = replies.next().unwrap().0;
+        if matches!(job.kind, Kind::Discover(_))
+            && self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| scan.revision != self.client.state.revision())
+        {
+            // Lists are separate C commands. A structural event can invalidate
+            // their cross-list references before `finish`/`reconcile` gets a
+            // chance to reject the stale revision. Discard those read-only
+            // rows first; current-revision malformed records remain fatal.
+            self.retry_bootstrap(Error::StaleDiscovery.to_string(), true, output);
+            return Ok(());
+        }
         match job.kind {
             Kind::Discover(kind) => {
                 let scan = self.scan.as_mut().ok_or(Error::InvalidDiscovery)?;
@@ -391,7 +419,7 @@ impl SystemClient {
                             output.push(SystemEvent::State(self.client.state.clone()));
                         }
                         Err(Error::StaleDiscovery) => {
-                            self.retry_bootstrap(Error::StaleDiscovery.to_string(), output);
+                            self.retry_bootstrap(Error::StaleDiscovery.to_string(), true, output);
                             return Ok(());
                         }
                         Err(error) => return Err(error),
@@ -470,13 +498,17 @@ impl SystemClient {
         }
         Ok(())
     }
-    fn retry_bootstrap(&mut self, error: String, output: &mut Vec<SystemEvent>) {
+    fn retry_bootstrap(&mut self, error: String, structural: bool, output: &mut Vec<SystemEvent>) {
         self.scan = None;
         self.internal.clear();
         self.stale_attempts += 1;
         self.bootstrap_requested = self.stale_attempts < 3;
         if !self.bootstrap_requested {
-            output.push(SystemEvent::Error(error));
+            output.push(if structural {
+                SystemEvent::DiscoveryDeferred
+            } else {
+                SystemEvent::Error(error)
+            });
         }
     }
 }

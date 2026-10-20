@@ -190,12 +190,14 @@ fn continuous_graph_churn_exhausts_retries_until_explicit_bootstrap() {
         assert_eq!(
             events
                 .iter()
-                .any(|event| matches!(event, SystemEvent::Error(_))),
+                .any(|event| matches!(event, SystemEvent::DiscoveryDeferred)),
             attempt == 2,
             "{events:?}"
         );
     }
     assert!(client.take_writes().is_empty());
+    assert!(client.discovery_pending());
+    assert!(!client.state().disconnected);
     client.feed(b"%window-add @9\n");
     assert!(
         client.take_writes().is_empty(),
@@ -203,4 +205,88 @@ fn continuous_graph_churn_exhausts_retries_until_explicit_bootstrap() {
     );
     client.bootstrap().unwrap();
     assert_eq!(client.take_writes().len(), 1);
+}
+
+#[test]
+fn deferred_discovery_resumes_without_replaying_a_user_command() {
+    let mut client = SystemClient::new(b"deferred".to_vec()).unwrap();
+    client.bootstrap().unwrap();
+    for attempt in 0..3 {
+        respond(&mut client, b"$0\n", false);
+        respond(&mut client, b"$0|@0|0|1|layout|layout|*\n", false);
+        client.feed(format!("%window-add @{}\n", attempt + 1).as_bytes());
+        respond(&mut client, b"%0|@0|80|24|0|0|1\n", false);
+    }
+    let id = client
+        .queue(parse(b"set-option -g @once applied").unwrap())
+        .unwrap();
+    let writes = client.take_writes();
+    assert_eq!(writes.len(), 1);
+    let commands = parse(&writes[0]).unwrap();
+    assert_eq!(commands[0].args[0], b"set-option");
+    let marker = &commands.last().unwrap().args[2];
+    client.bootstrap().unwrap();
+    assert!(
+        client.take_writes().is_empty(),
+        "resuming discovery replayed an active user request"
+    );
+    let mut bytes = encode_command_result(
+        Guard {
+            time: 1,
+            number: 20,
+            flags: 1,
+        },
+        b"",
+        false,
+    );
+    bytes.extend(encode_command_result(
+        Guard {
+            time: 1,
+            number: 21,
+            flags: 1,
+        },
+        marker,
+        false,
+    ));
+    let events = client.feed(&bytes);
+    assert_eq!(events.iter().filter(|event| matches!(event, SystemEvent::CommandFinished { request_id, .. } if *request_id == id)).count(), 1);
+    let resumed = client.take_writes();
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(parse(&resumed[0]).unwrap()[0].args[0], b"list-sessions");
+    assert!(!client.finish().iter().any(|event| matches!(event, SystemEvent::Indeterminate { request_id } | SystemEvent::Cancelled { request_id } if *request_id == id)));
+}
+
+#[test]
+fn stale_cross_list_rows_are_discarded_before_current_snapshot_validation() {
+    for stale in [false, true] {
+        let mut client = SystemClient::new(b"crossed-lists".to_vec()).unwrap();
+        client.bootstrap().unwrap();
+        respond(&mut client, b"$0\n", false);
+        if stale {
+            client.feed(b"%window-add @1\n");
+        }
+        // A linked window observed after session creation may refer to a
+        // session absent from the already completed list-sessions response.
+        let mut events = respond(&mut client, b"$1|@1|0|1|layout|layout|*\n", false);
+        if stale {
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SystemEvent::Error(_))),
+                "{events:?}"
+            );
+            let next = client.take_writes();
+            assert_eq!(next.len(), 1);
+            assert_eq!(parse(&next[0]).unwrap()[0].args[0], b"list-sessions");
+        } else {
+            if !events
+                .iter()
+                .any(|event| matches!(event, SystemEvent::Error(_)))
+            {
+                events.extend(respond(&mut client, b"%1|@1|80|24|0|0|1\n", false));
+            }
+            assert!(events.iter().any(|event|matches!(event,SystemEvent::Error(error) if error.contains("malformed discovery"))),"current malformed snapshot was accepted: {events:?}");
+            assert!(client.take_writes().is_empty());
+        }
+    }
 }
