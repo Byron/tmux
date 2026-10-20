@@ -122,7 +122,7 @@ description = "C modifier parsing accepts arbitrary punctuation delimiters and u
 [[suites.assertions]]
 id = "difference.parser-high-bytes"
 tests = ["high_byte_preservation_is_an_explicit_reference_difference"]
-description = "Both tested outcomes of command-high-byte-preservation: C rejects the source high byte; Rust preserves it."
+description = "Target-ABI outcomes of command-high-byte-preservation: signed-char C rejects source0xff, unsigned-char C (aarch64 GNU/Linux) retains it exactly, and Rust preserves it on both."
 
 [[suites.assertions]]
 id = "difference.parser-malformed-source"

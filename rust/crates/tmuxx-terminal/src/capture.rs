@@ -38,7 +38,10 @@ impl Terminal {
             return Ok(if options.escape_sequences {
                 let mut escaped = Vec::new();
                 for &byte in pending {
-                    if (b' '..=0x7f).contains(&byte) && byte != b'\\' {
+                    // The C command compares a plain char with ' '. Its target
+                    // ABI is signed on Darwin/x86 GNU and unsigned on aarch64
+                    // GNU, where high bytes are consequently preserved.
+                    if (byte as std::ffi::c_char) >= (b' ' as std::ffi::c_char) && byte != b'\\' {
                         escaped.push(byte);
                     } else {
                         escaped.extend_from_slice(format!("\\{byte:03o}").as_bytes());

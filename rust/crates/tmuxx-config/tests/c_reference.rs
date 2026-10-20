@@ -169,11 +169,19 @@ fn high_byte_preservation_is_an_explicit_reference_difference() {
     assert_eq!(parsed[0].args[3], b"\xff");
     std::fs::write(&reference.source, source).unwrap();
     let c = reference.output([OsStr::new("source-file"), reference.source.as_os_str()]);
-    // The inspected C parser treats this signed byte as EOF; Rust keeps bytes.
-    assert!(
-        !c.status.success(),
-        "reference changed; review high-byte difference"
-    );
+    // C's lexer promotes a plain char to int. Signed-char ABIs interpret 0xff
+    // as EOF; unsigned-char ABIs (including aarch64 GNU/Linux) retain it.
+    // Assert each target's actual contract without normalizing either output.
+    if (0xff_u8 as std::ffi::c_char as i32) < 0 {
+        assert!(
+            !c.status.success(),
+            "reference changed; review signed-char high-byte difference"
+        );
+    } else {
+        assert!(c.status.success(), "unsigned-char C source rejected: {c:?}");
+        assert!(c.stderr.is_empty(), "{c:?}");
+        assert_eq!(reference.option(b"@raw"), b"\xff");
+    }
 }
 
 #[test]
