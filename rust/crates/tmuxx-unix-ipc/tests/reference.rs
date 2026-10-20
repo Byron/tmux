@@ -18,7 +18,11 @@ use tmuxx_unix_ipc::{
     run_command,
 };
 
-struct Directory(PathBuf);
+#[cfg(target_os = "linux")]
+#[path = "../../../test-support/socket_owner.rs"]
+mod socket_owner;
+
+struct Directory(PathBuf, bool);
 impl Directory {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -28,12 +32,16 @@ impl Directory {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        Self(path)
+        Self(path, false)
     }
 }
 impl Drop for Directory {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        if self.1 || std::thread::panicking() {
+            eprintln!("Preserved IPC fixture: {}", self.0.display());
+        } else {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 }
 
@@ -48,9 +56,12 @@ impl Drop for ChildGuard {
 }
 
 struct Reference {
+    #[cfg(not(target_os = "linux"))]
     binary: PathBuf,
     socket: PathBuf,
     _directory: Directory,
+    #[cfg(target_os = "linux")]
+    owner: socket_owner::SocketOwner,
 }
 impl Reference {
     fn start() -> Self {
@@ -78,17 +89,40 @@ impl Reference {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        #[cfg(target_os = "linux")]
+        let owner = socket_owner::SocketOwner::capture(&socket, &binary, None).unwrap();
         Self {
+            #[cfg(not(target_os = "linux"))]
             binary,
             socket,
+            #[cfg(target_os = "linux")]
+            owner,
             _directory: directory,
         }
+    }
+    fn assert_owner(&self) {
+        #[cfg(target_os = "linux")]
+        self.owner.check().unwrap();
     }
 }
 impl Drop for Reference {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            let cleanup_error = self.owner.terminate().err();
+            self._directory.1 =
+                cleanup_error.is_some() || self.owner.endpoint_replaced().unwrap_or(true);
+            if let Some(error) = cleanup_error {
+                eprintln!("C reference cleanup: {error}");
+                assert!(
+                    std::thread::panicking(),
+                    "C reference cleanup failed: {error}"
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
         let _ = Command::new(&self.binary)
-            .arg("-S")
+            .args(["-N", "-S"])
             .arg(&self.socket)
             .arg("kill-server")
             .output();
@@ -133,6 +167,7 @@ fn args(values: &[&[u8]]) -> Vec<Vec<u8>> {
 fn rust_command_client_against_c_server() {
     let reference = Reference::start();
     let run = |argv: &[&[u8]], input: &[u8]| {
+        reference.assert_owner();
         run_command(
             &reference.socket,
             schema(),
@@ -157,6 +192,7 @@ fn rust_command_client_against_c_server() {
 #[ignore = "requires an explicit C reference binary and schema"]
 fn rust_control_client_against_c_server() {
     let reference = Reference::start();
+    reference.assert_owner();
     let mut connection = Connection::new(
         timed(UnixStream::connect(&reference.socket).unwrap()),
         schema(),
@@ -247,7 +283,7 @@ fn c_command_client_against_rust_transport() {
     let listener = UnixListener::bind(&socket).unwrap();
     let mut child = ChildGuard(Some(
         Command::new(binary())
-            .arg("-S")
+            .args(["-N", "-S"])
             .arg(&socket)
             .arg("list-sessions")
             .stdin(Stdio::null())
@@ -307,7 +343,7 @@ fn c_control_client_against_rust_transport() {
     let listener = UnixListener::bind(&socket).unwrap();
     let mut child = ChildGuard(Some(
         Command::new(binary())
-            .arg("-S")
+            .args(["-N", "-S"])
             .arg(&socket)
             .args(["-C", "attach-session"])
             .stdin(Stdio::piped())

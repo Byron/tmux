@@ -566,6 +566,7 @@ dependencies = [
 name = "tmuxx-client"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "tmuxx-command",
  "tmuxx-protocol",
 ]

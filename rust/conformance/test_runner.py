@@ -120,6 +120,34 @@ class InventoryTests(unittest.TestCase):
                 with patch.object(runner.subprocess, "check_output", return_value=b"new-base\n"):
                     self.assertNotEqual(updated, runner.implementation_fingerprint())
 
+    def test_shared_test_support_additions_changes_and_removal_invalidate_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            here = root / "rust/conformance"
+            integration = root / "rust/integration/rustty"
+            support = root / "rust/test-support"
+            external = root / "external"
+            for path in (here, integration, support, external):
+                path.mkdir(parents=True)
+            for path in (root / "rust/Cargo.toml", root / "rust/Cargo.lock", here / "scope.json",
+                         integration / "manifest.json", integration / "rustty.patch",
+                         external / "Cargo.toml", external / "Cargo.lock"):
+                path.write_text("fixture")
+            with patch.object(runner, "ROOT", root), patch.object(runner, "HERE", here), \
+                 patch.object(runner, "SCOPE", here / "scope.json"), \
+                 patch.object(runner, "RUSTTY_INTEGRATION", integration), \
+                 patch.object(runner, "rustty_root", return_value=external), \
+                 patch.object(runner.subprocess, "check_output", return_value=b"base\n"):
+                initial = runner.implementation_fingerprint()
+                helper = support / "socket_owner.rs"
+                helper.write_text("fn verify_owner() {}\n")
+                added = runner.implementation_fingerprint()
+                self.assertNotEqual(initial, added)
+                helper.write_text("fn verify_owner() { panic!(); }\n")
+                self.assertNotEqual(added, runner.implementation_fingerprint())
+                helper.unlink()
+                self.assertEqual(initial, runner.implementation_fingerprint())
+
     def test_rustty_suites_require_actual_source_hashes_and_pinned_base(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "rustty"

@@ -9,12 +9,20 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use tmuxx_protocol::{Decoder, Event};
 
+#[cfg(target_os = "linux")]
+#[path = "../../../test-support/socket_owner.rs"]
+mod socket_owner;
+
 struct Fixture {
     directory: PathBuf,
     c: PathBuf,
     c_socket: PathBuf,
     rust_socket: PathBuf,
     host: Option<tmuxx_runtime::ServerHandle>,
+    #[cfg(target_os = "linux")]
+    c_owner: Option<socket_owner::SocketOwner>,
+    #[cfg(target_os = "linux")]
+    rust_owner: socket_owner::SocketOwner,
 }
 impl Fixture {
     fn start() -> Self {
@@ -31,14 +39,27 @@ impl Fixture {
         let mut options = tmuxx_runtime::Options::new(directory.join("native"));
         options.tmux_endpoint = Some(rust_socket.clone());
         let host = tmuxx_runtime::start(options).unwrap();
-        let fixture = Self {
+        #[cfg(target_os = "linux")]
+        let rust_owner = socket_owner::SocketOwner::capture(
+            &rust_socket,
+            &std::env::current_exe().unwrap(),
+            Some(std::process::id()),
+        )
+        .unwrap();
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut fixture = Self {
             directory,
             c,
             c_socket,
             rust_socket,
             host: Some(host),
+            #[cfg(target_os = "linux")]
+            c_owner: None,
+            #[cfg(target_os = "linux")]
+            rust_owner,
         };
-        let created = fixture.command(
+        // This is the only matrix invocation allowed to create a C daemon.
+        let created = launch(
             &fixture.c,
             &fixture.c_socket,
             &[
@@ -53,8 +74,15 @@ impl Fixture {
                 "sleep 30",
             ],
             None,
+            false,
         );
         assert!(created.status.success(), "{:?}", created);
+        #[cfg(target_os = "linux")]
+        {
+            fixture.c_owner = Some(
+                socket_owner::SocketOwner::capture(&fixture.c_socket, &fixture.c, None).unwrap(),
+            );
+        }
         let created = fixture.command(
             Path::new(env!("CARGO_BIN_EXE_tmuxx")),
             &fixture.rust_socket,
@@ -74,37 +102,99 @@ impl Fixture {
         assert!(created.status.success(), "{:?}", created);
         fixture
     }
-    fn command(&self, client: &Path, socket: &Path, args: &[&str], input: Option<&[u8]>) -> Output {
-        let mut child = Command::new(client)
-            .args(["-f", "/dev/null", "-S"])
-            .arg(socket)
-            .args(args)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        if let Some(input) = input {
-            child.stdin.take().unwrap().write_all(input).unwrap();
+    fn assert_owner(&self, socket: &Path) {
+        #[cfg(target_os = "linux")]
+        if socket == self.c_socket {
+            self.c_owner
+                .as_ref()
+                .expect("C bootstrap must complete first")
+                .check()
+                .unwrap();
+        } else if socket == self.rust_socket {
+            self.rust_owner.check().unwrap();
+        } else {
+            panic!("unrecognized fixture endpoint {}", socket.display());
         }
-        wait(child)
+        #[cfg(not(target_os = "linux"))]
+        let _ = socket;
+    }
+    fn command(&self, client: &Path, socket: &Path, args: &[&str], input: Option<&[u8]>) -> Output {
+        self.assert_owner(socket);
+        launch(client, socket, args, input, true)
+    }
+    fn control(&self, client: &Path, socket: &Path) -> ControlStream {
+        self.assert_owner(socket);
+        ControlStream::start(client, socket)
     }
 }
+fn launch(
+    client: &Path,
+    socket: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    no_start: bool,
+) -> Output {
+    let mut command = Command::new(client);
+    if no_start {
+        command.arg("-N");
+    }
+    let mut child = command
+        .args(["-f", "/dev/null", "-S"])
+        .arg(socket)
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(input) = input {
+        child.stdin.take().unwrap().write_all(input).unwrap();
+    }
+    wait(child)
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        let cleanup_error = self
+            .c_owner
+            .as_ref()
+            .and_then(|owner| owner.terminate().err());
+        #[cfg(not(target_os = "linux"))]
         let _ = Command::new(&self.c)
-            .arg("-S")
+            .args(["-N", "-S"])
             .arg(&self.c_socket)
             .arg("kill-server")
             .output();
         if let Some(host) = self.host.take() {
             let _ = host.shutdown();
         }
-        let _ = fs::remove_dir_all(&self.directory);
+        #[cfg(target_os = "linux")]
+        let preserve = cleanup_error.is_some()
+            || self
+                .c_owner
+                .as_ref()
+                .is_some_and(|owner| owner.endpoint_replaced().unwrap_or(true))
+            || self.rust_owner.endpoint_replaced().unwrap_or(true);
+        #[cfg(not(target_os = "linux"))]
+        let preserve = false;
+        if preserve || std::thread::panicking() {
+            eprintln!("Preserved matrix fixture: {}", self.directory.display());
+        } else {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(error) = cleanup_error {
+            eprintln!("C fixture cleanup: {error}");
+            assert!(
+                std::thread::panicking(),
+                "C fixture cleanup failed: {error}"
+            );
+        }
     }
 }
 fn wait(mut child: Child) -> Output {
@@ -125,9 +215,10 @@ fn wait(mut child: Child) -> Output {
 #[test]
 #[ignore = "requires an explicit C reference and real Unix sockets/PTYs"]
 fn all_four_command_control_pairings() {
-    let fixture = Fixture::start();
+    let mut fixture = Fixture::start();
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             let run = |args: &[&str], input| fixture.command(client, socket, args, input);
             let result = run(&["display-message", "-p", "wire \\ bytes"], None);
             assert!(result.status.success(), "{client:?} {socket:?}: {result:?}");
@@ -198,6 +289,7 @@ fn all_four_command_control_pairings() {
             );
 
             let mut child = Command::new(client)
+                .arg("-N")
                 .arg("-S")
                 .arg(socket)
                 .args(["-C", "attach-session", "-t", "test"])
@@ -259,6 +351,57 @@ fn all_four_command_control_pairings() {
             origin_context(&fixture, client, socket);
         }
     }
+    // A missing Rust endpoint must fail closed even for commands that normally
+    // start a C daemon. This catches accidental C/C conversion of the pairing.
+    fixture.host.take().unwrap().shutdown().unwrap();
+    for args in [
+        vec!["new-session", "-d", "-s", "fallback", "sleep 30"],
+        vec!["-C", "attach-session", "-t", "test"],
+    ] {
+        let failed = launch(&fixture.c, &fixture.rust_socket, &args, None, true);
+        assert!(
+            !failed.status.success(),
+            "C client unexpectedly replaced missing Rust owner: {failed:?}"
+        );
+        assert!(
+            !fixture.rust_socket.exists(),
+            "failed C client created a replacement endpoint"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Cleanup is pinned to the original daemon, even after a new owner
+        // deliberately binds exactly the same endpoint.
+        let previous = fixture.c_owner.take().unwrap();
+        fs::rename(&fixture.c_socket, fixture.directory.join("previous-c")).unwrap();
+        let result = launch(
+            &fixture.c,
+            &fixture.c_socket,
+            &["new-session", "-d", "-s", "replacement", "sleep 30"],
+            None,
+            false,
+        );
+        assert!(result.status.success(), "{result:?}");
+        fixture.c_owner =
+            Some(socket_owner::SocketOwner::capture(&fixture.c_socket, &fixture.c, None).unwrap());
+        let replacement = fixture.c_owner.as_ref().unwrap();
+        assert!(!previous.exited().unwrap());
+        assert!(previous.check().is_err());
+        assert!(previous.endpoint_replaced().unwrap());
+        previous.terminate().unwrap();
+        assert!(previous.exited().unwrap());
+        previous.terminate().unwrap();
+        replacement.check().unwrap();
+        let result = launch(
+            &fixture.c,
+            &fixture.c_socket,
+            &["display-message", "-p", "replacement-alive"],
+            None,
+            true,
+        );
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(result.stdout, b"replacement-alive\n");
+    }
 }
 
 #[test]
@@ -312,6 +455,7 @@ fn double_control(client: &Path, socket: &Path) {
         })
         .unwrap();
     let mut command = CommandBuilder::new(client);
+    command.arg("-N");
     command.arg("-S");
     command.arg(socket);
     command.args(["-CC", "attach-session", "-t", "test"]);
@@ -373,6 +517,7 @@ fn double_control(client: &Path, socket: &Path) {
 
 fn origin_context(fixture: &Fixture, client: &Path, socket: &Path) {
     let result = Command::new(client)
+        .arg("-N")
         .arg("-S")
         .arg(socket)
         .args([
@@ -428,12 +573,12 @@ struct ControlStream {
 impl ControlStream {
     fn start(client: &Path, socket: &Path) -> Self {
         let mut command = Command::new(client);
-        command.arg("-S").arg(socket);
+        command.arg("-N").arg("-S").arg(socket);
         Self::spawn(command)
     }
     fn native(socket: &Path) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tmuxx"));
-        command.arg("--native-endpoint").arg(socket);
+        command.arg("-N").arg("--native-endpoint").arg(socket);
         Self::spawn(command)
     }
     fn spawn(mut command: Command) -> Self {
@@ -565,6 +710,7 @@ fn process_lifetimes(output_time: bool) {
     let fixture = Fixture::start();
     let mut observations = Vec::new();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         let run = |args: &[&str]| {
             let result = fixture.command(&fixture.c, socket, args, None);
             assert!(result.status.success(), "{args:?}: {result:?}");
@@ -706,8 +852,8 @@ fn control_color_reports_query_precedence_and_lifetime_match_c() {
         };
         spawn();
         let mut output = vec![query()];
-        let mut first = ControlStream::start(&fixture.c, socket);
-        let second = ControlStream::start(&fixture.c, socket);
+        let mut first = fixture.control(&fixture.c, socket);
+        let second = fixture.control(&fixture.c, socket);
         let report = |client: &mut ControlStream, channel: u8, value: &str| {
             let argument = tmuxx_command::display_argument(
                 format!("%0:\x1b]{channel};{value}\x07").as_bytes(),
@@ -739,7 +885,7 @@ fn control_color_reports_query_precedence_and_lifetime_match_c() {
         output.push(query());
         drop(second);
         output.push(query());
-        let third = ControlStream::start(&fixture.c, socket);
+        let third = fixture.control(&fixture.c, socket);
         output.push(query());
         spawn();
         output.push(query());
@@ -758,9 +904,10 @@ fn window_creation_policy_aggressive_resize_and_limits_match_c() {
     let fixture = Fixture::start();
     let mut observations = Vec::new();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
-        let mut first = ControlStream::start(&fixture.c, socket);
+        fixture.assert_owner(socket);
+        let mut first = fixture.control(&fixture.c, socket);
         first.ok("refresh-client -C 100,40");
-        let mut second = ControlStream::start(&fixture.c, socket);
+        let mut second = fixture.control(&fixture.c, socket);
         second.ok("refresh-client -C 60,20");
         let mut output = Vec::new();
         output.push(first.command("display-message -p -t @0 '#{window_width}x#{window_height}'"));
@@ -814,7 +961,7 @@ fn window_creation_policy_aggressive_resize_and_limits_match_c() {
         output.push(first.command("display-message -p -t @0 '#{window_width}x#{window_height}'"));
         first.ok("set-option -w -t @1 window-size smallest");
         {
-            let mut third = ControlStream::start(&fixture.c, socket);
+            let mut third = fixture.control(&fixture.c, socket);
             output
                 .push(first.command("display-message -p -t @1 '#{window_width}x#{window_height}'"));
             third.ok("refresh-client -C @0:");
@@ -877,6 +1024,7 @@ fn control_subscriptions_flags_sizes_and_flow_match_c() {
         .starts_with(b"3.7");
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             let admin = |args: &[&str]| {
                 let result = fixture.command(client, socket, args, None);
                 assert!(
@@ -886,7 +1034,7 @@ fn control_subscriptions_flags_sizes_and_flow_match_c() {
                 result.stdout
             };
             admin(&["set-option", "-t", "test", "@control-sub", "first"]);
-            let mut control = ControlStream::start(client, socket);
+            let mut control = fixture.control(client, socket);
             control.ok("refresh-client -B 'sub::#{@control-sub}' -B 'pane:%*:#{pane_id}'");
             let mut subscriptions = Vec::new();
             for _ in 0..2 {
@@ -1015,7 +1163,7 @@ fn control_subscriptions_flags_sizes_and_flow_match_c() {
             assert_eq!(control.command("set-option @forbidden yes"), denied);
             control.ok("detach-client");
             drop(control);
-            let mut control = ControlStream::start(client, socket);
+            let mut control = fixture.control(client, socket);
             control.ok("refresh-client -f wait-exit");
             control.ok("detach-client");
             control.notification(|n| matches!(n, Notification::Exit { .. }));
@@ -1348,6 +1496,7 @@ fn live_stdin_streams_before_eof_and_cancels_with_c() {
         .any(|name| name == b"new-pane\n");
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             let run = |args: &[&str]| {
                 let output = fixture.command(client, socket, args, None);
                 assert!(
@@ -1371,6 +1520,7 @@ fn live_stdin_streams_before_eof_and_cancels_with_c() {
                     "set-option -g @stdin-hook done",
                 ]);
                 let mut child = Command::new(client)
+                    .arg("-N")
                     .args(["-f", "/dev/null", "-S"])
                     .arg(socket)
                     .args([
@@ -1460,6 +1610,7 @@ fn live_stdin_streams_before_eof_and_cancels_with_c() {
             let display = run(&["split-window", "-dP", "-F", "#{pane_id}", "-t", base, ""]);
             let display = std::str::from_utf8(&display).unwrap().trim();
             let mut child = Command::new(client)
+                .arg("-N")
                 .args(["-f", "/dev/null", "-S"])
                 .arg(socket)
                 .args([
@@ -1579,6 +1730,7 @@ fn input_shutdown_and_pane_wait_follow_c() {
                     "{client:?} {socket:?}: {signalled:?}"
                 );
                 let mut child = Command::new(client)
+                    .arg("-N")
                     .args(["-f", "/dev/null", "-S"])
                     .arg(socket)
                     .args([
@@ -1638,6 +1790,7 @@ fn input_shutdown_and_pane_wait_follow_c() {
             assert!(empty.status.success());
             let pane = std::str::from_utf8(&empty.stdout).unwrap().trim();
             let mut child = Command::new(client)
+                .arg("-N")
                 .args(["-f", "/dev/null", "-S"])
                 .arg(socket)
                 .args(["display-message", "-I", "-t", pane])
@@ -1680,6 +1833,7 @@ fn native_cli_streams_input_before_eof() {
     let client = Path::new(env!("CARGO_BIN_EXE_tmuxx"));
     let run = |args: &[&str]| {
         let output = Command::new(client)
+            .arg("-N")
             .arg("--native-endpoint")
             .arg(&endpoint)
             .args(args)
@@ -1692,6 +1846,7 @@ fn native_cli_streams_input_before_eof() {
     let pane = run(&["split-window", "-dP", "-F", "#{pane_id}", ""]);
     let pane = std::str::from_utf8(&pane).unwrap().trim();
     let mut child = Command::new(client)
+        .arg("-N")
         .arg("--native-endpoint")
         .arg(&endpoint)
         .args([
@@ -1730,6 +1885,7 @@ fn retained_key_panes_and_failed_key_policy_match_c() {
     let fixture = Fixture::start();
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             for name in ["split-window", "new-pane"] {
                 let output = fixture.command(
                     client,
@@ -1817,6 +1973,7 @@ fn buffer_files_expand_in_queue_and_preserve_validation_and_io_errors() {
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         let mut observed = Vec::new();
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             let run = |args: &[&str]| fixture.command(client, socket, args, None);
             for args in [
                 vec![
@@ -1882,9 +2039,11 @@ fn cli_preserves_non_nul_argv_command_diagnostics_status_and_features() {
     use std::os::unix::ffi::OsStrExt;
     let fixture = Fixture::start();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         let bytes: Vec<u8> = (1..=255).collect();
         for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
             let result = Command::new(client)
+                .arg("-N")
                 .args(["-N", "-S"])
                 .arg(socket)
                 .args(["display", "-pl"])
@@ -1919,6 +2078,7 @@ fn cli_preserves_non_nul_argv_command_diagnostics_status_and_features() {
             let mut values = Vec::new();
             for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
                 let mut child = Command::new(client)
+                    .arg("-N")
                     .args(&features)
                     .args(["-C", "-S"])
                     .arg(socket)
@@ -1966,6 +2126,7 @@ fn cli_preserves_non_nul_argv_command_diagnostics_status_and_features() {
 fn display_all_formats_enumerates_present_callbacks_and_native_trace_is_bounded() {
     let fixture = Fixture::start();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         assert!(
             fixture
                 .command(
@@ -2076,6 +2237,7 @@ fn buffer_formats_samples_filters_and_creation_times_match_c() {
     for sample in samples {
         let mut observations = Vec::new();
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             let output = fixture.command(&fixture.c, socket, &["load-buffer", "-"], Some(&sample));
             assert!(output.status.success(), "{output:?}");
             let mut results = Vec::new();
@@ -2103,6 +2265,7 @@ fn buffer_formats_samples_filters_and_creation_times_match_c() {
         assert_eq!(observations[0], observations[1], "sample {sample:?}");
     }
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         let run = |args: &[&str]| fixture.command(&fixture.c, socket, args, None);
         let query = |name: &str| {
             let result = run(&[
@@ -2147,6 +2310,7 @@ fn buffer_formats_samples_filters_and_creation_times_match_c() {
 fn display_message_uses_control_notification_and_print_flag_like_c() {
     let fixture = Fixture::start();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         let ordinary = fixture.command(
             &fixture.c,
             socket,
@@ -2157,6 +2321,7 @@ fn display_message_uses_control_notification_and_print_flag_like_c() {
         assert!(ordinary.stdout.is_empty());
         assert!(ordinary.stderr.is_empty());
         let mut child = Command::new(&fixture.c)
+            .arg("-N")
             .args(["-C", "-S"])
             .arg(socket)
             .args(["attach-session", "-t", "test"])
@@ -2442,6 +2607,7 @@ fn same_user_acl_lists_owner_and_rejects_changes_without_mutation() {
     );
     assert_eq!(list(&fixture.c_socket).stdout, c.stdout);
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         let output = fixture.command(&fixture.c, socket, &["server-access"], None);
         assert!(!output.status.success());
         assert_eq!(output.stderr, b"missing user or group argument\n");
@@ -2453,6 +2619,7 @@ fn same_user_acl_lists_owner_and_rejects_changes_without_mutation() {
 fn scheduler_command_formats_are_canonical_and_do_not_leak_to_nested_items() {
     let fixture = Fixture::start();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         let run = |args: &[&str], input| fixture.command(&fixture.c, socket, args, input);
         for (args, expected) in [
             (
@@ -2511,7 +2678,8 @@ fn control_buffer_notifications_cover_replacement_eviction_capture_load_and_past
     let fixture = Fixture::start();
     let mut observations = Vec::new();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
-        let mut control = ControlStream::start(&fixture.c, socket);
+        fixture.assert_owner(socket);
+        let mut control = fixture.control(&fixture.c, socket);
         let mut batches = Vec::new();
         for (args, stdin) in [
             (vec!["capture-pane", "-P"], None),
@@ -2599,6 +2767,7 @@ fn buffer_names_creation_lookup_rename_and_empty_input_match_c() {
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         let mut observations = Vec::new();
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             let mut outputs = Vec::new();
             for args in [
                 vec!["capture-pane", "-P"],
@@ -2639,6 +2808,7 @@ fn invalid_buffer_names_are_rejected_with_safe_native_diagnostic_difference() {
     let fixture = Fixture::start();
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             assert!(
                 fixture
                     .command(client, socket, &["set-buffer", "-b", "kept", "old"], None)
@@ -2682,6 +2852,7 @@ fn invalid_buffer_names_are_rejected_with_safe_native_diagnostic_difference() {
                 (vec![b"save-buffer", b"-b", b"\xff", b"-"], b"no buffer "),
             ] {
                 let output = Command::new(client)
+                    .arg("-N")
                     .args(["-u", "-f", "/dev/null", "-S"])
                     .arg(socket)
                     .args(args.iter().map(|arg| std::ffi::OsStr::from_bytes(arg)))
@@ -2726,6 +2897,7 @@ fn invalid_buffer_names_are_rejected_with_safe_native_diagnostic_difference() {
                     vec![b"load-buffer", b"-b", name, b"-"],
                 ] {
                     let mut child = Command::new(client)
+                        .arg("-N")
                         .args(["-u", "-f", "/dev/null", "-S"])
                         .arg(socket)
                         .args(args.iter().map(|arg| std::ffi::OsStr::from_bytes(arg)))
@@ -2762,6 +2934,7 @@ fn invalid_buffer_names_are_rejected_with_safe_native_diagnostic_difference() {
                 }
                 // An empty read does not validate the unused name.
                 let output = Command::new(client)
+                    .arg("-N")
                     .args(["-u", "-f", "/dev/null", "-S"])
                     .arg(socket)
                     .args([
@@ -2825,6 +2998,7 @@ fn clap_driver_help_and_version_are_explicit_implementation_differences() {
 fn server_diagnostics_expose_native_logs_jobs_limits_and_c_empty_tty_state() {
     let fixture = Fixture::start();
     for socket in [&fixture.c_socket, &fixture.rust_socket] {
+        fixture.assert_owner(socket);
         let run = |args: &[&str]| fixture.command(&fixture.c, socket, args, None);
         for flags in ["-T", "-J", "-JT"] {
             let result = run(&["show-messages", flags]);
@@ -3007,6 +3181,7 @@ fn load_buffer_limit_is_explicit_preserves_buffers_and_recovers_file_streams() {
     );
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
         for socket in [&fixture.c_socket, &fixture.rust_socket] {
+            fixture.assert_owner(socket);
             let run = |args: &[&str]| fixture.command(client, socket, args, None);
             assert!(
                 run(&["load-buffer", "-b", "boundary", boundary.to_str().unwrap()])
@@ -3100,7 +3275,7 @@ fn load_buffer_limit_is_explicit_preserves_buffers_and_recovers_file_streams() {
     }
     // WAIT closes its guard first; a later file error is unframed, as in C.
     for client in [&fixture.c, Path::new(env!("CARGO_BIN_EXE_tmuxx"))] {
-        let mut control = ControlStream::start(client, &fixture.rust_socket);
+        let mut control = fixture.control(client, &fixture.rust_socket);
         writeln!(
             control.child.stdin.as_mut().unwrap(),
             "load-buffer -b kept {}\ndisplay-message -p CONTROL-RECOVERED",
@@ -3137,11 +3312,11 @@ fn load_buffer_limit_is_explicit_preserves_buffers_and_recovers_file_streams() {
 fn native_and_unix_control_preserve_c_command_guards_blocks_and_file_callbacks() {
     for native in [false, true] {
         let fixture = Fixture::start();
-        let mut c = ControlStream::start(&fixture.c, &fixture.c_socket);
+        let mut c = fixture.control(&fixture.c, &fixture.c_socket);
         let mut rust = if native {
             ControlStream::native(&fixture.directory.join("native"))
         } else {
-            ControlStream::start(Path::new(env!("CARGO_BIN_EXE_tmuxx")), &fixture.rust_socket)
+            fixture.control(Path::new(env!("CARGO_BIN_EXE_tmuxx")), &fixture.rust_socket)
         };
         c.records("display -p ready");
         rust.records("display -p ready");

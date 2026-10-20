@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 use tmuxx_client::system::{SystemClient, SystemEvent};
 use tmuxx_command::Command as TmuxCommand;
 
+#[cfg(target_os = "linux")]
+#[path = "../../../test-support/socket_owner.rs"]
+mod socket_owner;
+
 struct Fixture {
     directory: PathBuf,
     tmux: PathBuf,
@@ -20,6 +24,8 @@ struct Fixture {
     port: u16,
     user: String,
     daemon: Option<Child>,
+    #[cfg(target_os = "linux")]
+    owner: Option<socket_owner::SocketOwner>,
 }
 impl Fixture {
     fn start() -> Self {
@@ -49,6 +55,8 @@ impl Fixture {
             port,
             user,
             daemon: None,
+            #[cfg(target_os = "linux")]
+            owner: None,
         };
         for name in ["host", "client"] {
             let result = Command::new(
@@ -102,12 +110,18 @@ impl Fixture {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
-        let result = fixture.run(&["new-session", "-d", "-s", "test", "-x", "80", "-y", "24", "/bin/sh", "-c", "printf 'READY\\n'; while IFS= read -r value; do printf '\\001\\377:%s\\n' \"$value\"; done"]);
+        let result = fixture.run_unchecked(&["new-session", "-d", "-s", "test", "-x", "80", "-y", "24", "/bin/sh", "-c", "printf 'READY\\n'; while IFS= read -r value; do printf '\\001\\377:%s\\n' \"$value\"; done"], false);
         assert!(
             result.status.success(),
             "remote tmux start: {}",
             String::from_utf8_lossy(&result.stderr)
         );
+        #[cfg(target_os = "linux")]
+        {
+            fixture.owner = Some(
+                socket_owner::SocketOwner::capture(&fixture.socket, &fixture.tmux, None).unwrap(),
+            );
+        }
         fixture
     }
     fn ssh_command(&self, command: &str) -> Command {
@@ -137,7 +151,7 @@ impl Fixture {
             .arg(command);
         ssh
     }
-    fn command_text(&self, args: &[&str]) -> String {
+    fn command_text(&self, args: &[&str], no_start: bool) -> String {
         let mut words = vec![
             self.tmux.to_str().unwrap(),
             "-f",
@@ -145,21 +159,44 @@ impl Fixture {
             "-S",
             self.socket.to_str().unwrap(),
         ];
+        if no_start {
+            words.push("-N");
+        }
         words.extend_from_slice(args);
         format!(
             "exec {}",
             words.into_iter().map(quote).collect::<Vec<_>>().join(" ")
         )
     }
+    fn assert_owner(&self) {
+        #[cfg(target_os = "linux")]
+        self.owner
+            .as_ref()
+            .expect("SSH C bootstrap must finish first")
+            .check()
+            .unwrap();
+    }
+    fn run_unchecked(&self, args: &[&str], no_start: bool) -> Output {
+        self.ssh_command(&self.command_text(args, no_start))
+            .output()
+            .unwrap()
+    }
     fn run(&self, args: &[&str]) -> Output {
-        self.ssh_command(&self.command_text(args)).output().unwrap()
+        self.assert_owner();
+        self.run_unchecked(args, true)
     }
     fn connect(&self, nonce: &[u8]) -> Remote {
+        self.assert_owner();
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let stderr_path = self.directory.join(format!(
+            "control-{}.stderr",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let mut child = self
-            .ssh_command(&self.command_text(&["-C", "attach-session", "-t", "test"]))
+            .ssh_command(&self.command_text(&["-C", "attach-session", "-t", "test"], true))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(fs::File::create(&stderr_path).unwrap())
             .spawn()
             .unwrap();
         let input = child.stdin.take().unwrap();
@@ -184,13 +221,20 @@ impl Fixture {
             reader: Some(reader),
             rx,
             model,
+            stderr_path,
         }
     }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        let cleanup_error = self
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.terminate().err());
+        #[cfg(not(target_os = "linux"))]
         let _ = Command::new(&self.tmux)
-            .arg("-S")
+            .args(["-N", "-S"])
             .arg(&self.socket)
             .arg("kill-server")
             .output();
@@ -198,7 +242,27 @@ impl Drop for Fixture {
             let _ = daemon.kill();
             let _ = daemon.wait();
         }
-        let _ = fs::remove_dir_all(&self.directory);
+        #[cfg(target_os = "linux")]
+        let preserve = cleanup_error.is_some()
+            || self
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.endpoint_replaced().unwrap_or(true));
+        #[cfg(not(target_os = "linux"))]
+        let preserve = false;
+        if preserve || std::thread::panicking() {
+            eprintln!("Preserved SSH transcripts: {}", self.directory.display());
+        } else {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(error) = cleanup_error {
+            eprintln!("SSH C fixture cleanup: {error}");
+            assert!(
+                std::thread::panicking(),
+                "SSH C fixture cleanup failed: {error}"
+            );
+        }
     }
 }
 fn quote(value: &str) -> String {
@@ -211,6 +275,7 @@ struct Remote {
     reader: Option<JoinHandle<()>>,
     rx: Receiver<Vec<u8>>,
     model: SystemClient,
+    stderr_path: PathBuf,
 }
 impl Remote {
     fn write_pending(&mut self) {
@@ -226,7 +291,12 @@ impl Remote {
             let bytes = self
                 .rx
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .expect("SSH control response timed out/disconnected");
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "SSH control response timed out/disconnected: {error}; stderr: {}",
+                        String::from_utf8_lossy(&fs::read(&self.stderr_path).unwrap_or_default())
+                    )
+                });
             let mut found = false;
             // Exercise framing independently of SSH's actual packet boundaries.
             for chunk in bytes.chunks(7) {
@@ -349,4 +419,20 @@ fn ssh_stock_tmux_discovery_bytes_reconnect_and_ambiguous_mutation() {
     );
     assert_eq!(second.model.state().panes.len(), 2);
     second.close();
+    fixture.run(&["kill-server"]);
+    for args in [
+        vec!["new-session", "-d", "-s", "fallback", "sleep 30"],
+        vec!["-C", "attach-session", "-t", "test"],
+    ] {
+        let failed = fixture.run_unchecked(&args, true);
+        assert!(
+            !failed.status.success(),
+            "SSH client unexpectedly started replacement server: {failed:?}"
+        );
+        // C may leave a stale socket pathname after exit. No live replacement
+        // may appear, and Linux additionally checks the pinned socket inode.
+        assert!(std::os::unix::net::UnixStream::connect(&fixture.socket).is_err());
+        #[cfg(target_os = "linux")]
+        assert!(!fixture.owner.as_ref().unwrap().endpoint_replaced().unwrap());
+    }
 }

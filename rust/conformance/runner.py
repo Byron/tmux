@@ -69,6 +69,7 @@ def rustty_identity():
 
 def implementation_fingerprint():
     paths = list((ROOT / "rust/crates").rglob("*.rs"))
+    paths += list((ROOT / "rust/test-support").rglob("*.rs"))
     paths += list((ROOT / "rust/crates").rglob("Cargo.toml"))
     paths += [path for path in (ROOT / "rust/vendor").rglob("*") if path.is_file() and not {"target", ".git"}.intersection(path.parts)]
     paths += [ROOT / "rust/Cargo.toml", ROOT / "rust/Cargo.lock", SCOPE]

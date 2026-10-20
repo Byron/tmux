@@ -9,3 +9,6 @@ description = "Transport-independent tmux command tracking and session reconcili
 [dependencies]
 tmuxx-protocol = { path = "../tmuxx-protocol" }
 tmuxx-command = { path = "../tmuxx-command" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true
