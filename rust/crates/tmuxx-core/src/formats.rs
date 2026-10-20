@@ -71,7 +71,16 @@ impl Engine {
                     }
                 });
             }
-            self.format_value(&text(key), sid, wid, pid, context)
+            // OSC 7 is a byte payload. Keep it exact when a format is reused as
+            // a cwd; the native path admission boundary can then reject it.
+            if key == b"pane_path" {
+                return self
+                    .panes
+                    .get(&pid?)
+                    .map(|pane| pane.terminal.cwd().to_vec());
+            }
+            let key = std::str::from_utf8(key).ok()?;
+            self.format_value(key, sid, wid, pid, context)
                 .map(String::into_bytes)
         };
         let result = if time {

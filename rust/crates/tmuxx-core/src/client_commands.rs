@@ -26,9 +26,18 @@ impl Engine {
             .get(b'c')
             .map(|value| {
                 self.expand(value, Some(sid), Some(wid), Some(pane), ctx)
-                    .map(|value| text(&value))
+                    .and_then(|value| admission::path(&value))
             })
             .transpose()?;
+        let becomes_readonly = readonly
+            || a.has(b'r')
+            || a.get(b'f')
+                .is_some_and(|flags| flags.split(|b| *b == b',').any(|flag| flag == b"read-only"));
+        let updates = if !a.has(b'E') && !becomes_readonly {
+            self.prepare_environment_update(Some(sid), &ctx.environment)?
+        } else {
+            Vec::new()
+        };
         if let Some(cwd) = cwd {
             self.sessions.get_mut(&sid).unwrap().cwd = Some(cwd);
         }
@@ -42,9 +51,7 @@ impl Engine {
         {
             client_flag(ctx, "read-only", true);
         }
-        if !a.has(b'E') && !ctx.client_flags.split(',').any(|flag| flag == "read-only") {
-            self.update_environment(sid, &ctx.environment);
-        }
+        self.update_environment(sid, updates);
         // attach records the previous session even when it is already current.
         ctx.last_session = ctx.session;
         let mut out = self.select_client_destination(sid, index, wid, pane, false, ctx);
@@ -109,14 +116,18 @@ impl Engine {
         if readonly && (self.sessions[&sid].active != index || self.windows[&wid].active != pane) {
             return Err("client is read-only".into());
         }
+        let becomes_readonly = if a.has(b'r') { !readonly } else { readonly };
+        let updates = if !a.has(b'E') && !becomes_readonly {
+            self.prepare_environment_update(Some(sid), &ctx.environment)?
+        } else {
+            Vec::new()
+        };
         if a.has(b'r') {
             client_flag(ctx, "read-only", !readonly);
             client_flag(ctx, "ignore-size", !readonly);
             ctx.ignore_size = !readonly;
         }
-        if !a.has(b'E') && !ctx.client_flags.split(',').any(|flag| flag == "read-only") {
-            self.update_environment(sid, &ctx.environment);
-        }
+        self.update_environment(sid, updates);
         Ok(self.select_client_destination(sid, index, wid, pane, a.has(b'Z'), ctx))
     }
 

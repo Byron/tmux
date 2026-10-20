@@ -9,15 +9,16 @@ fn unique<'a>(
     let raw = pattern.strip_prefix('=').unwrap_or(pattern);
     let names: Vec<_> = names.collect();
     for mode in 0..if exact { 1 } else { 3 } {
-        let matches: Vec<_> = names
-            .iter()
-            .filter(|(_, name)| match mode {
+        let mut matches = Vec::new();
+        for (id, name) in &names {
+            if match mode {
                 0 => *name == raw,
                 1 => name.starts_with(raw),
-                _ => tmuxx_format::glob_match(raw.as_bytes(), name.as_bytes()).unwrap_or(false),
-            })
-            .map(|(id, _)| *id)
-            .collect();
+                _ => tmuxx_format::glob_match(raw.as_bytes(), name.as_bytes())?,
+            } {
+                matches.push(*id);
+            }
+        }
         if matches.len() == 1 {
             return Ok(matches[0]);
         }

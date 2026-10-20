@@ -125,11 +125,11 @@ impl Engine {
             .get(b'c')
             .map(|cwd| self.expand(cwd, Some(sid), Some(wid), Some(id), ctx))
             .transpose()?
-            .map(|cwd| String::from_utf8(cwd).map_err(|_| "invalid working directory"))
+            .map(|cwd| admission::path(&cwd))
             .transpose()?
             .map(|cwd| {
                 if std::path::Path::new(&cwd).is_absolute() {
-                    cwd
+                    Ok(cwd)
                 } else {
                     std::path::Path::new(
                         ctx.cwd
@@ -138,10 +138,12 @@ impl Engine {
                             .unwrap_or("/"),
                     )
                     .join(cwd)
-                    .to_string_lossy()
-                    .into_owned()
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| "working directory is not valid UTF-8".to_owned())
                 }
-            });
+            })
+            .transpose()?;
         let env = self.pane_environment(sid, ctx, environment_overrides(&a)?);
         let mut out = Outcome {
             changed: true,
@@ -230,7 +232,8 @@ impl Engine {
                 .map(|command| {
                     tmuxx_format::expand_time(command, |key| {
                         ctx.formats.get(key).cloned().or_else(|| {
-                            self.format_value(&text(key), Some(sid), Some(wid), Some(id), ctx)
+                            let key = std::str::from_utf8(key).ok()?;
+                            self.format_value(key, Some(sid), Some(wid), Some(id), ctx)
                                 .map(String::into_bytes)
                         })
                     })

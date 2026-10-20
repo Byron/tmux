@@ -1,6 +1,7 @@
 //! Authoritative tmuxx state. All operating-system work is returned as effects.
 
 use std::collections::{BTreeMap, BTreeSet};
+mod admission;
 mod alerts;
 mod buffers;
 mod client_commands;
@@ -419,6 +420,11 @@ fn line(out: &mut Vec<u8>, bytes: impl AsRef<[u8]>) {
     out.push(b'\n');
 }
 
+struct EnvironmentUpdate {
+    pattern: String,
+    matches: Vec<(String, String)>,
+}
+
 fn client_flag(context: &mut ClientContext, name: &str, enabled: bool) {
     let mut flags = context
         .client_flags
@@ -442,14 +448,25 @@ impl Engine {
             }
         }
     }
-    fn update_environment(&mut self, sid: Id, source: &BTreeMap<String, String>) {
-        for (_, pattern) in self.option_array(Some(sid), "update-environment") {
-            let matches: Vec<_> = source
-                .iter()
-                .filter(|(name, _)| {
-                    tmuxx_format::glob_match(pattern.as_bytes(), name.as_bytes()).unwrap_or(false)
-                })
-                .collect();
+    fn prepare_environment_update(
+        &self,
+        sid: Option<Id>,
+        source: &BTreeMap<String, String>,
+    ) -> Result<Vec<EnvironmentUpdate>, String> {
+        let mut updates = Vec::new();
+        for (_, pattern) in self.option_array(sid, "update-environment") {
+            let mut matches = Vec::new();
+            for (name, value) in source {
+                if tmuxx_format::glob_match(pattern.as_bytes(), name.as_bytes())? {
+                    matches.push((name.clone(), value.clone()));
+                }
+            }
+            updates.push(EnvironmentUpdate { pattern, matches });
+        }
+        Ok(updates)
+    }
+    fn update_environment(&mut self, sid: Id, updates: Vec<EnvironmentUpdate>) {
+        for EnvironmentUpdate { pattern, matches } in updates {
             let session = self.sessions.get_mut(&sid).unwrap();
             if matches.is_empty() {
                 session.environment.remove(&pattern);
@@ -458,8 +475,8 @@ impl Engine {
             } else {
                 for (name, value) in matches {
                     session.environment.insert(name.clone(), value.clone());
-                    session.hidden_environment.remove(name);
-                    session.removed_environment.remove(name);
+                    session.hidden_environment.remove(&name);
+                    session.removed_environment.remove(&name);
                 }
             }
         }
@@ -795,7 +812,9 @@ impl Engine {
                         }
                         let sid = existing.id;
                         if !a.has(b'E') {
-                            self.update_environment(sid, &ctx.environment);
+                            let updates =
+                                self.prepare_environment_update(Some(sid), &ctx.environment)?;
+                            self.update_environment(sid, updates);
                         }
                         ctx.set_session(Some(sid));
                         ctx.attached = true;
@@ -838,10 +857,15 @@ impl Engine {
                     .get(b'c')
                     .map(|value| {
                         self.expand(value, None, None, None, ctx)
-                            .map(|value| text(&value))
+                            .and_then(|value| admission::path(&value))
                     })
                     .transpose()?
                     .or_else(|| ctx.cwd.clone());
+                let updates = if a.has(b'E') {
+                    Vec::new()
+                } else {
+                    self.prepare_environment_update(None, &ctx.environment)?
+                };
                 let sid = self.next_session;
                 self.next_session += 1;
                 self.sessions.insert(
@@ -869,9 +893,7 @@ impl Engine {
                         removed_environment: BTreeSet::new(),
                     },
                 );
-                if !a.has(b'E') {
-                    self.update_environment(sid, &ctx.environment);
-                }
+                self.update_environment(sid, updates);
                 let session = self.sessions.get_mut(&sid).unwrap();
                 for (name, value) in environment {
                     session.hidden_environment.remove(&name);
@@ -1571,13 +1593,10 @@ impl Engine {
                     && let Some(raw) = &value
                 {
                     let target = self.session_id(a.string(b't').as_deref(), ctx).ok();
-                    value = Some(text(&self.expand(
-                        raw.as_bytes(),
-                        target,
-                        None,
-                        None,
-                        ctx,
-                    )?));
+                    value = Some(admission::text(
+                        &self.expand(raw.as_bytes(), target, None, None, ctx)?,
+                        "environment value",
+                    )?);
                 }
                 if value.as_ref().is_some_and(|value| value.contains('\0')) {
                     return Err("environment value contains NUL".into());
@@ -1638,7 +1657,7 @@ impl Engine {
                     )
                 };
                 let keys = if let Some(key) = a.rest.first() {
-                    let key = text(key);
+                    let key = admission::text(key, "environment name")?;
                     if !map.contains_key(&key) && !removed.contains(&key) {
                         return Err(format!("unknown variable: {key}"));
                     }
@@ -1884,7 +1903,8 @@ impl Engine {
                     }
                     let lookup = |key: &[u8]| {
                         self.buffer_format(key, Some(name)).or_else(|| {
-                            self.format_value(&text(key), None, None, None, ctx)
+                            let key = std::str::from_utf8(key).ok()?;
+                            self.format_value(key, None, None, None, ctx)
                                 .map(String::into_bytes)
                         })
                     };

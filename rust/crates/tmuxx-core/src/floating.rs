@@ -160,6 +160,7 @@ impl Engine {
             floating,
         );
         let environment = self.pane_environment(sid, ctx, process::environment_overrides(&a)?);
+        let cwd = a.get(b'c').map(admission::path).transpose()?;
         let mut out = Outcome::default();
         let pane = self.create_pane(
             wid,
@@ -167,7 +168,7 @@ impl Engine {
             geometry.width as u16,
             geometry.height as u16,
             a.rest.clone(),
-            a.string(b'c'),
+            cwd,
             environment,
             &mut out,
         );

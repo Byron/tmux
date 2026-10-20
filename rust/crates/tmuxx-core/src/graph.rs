@@ -398,6 +398,11 @@ impl Engine {
                 })
             })
             .transpose()?;
+        let cwd = a
+            .get(b'c')
+            .map(admission::path)
+            .transpose()?
+            .or_else(|| ctx.cwd.clone());
         let mut out = Outcome::default();
         if a.has(b'S') {
             let index = if let Some(index) = requested {
@@ -466,7 +471,7 @@ impl Engine {
             cols,
             rows,
             a.rest.clone(),
-            a.string(b'c').or_else(|| ctx.cwd.clone()),
+            cwd,
             a.has(b'd'),
             index,
             self.pane_environment(sid, ctx, environment),

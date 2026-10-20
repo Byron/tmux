@@ -1490,21 +1490,30 @@ impl Host {
             super::defaults::user_home,
         )
         .map_err(|error| format!("{}: {}", error.line, error.message))?;
-        self.engine.hidden_environment = environment
+        // Convert the prepared environment in full before committing any of it.
+        // A malformed value must not change a literal-U+FFFD variable or leave
+        // earlier assignments from the same failed preparation partially live.
+        let hidden_environment = environment
             .hidden
             .into_iter()
-            .map(|key| String::from_utf8_lossy(&key).into_owned())
-            .collect();
-        self.engine.environment = environment
+            .map(|key| {
+                String::from_utf8(key).map_err(|_| "non-UTF8 environment names are unsupported")
+            })
+            .collect::<Result<_, _>>()?;
+        let values = environment
             .values
             .into_iter()
-            .map(|(k, v)| {
-                (
-                    String::from_utf8_lossy(&k).into_owned(),
-                    String::from_utf8_lossy(&v).into_owned(),
-                )
+            .map(|(key, value)| {
+                Ok((
+                    String::from_utf8(key)
+                        .map_err(|_| "non-UTF8 environment names are unsupported")?,
+                    String::from_utf8(value)
+                        .map_err(|_| "non-UTF8 environment values are unsupported")?,
+                ))
             })
-            .collect();
+            .collect::<Result<_, &str>>()?;
+        self.engine.hidden_environment = hidden_environment;
+        self.engine.environment = values;
         self.engine
             .removed_environment
             .retain(|key| !self.engine.environment.contains_key(key));
@@ -2844,4 +2853,63 @@ pub(super) fn suitable_shell(value: &[u8]) -> bool {
             .is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("com")
             })
+}
+
+#[cfg(test)]
+mod source_admission_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_environment_rejects_malformed_values_atomically_and_keeps_ordering() {
+        let (tx, _) = mpsc::sync_channel(1);
+        let mut host = Host::new(
+            tx,
+            &Options::new("unused-source-admission"),
+            BTreeMap::new(),
+        );
+        host.engine
+            .environment
+            .insert("KEEP".into(), "value�".into());
+        host.engine
+            .environment
+            .insert("NAME�".into(), "kept".into());
+        host.engine.hidden_environment.insert("KEEP".into());
+        host.engine.removed_environment.insert("MISSING".into());
+        let environment = host.engine.environment.clone();
+        let hidden = host.engine.hidden_environment.clone();
+        let removed = host.engine.removed_environment.clone();
+        for input in [
+            b"KEEP=changed\nBAD='\xff'\n".as_slice(),
+            b"KEEP=changed\n%hidden BAD='\xff'\n",
+        ] {
+            let error = host
+                .prepare_source(input, &ClientContext::default(), false)
+                .err()
+                .expect("reject malformed prepared value");
+            assert!(error.contains("non-UTF8 environment values"), "{error}");
+            assert_eq!(host.engine.environment, environment);
+            assert_eq!(host.engine.hidden_environment, hidden);
+            assert_eq!(host.engine.removed_environment, removed);
+        }
+        // The ASCII assignment grammar never converts this into NAME<U+FFFD>.
+        let source = host
+            .prepare_source(b"NAME\xff=changed", &ClientContext::default(), false)
+            .unwrap();
+        assert!(source.error.is_some());
+        assert_eq!(host.engine.environment, environment);
+        let source = host
+            .prepare_source(
+                b"ORDER=first\ndisplay '$ORDER'\nunknown-command\nORDER=last",
+                &ClientContext::default(),
+                false,
+            )
+            .unwrap();
+        assert!(source.error.is_some());
+        assert_eq!(host.engine.environment["ORDER"], "last");
+        assert_eq!(source.groups.len(), 1);
+        assert_eq!(host.engine.environment["NAME�"], "kept");
+        host.prepare_source(b"KEEP='\xff'", &ClientContext::default(), true)
+            .unwrap();
+        assert_eq!(host.engine.environment["KEEP"], "value�");
+    }
 }

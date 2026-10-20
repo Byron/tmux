@@ -298,7 +298,9 @@ impl Terminal {
                     if value.is_empty() { " ".into() } else { value }
                 }
             }
-            "pane_path" => String::from_utf8_lossy(t.working_directory_bytes()).into_owned(),
+            "pane_path" => std::str::from_utf8(t.working_directory_bytes())
+                .ok()?
+                .to_owned(),
             "pane_pb_state" => ["hidden", "normal", "error", "indeterminate", "paused"]
                 [usize::from(state.progress_state)]
             .into(),

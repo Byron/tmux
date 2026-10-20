@@ -509,13 +509,16 @@ impl Engine {
         let format_window = format_context
             .current_pane
             .and_then(|pane| self.panes.get(&pane).map(|pane| pane.window));
-        let argument = text(&self.expand(
-            &a.rest[0],
-            format_context.session,
-            format_window,
-            format_context.current_pane,
-            &format_context,
-        )?);
+        let argument = admission::text(
+            &self.expand(
+                &a.rest[0],
+                format_context.session,
+                format_window,
+                format_context.current_pane,
+                &format_context,
+            )?,
+            "option name",
+        )?;
         let (name, index) = match resolve_option_name(&argument) {
             Ok(value) => value,
             Err(_) if a.has(b'q') => return Ok(Outcome::default()),
@@ -585,17 +588,24 @@ impl Engine {
         }
         let inherited = self.effective_map(target);
         let old = inherited.get(&name).map(String::as_str).unwrap_or("");
-        let mut value = a.rest.get(1).map(|v| text(v));
+        let mut value = a
+            .rest
+            .get(1)
+            .map(|v| admission::text(v, "option value"))
+            .transpose()?;
         if a.has(b'F')
             && let Some(raw) = value.as_ref()
         {
-            value = Some(text(&self.expand(
-                raw.as_bytes(),
-                format_context.session,
-                format_window,
-                format_context.current_pane,
-                &format_context,
-            )?));
+            value = Some(admission::text(
+                &self.expand(
+                    raw.as_bytes(),
+                    format_context.session,
+                    format_window,
+                    format_context.current_pane,
+                    &format_context,
+                )?,
+                "option value",
+            )?);
         }
         let reset_silence = name == "monitor-silence";
         let update_history = name == "history-limit";
@@ -644,7 +654,7 @@ impl Engine {
             if let Some(metadata) = metadata(&name)
                 && !metadata.pattern.is_empty()
                 && !tmuxx_format::glob_match(metadata.pattern.as_bytes(), value.as_bytes())
-                    .unwrap_or(false)
+                    .map_err(str::to_owned)?
             {
                 return Err(format!("value is invalid: {value}"));
             }
@@ -754,7 +764,7 @@ impl Engine {
                     format_context.current_pane,
                     &format_context,
                 )
-                .map(|v| text(&v))
+                .and_then(|v| admission::text(&v, "option name"))
             })
             .transpose()?;
         let requested = argument.as_deref().map(resolve_option_name).transpose();
