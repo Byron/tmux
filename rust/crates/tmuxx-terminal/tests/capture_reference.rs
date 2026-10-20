@@ -816,6 +816,44 @@ fn allocation_sensitive_trailing_capture_survives_empty_resize() {
 }
 
 #[test]
+fn snapshot_restores_after_non_reflow_width_shrink() {
+    for (input, alternate) in [
+        (b"\x1b[?7l01234567890123456789".as_slice(), false),
+        (b"\x1b[?1049h01234567890123456789".as_slice(), true),
+    ] {
+        let mut terminal = Terminal::new(20, 3, 20);
+        terminal.feed(input);
+        terminal.resize(10, 3);
+        let snapshot = terminal.snapshot();
+        let screen = if alternate {
+            snapshot.alternate.as_ref().unwrap()
+        } else {
+            &snapshot.primary
+        };
+        let row = screen.row(0);
+        assert_eq!(screen.row_text(row), "0123456789");
+        assert_eq!(screen.tmux_capture_bounds(row.id), Some((10, 20)));
+        assert_eq!(snapshot.restore().unwrap().capture(), terminal.capture());
+        if alternate {
+            terminal.feed(b"\x1b[?1049l");
+            terminal.snapshot().restore().unwrap();
+        }
+    }
+}
+
+#[test]
+fn snapshot_restores_after_reflow_discards_unknown_capture_rows() {
+    let mut terminal = Terminal::new(20, 5, 20);
+    terminal.feed(b"abcdefghijklmnopqrstuvwxyz");
+    terminal.resize(6, 2);
+    terminal.feed(b"\x1b[M");
+    terminal.resize(5, 1);
+    terminal.feed(b"\x1b[2J");
+    terminal.resize(18, 2);
+    terminal.snapshot().restore().unwrap();
+}
+
+#[test]
 fn invalid_snapshot_capture_metadata_is_rejected_before_reflow() {
     let mut terminal = Terminal::new(20, 3, 20);
     terminal.feed_at(b"one\r\ntwo\r\nthree\r\nfour", 123456);

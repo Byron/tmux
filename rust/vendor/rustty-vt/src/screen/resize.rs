@@ -249,6 +249,9 @@ impl Screen {
             }
             let capture =
                 (tmux && self.tmux_capture_known).then(|| self.reflow_capture_metadata(cols));
+            if capture.is_none() {
+                self.tmux_capture_rows.clear();
+            }
             let height = if height_first { rows } else { old_rows };
             let active_start = self.pages.total_rows().saturating_sub(height);
             let old_wrapped = self
@@ -828,6 +831,10 @@ impl Screen {
     }
 
     fn resize_columns(&mut self, columns: usize) {
+        // Non-reflow resizes discard cells past the new physical row width.
+        for (used, _) in self.tmux_capture_rows.values_mut() {
+            *used = (*used).min(columns);
+        }
         let mut old = std::mem::take(&mut self.pages);
         let mut spare = None;
         while let Some(mut page) = old.pages.pop_front() {
