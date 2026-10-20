@@ -752,6 +752,16 @@ pub fn native_handshake_with_file_stdin(
     stream: &mut (impl Read + Write),
     stdin_file_stream: bool,
 ) -> io::Result<Hello> {
+    native_handshake_with_features(stream, stdin_file_stream, None)
+}
+
+/// Negotiate native stdin and an optional C-compatible client feature identity.
+/// Older servers must explicitly acknowledge identity support before commands.
+pub fn native_handshake_with_features(
+    stream: &mut (impl Read + Write),
+    stdin_file_stream: bool,
+    client_features: Option<i32>,
+) -> io::Result<Hello> {
     let cwd = std::env::current_dir()?
         .into_os_string()
         .into_string()
@@ -781,6 +791,7 @@ pub fn native_handshake_with_file_stdin(
             cwd: Some(cwd),
             environment,
             stdin_file_stream,
+            client_features,
             ..Hello::default()
         },
     )?;
@@ -799,6 +810,12 @@ pub fn native_handshake_with_file_stdin(
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "native protocol version mismatch",
+        ));
+    }
+    if client_features.is_some() && hello.client_features.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "server does not support native client terminal features",
         ));
     }
     Ok(hello)
@@ -869,6 +886,7 @@ fn serve_connection(
         &Hello {
             instance_id: instance_id.clone(),
             stdin_file_stream: true,
+            client_features: Some(0),
             ..Hello::default()
         },
     )?;
@@ -894,6 +912,13 @@ fn serve_connection(
     reader.get_ref().set_read_timeout(None)?;
     let (out_tx, out_rx) = mpsc::sync_channel(256);
     let context = ClientContext {
+        identity: BTreeMap::from([
+            ("client_utf8".into(), "1".into()),
+            (
+                "client_termfeatures".into(),
+                tmuxx_protocol::features::feature_names(hello.client_features.unwrap_or(0)),
+            ),
+        ]),
         cwd: hello.cwd,
         environment: hello.environment,
         host_effects: hello.host_effects,
@@ -1988,10 +2013,10 @@ impl Host {
                             std::fs::OpenOptions::new().read(true),
                             Path::new(&os_string(&path).map_err(|e| e.to_string())?),
                         )
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| files::path_error(&e, &path))?
                         .take((MAX_REQUEST_BYTES + 1) as u64)
                         .read_to_end(&mut data)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| files::path_error(&e, &path))?;
                         if data.len() > MAX_REQUEST_BYTES {
                             return Err("buffer exceeds input size limit".into());
                         }
@@ -2022,8 +2047,9 @@ impl Host {
                             .append(append),
                         Path::new(&os_string(&path).map_err(|e| e.to_string())?),
                     )
-                    .map_err(|e| e.to_string())?;
-                    file.write_all(&data).map_err(|e| e.to_string())?;
+                    .map_err(|e| files::path_error(&e, &path))?;
+                    file.write_all(&data)
+                        .map_err(|e| files::path_error(&e, &path))?;
                 }
             }
         }

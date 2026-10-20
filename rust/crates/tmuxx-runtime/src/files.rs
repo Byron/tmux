@@ -4,6 +4,30 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 
+pub(super) fn diagnostic_path(path: &[u8]) -> String {
+    std::str::from_utf8(path).map_or_else(|_| path.escape_ascii().to_string(), str::to_owned)
+}
+
+pub(super) fn error_message(error: &io::Error) -> String {
+    #[cfg(windows)]
+    if error.kind() == io::ErrorKind::NotFound {
+        // Win32 distinguishes a missing file from a missing parent directory;
+        // both represent the same command-level ENOENT contract in C tmux.
+        return "No such file or directory".into();
+    }
+    #[cfg(unix)]
+    if let Some(code) = error.raw_os_error() {
+        return unsafe { std::ffi::CStr::from_ptr(libc::strerror(code)) }
+            .to_string_lossy()
+            .into_owned();
+    }
+    error.to_string()
+}
+
+pub(super) fn path_error(error: &io::Error, path: &[u8]) -> String {
+    format!("{}: {}", error_message(error), diagnostic_path(path))
+}
+
 #[cfg(unix)]
 fn supported(metadata: &Metadata) -> bool {
     if metadata.is_file() {

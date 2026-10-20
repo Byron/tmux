@@ -37,6 +37,10 @@ pub struct Hello {
     /// the original inline Request.stdin behavior for existing native clients.
     #[serde(default)]
     pub stdin_file_stream: bool,
+    /// C-compatible terminal-feature bitset for this native client. A server
+    /// replies with Some(0) to acknowledge support; omitted by older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_features: Option<i32>,
 }
 
 impl Default for Hello {
@@ -51,6 +55,7 @@ impl Default for Hello {
             snapshot_stream: true,
             control_commands: true,
             stdin_file_stream: false,
+            client_features: None,
         }
     }
 }

@@ -46,7 +46,6 @@ struct Cli {
     #[arg(short = 'c')]
     shell_command: Option<OsString>,
     #[arg(skip)]
-    #[cfg(unix)]
     feature_bits: i32,
     #[arg(short='C',action=clap::ArgAction::Count)]
     control: u8,
@@ -105,7 +104,6 @@ pub fn run_from(args: impl IntoIterator<Item = OsString>, launcher_prefix: &[&st
         .map(|arg| (*arg).to_owned())
         .collect();
     cli.native_default = !launcher_prefix.is_empty();
-    #[cfg(unix)]
     {
         let mut features: Vec<_> = matches
             .indices_of("features")
@@ -120,7 +118,7 @@ pub fn run_from(args: impl IntoIterator<Item = OsString>, launcher_prefix: &[&st
         }
         features.sort_by_key(|(index, _)| *index);
         for (_, value) in features {
-            cli.feature_bits = tmuxx_unix_ipc::client::apply_features(cli.feature_bits, value);
+            cli.feature_bits = tmuxx_protocol::features::apply_features(cli.feature_bits, value);
         }
     }
     let report_startup_error = cli.report_startup_error;
@@ -344,7 +342,11 @@ fn run(mut cli: Cli) -> io::Result<()> {
     #[cfg(windows)]
     {
         let mut stream = tmuxx_runtime::windows::connect(&endpoint)?;
-        let hello = tmuxx_runtime::native_handshake_with_file_stdin(&mut stream, cli.control == 0)?;
+        let hello = tmuxx_runtime::native_handshake_with_features(
+            &mut stream,
+            cli.control == 0,
+            Some(cli.feature_bits),
+        )?;
         if cli.control > 0 && !hello.control_commands {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -394,7 +396,11 @@ fn copy_bridge_bytes(input: &mut impl io::Read, output: &mut impl io::Write) -> 
 #[cfg(unix)]
 fn run_unix(cli: Cli, endpoint: PathBuf) -> io::Result<()> {
     let mut stream = connect_or_start(&cli, &endpoint, None)?;
-    let hello = tmuxx_runtime::native_handshake_with_file_stdin(&mut stream, cli.control == 0)?;
+    let hello = tmuxx_runtime::native_handshake_with_features(
+        &mut stream,
+        cli.control == 0,
+        Some(cli.feature_bits),
+    )?;
     if cli.control > 0 && !hello.control_commands {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -706,7 +712,8 @@ fn native_client(cli: Cli, mut stream: NativeStream, stdin_file_stream: bool) ->
                 if cli.control == 0 {
                     stdout.write_all(&response.output)?;
                     if let Some(error) = response.error {
-                        return Err(io::Error::other(error));
+                        writeln!(io::stderr().lock(), "{error}")?;
+                        break;
                     }
                     if !cli.snapshot {
                         break;
@@ -771,7 +778,7 @@ fn native_client(cli: Cli, mut stream: NativeStream, stdin_file_stream: bool) ->
         std::process::exit(job_status.clamp(1, 255));
     }
     if failed {
-        Err(io::Error::other("command failed"))
+        std::process::exit(1);
     } else {
         Ok(())
     }

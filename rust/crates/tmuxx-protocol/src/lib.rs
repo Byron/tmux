@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+pub mod features;
+
 #[cfg(feature = "native")]
 pub mod native;
 

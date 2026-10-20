@@ -2365,7 +2365,9 @@ fn native_control_file(effect: Effect) -> Result<Vec<u8>, String> {
     let (path, result) = match effect {
         Effect::LoadBuffer { path, .. } => {
             let result = if path == b"-" {
-                Err(io::Error::from_raw_os_error(libc::EBADF))
+                // This is the protocol's unavailable stdin resource, not a
+                // Win32 last-error code (numeric errno 9 has another meaning).
+                return Err("Bad file descriptor: -".into());
             } else {
                 (|| {
                     let mut data = Vec::new();
@@ -2382,7 +2384,7 @@ fn native_control_file(effect: Effect) -> Result<Vec<u8>, String> {
         }
         Effect::SaveBuffer { path, data, append } => {
             let result = if path == b"-" {
-                Err(io::Error::from_raw_os_error(libc::EBADF))
+                return Err("Bad file descriptor: -".into());
             } else {
                 files::open(
                     std::fs::OpenOptions::new()
@@ -2399,14 +2401,11 @@ fn native_control_file(effect: Effect) -> Result<Vec<u8>, String> {
         }
         _ => unreachable!(),
     };
-    let data = result.map_err(|error| {
-        let message = os_error_message(&error);
-        format!("{message}: {}", String::from_utf8_lossy(&path))
-    })?;
+    let data = result.map_err(|error| files::path_error(&error, &path))?;
     if data.len() > MAX_REQUEST_BYTES {
         return Err(format!(
             "file input exceeds limit: {}",
-            String::from_utf8_lossy(&path)
+            files::diagnostic_path(&path)
         ));
     }
     Ok(data)
@@ -2787,13 +2786,7 @@ fn path_bytes(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn os_error_message(error: &io::Error) -> String {
-    #[cfg(unix)]
-    if let Some(code) = error.raw_os_error() {
-        return unsafe { std::ffi::CStr::from_ptr(libc::strerror(code)) }
-            .to_string_lossy()
-            .into_owned();
-    }
-    error.to_string()
+    files::error_message(error)
 }
 
 #[cfg(windows)]
