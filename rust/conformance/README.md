@@ -9,8 +9,11 @@ The 2026-10-20 macOS collection passed 149 executable suites and all 430 scoped
 assertions; all six profile gates passed against that unchanged checkout.
 Current C (`next-3.9`) and 3.7c interoperability/SSH evidence are both included.
 C/C calibration passed all 12 scenarios, and the additional 3.7c differential
-subset passed 12 suites. Four Windows obligations remain deferred and 18 entries
-remain outside the profile. Recollect and gate after source or baseline changes.
+subset passed 12 suites. Those are historical macOS results, not Windows
+qualification. Windows execution is now authorized and active; its four native
+obligations and the shared contracts remain pending fresh executable evidence.
+Eighteen presentation entries remain outside the profile. Recollect and gate
+after source or baseline changes.
 
 The commands below assume `./tmux` was built from the pinned reference with
 `--enable-images`. Substitute its path if that build lives elsewhere.
@@ -55,8 +58,23 @@ The supported-version gate requires both references; missing, changed, wrong
 or duplicate executables and ignored/filtered tests cannot satisfy the matrix.
 The actual Rustty SSH suite also runs against both binaries. Update the pinned
 suite versions deliberately when reviewing a new supported C baseline.
-`--no-smoke` runs only selected suites. Every listed test must appear as `ok`
+`--no-smoke` runs only selected suites. Suites without C-reference dependencies
+can run without `--reference`; this supports native Windows collection without
+a fictitious local C tmux executable. Smoke comparisons, `$reference` environment
+values, explicit reference roles and supported-version suites still require their
+genuine C executable identities. Missing evidence remains required at the gate.
+Every listed libtest test must appear exactly once as `ok`
 and Cargo must exit successfully; ignored, filtered or zero-test runs fail.
+The `windows_conpty` Rustty test uses a custom executable harness. Its declared
+`rustty-windows-conpty` adapter recognizes only the machine-readable
+`TMUXX_WINDOWS_CONPTY_RESULT` completion record after eight real ConPTY synchronized
+redraws, with package version/archive/DLL/helper hashes matching
+`rust/windows/conpty.json`, under the explicit name
+`windows_conpty::synchronized_redraws`. An ignored invocation, zero tests, repeated
+completion, ordinary libtest-shaped text or nonzero exit cannot pass it. This
+assertion alone does not close packaging, ownership or native desktop obligations.
+Suites with explicit `platforms` run in `--suite all` only on those platforms;
+explicitly requesting an incompatible suite fails. Scope obligations are retained.
 The runner preserves test output and never uses a narrow suite to pass a broad
 scope group. Suite definitions enrich existing assertion IDs without duplication.
 
@@ -83,17 +101,29 @@ replaced. Every subprocess transcript retains byte-preserving argv, stdout,
 stderr and exit status. Reports record both executable paths, versions and
 hashes, source revision, manifest hash and an implementation fingerprint that
 includes the scope and difference ledgers. Failures remain failures.
+Source ledger paths always use `/`. When Git identifies an LF source with a
+uniform CRLF checkout, the reviewed source ledger compares its LF bytes without
+rewriting the checkout. Binary, mixed-ending and modified-content checks remain
+strict. Raw worktree bytes still feed source and binary fingerprints, so changes
+after collection invalidate the report.
 The fingerprint also covers Cargo manifests/lockfile, vendored terminal/parser
 sources and suite definitions. A source change during collection invalidates the
 report. Rebuild the candidate before collecting evidence.
 
-Each executable suite runs in a private Unix process session. Timeout cleanup
+Unix executable suites run in private process sessions. Timeout cleanup
 stops its surviving groups, bounds output draining and preserves stdout/stderr
 in the failed report. The upstream script harness also stops its process group
 on success, early failure and unwind, before reaping the leader. Detached fixture
 servers have bounded command-socket shutdown and a verified peer-PID/start-time
 fallback. Cleanup tests require flooded pane helpers to exit while an independent
 server remains usable; native sockets and lock files are never command targets.
+Windows suites run inside a private kill-on-close Job Object. A worker cannot
+start the test command until the parent assigns it to the job and sends a private
+handshake byte. Failed assignment or owner loss before assignment closes the
+worker without starting tests. Normal completion, failure, timeout, interruption
+and abrupt collector death terminate owned descendants; independent processes
+remain alive. Native cleanup regressions execute each of those cases and verify
+the recorded fixture process handles have signalled termination.
 
 These are behavior comparisons between separate implementations. They do not
 prove that a C client can speak to a Rust imsg server. The `unix-ipc` profile
@@ -167,7 +197,10 @@ After rebasing:
 4. Run each claimed profile gate. Required pending/missing/deferred assertions,
    stale source/implementation/binaries, and unreviewed changes all block release.
 
-Linux server execution is active; Windows execution remains user-deferred.
+Linux server execution and native Windows execution are active. The Windows
+profile includes shared command/control, C-client, terminal, native view,
+standalone and app-owner obligations alongside all four Windows obligations.
+Activation grants no evidence, and gates reject deferred execution.
 Historical macOS evidence certifies neither platform. Suites declare execution
 `platforms` where needed, and `--suite all` records required desktop suites that
 cannot execute locally as **blocked**, with no passing observation. The report
@@ -200,6 +233,33 @@ suites and run every profile gate, retaining passing and failing artifacts.
 Ordinary terminal presentation is the product exclusion; it does not exclude
 application terminal state, queries, captures, images, shared input or lifetime.
 
+For initial native Windows collection, use the MSVC Rust 1.95.0 toolchain and
+Python 3.11+ on the authorized Windows target. Set the actual integrated checkout
+path if the repositories do not use the documented sibling layout:
+
+```powershell
+$env:RUSTUP_TOOLCHAIN = '1.95.0-x86_64-pc-windows-msvc'
+$env:TMUXX_RUSTTY_ROOT = (Resolve-Path ..\ghostty).Path
+python -m unittest discover -s rust/conformance -p 'test_*.py'
+python rust/conformance/runner.py smoke --no-smoke `
+  --candidate rust/target/debug/tmuxx.exe `
+  --suite command-unit --suite config-unit --suite terminal --suite layout `
+  --report rust/conformance/artifacts/windows.json
+python rust/conformance/runner.py gate `
+  --report rust/conformance/artifacts/windows.json --profile windows
+```
+
+This focused collection leaves unexecuted assertions pending. Collect every
+required suite before claiming a profile pass and commit finished sources before
+the final collection so the checkout-revision guard matches. The current
+authorized host is Windows Server 2025 x64; record the actual OS/build in evidence.
+Windows 11 results must be collected there separately if that target is claimed.
+Ordinary CI can build and exercise isolated native backends and packaged-resource
+checks. Actual desktop views, a real same-account OpenSSH logon, an unauthorized
+account and direct-network denial fixtures are separate prerequisites, not
+exclusions. Use temporary authorized SSH credentials and private bounded fixtures;
+never report missing access or a backend-only run as desktop qualification.
+
 Parser/preparation/format differential tests run independently:
 
 ```sh
@@ -227,6 +287,8 @@ C 3.7c spells the image decoder option `--enable-sixel`, so its build uses
 `--enable-images` is unrecognized by that older configure script. Reference
 paths, revisions, versions, binary hashes and effective configure options are
 retained; the distribution's installed tmux is never replaced.
+Windows jobs and desktop/cross-logon evidence retain the separate requirements
+described above.
 
 Current and older C behavior sometimes differ. The [version observations](compatibility-versions.md)
 record those differences and their exact tests; older-version CI selects only

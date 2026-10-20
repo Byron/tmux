@@ -1,0 +1,17 @@
+# This custom Rustty harness is not libtest. Its exact completion record follows
+# eight actual bundled-ConPTY redraws; ignored/non-Windows invocations earn none.
+# It is one terminal assertion, not proof of packaging or desktop qualification.
+[[suites]]
+id = "windows-conpty-synchronized-output"
+kind = "rustty-cargo"
+harness = "rustty-windows-conpty"
+platforms = ["win32"]
+profiles = ["windows"]
+args = ["test", "--locked", "--offline", "-p", "rustty-app", "--test", "windows_conpty", "--", "--ignored"]
+env = {}
+timeout = 120
+
+[[suites.assertions]]
+id = "windows.conpty-synchronized-output-cursor-order"
+tests = ["windows_conpty::synchronized_redraws"]
+description = "The actual Rustty custom harness verifies eight bundled-ConPTY synchronized redraws and restored cursor state at every byte boundary. Requires the debug Rustty resource bundle. This does not prove native view rendering, runtime negative cases, or ownership."

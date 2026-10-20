@@ -10,8 +10,8 @@ status = "active"
 reason = "Linux server execution is authorized. Exact GNU/Linux host evidence and a platform-specific owner watchdog are required; supported Rustty desktop client obligations remain required."
 
 [platform_execution.win32]
-status = "deferred"
-reason = "Windows execution is explicitly deferred by the user; requirements remain and this is not a Windows pass."
+status = "active"
+reason = "Native Windows implementation and qualification are authorized; activation is not evidence of qualification."
 
 # This is the requested scope, not a list derived from implemented commands.
 # Unknown/new upstream commands, options, formats and regressions stay pending
@@ -49,8 +49,9 @@ platforms = ["linux", "darwin"]
 [profiles.windows]
 description = "ConPTY, desktop/SSH named-pipe access and application ownership"
 platforms = ["win32"]
-execution = "deferred"
-reason = "Windows execution is explicitly deferred by the user; this is not a Windows pass."
+execution = "active"
+includes = ["command-control", "system-client", "native-views", "standalone", "app-owned"]
+reason = "Require fresh native Windows evidence for the shared command, protocol, terminal, view and lifetime contracts and all four Windows obligations."
 
 [[exclusions]]
 id = "ordinary-tty-renderer"

@@ -9,8 +9,8 @@ import collections
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
+from pathlib import Path
 import re
 import secrets
 import select
@@ -38,6 +38,26 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def checkout_line_endings(root):
+    """Identify Git's text checkouts without changing files or trusting extensions."""
+    records = subprocess.check_output(["git", "ls-files", "--eol", "-z"], cwd=root)
+    return {os.fsdecode(path): fields.split() for record in records.split(b"\0") if record
+            for fields, path in [record.split(b"\t", 1)]}
+
+
+def source_digest(path, root, endings):
+    """Compare the LF source ledger with an explicitly identified CRLF checkout.
+
+    Raw hashes still identify binaries, reports, and the complete implementation.
+    Only Git-index LF text with uniform CRLF working-tree lines is canonicalized;
+    mixed endings and binary content remain byte-exact review changes.
+    """
+    fields = endings.get(Path(path).relative_to(root).as_posix(), [])
+    if fields[:2] == [b"i/lf", b"w/crlf"] and b"attr/-text" not in fields:
+        return hashlib.sha256(Path(path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    return digest(path)
+
+
 def rustty_root():
     return Path(os.environ.get("TMUXX_RUSTTY_ROOT", ROOT.parent.parent / "ghostty-org/ghostty")).resolve()
 
@@ -57,11 +77,12 @@ def rustty_identity():
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     if revision != integration["base_revision"]:
         raise ValueError("Rustty base revision changed; review and regenerate the integration manifest")
+    endings = checkout_line_endings(root)
     for name, hashes in integration["files"].items():
         path = root / name
-        if not path.is_file() or digest(path) != hashes["result_sha256"]:
+        if not path.is_file() or source_digest(path, root, endings) != hashes["result_sha256"]:
             raise ValueError(f"Rustty integration source missing or changed: {name}")
-    sources = {str(path.relative_to(root)): digest(path) for path in rustty_sources(root)}
+    sources = {path.relative_to(root).as_posix(): digest(path) for path in rustty_sources(root)}
     return {"root": str(root), "revision": revision, "sources": sources,
             "manifest_sha256": digest(RUSTTY_INTEGRATION / "manifest.json"),
             "patch_sha256": digest(RUSTTY_INTEGRATION / "rustty.patch")}
@@ -73,6 +94,7 @@ def implementation_fingerprint():
     paths += list((ROOT / "rust/crates").rglob("Cargo.toml"))
     paths += [path for path in (ROOT / "rust/vendor").rglob("*") if path.is_file() and not {"target", ".git"}.intersection(path.parts)]
     paths += [ROOT / "rust/Cargo.toml", ROOT / "rust/Cargo.lock", SCOPE]
+    paths += [path for path in (ROOT / "rust/windows").rglob("*") if path.is_file()]
     paths += list(HERE.glob("*.toml")) + list(HERE.glob("*.py"))
     paths += [RUSTTY_INTEGRATION / name for name in ("manifest.json", "rustty.patch")]
     hasher = hashlib.sha256()
@@ -107,7 +129,7 @@ def suites():
             allowed = suite.get("platforms", list(UNIX_PLATFORMS))
             if not allowed or len(allowed) != len(set(allowed)) or set(allowed) - {"darwin", "linux", "win32"}:
                 raise ValueError(f"suite {identifier} has invalid execution platforms")
-            found[identifier] = {**suite, "source": str(path.relative_to(ROOT))}
+            found[identifier] = {**suite, "source": path.relative_to(ROOT).as_posix()}
     return found
 
 
@@ -148,12 +170,14 @@ def host_identity():
             distribution = platform.freedesktop_os_release()
         except OSError:
             pass
-    return {"platform": sys.platform, "architecture": platform.machine(), "kernel": platform.release(),
+    server = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/OpenSSH/sshd.exe") if sys.platform == "win32" else "/usr/sbin/sshd"
+    return {"platform": sys.platform, "system": platform.system(), "version": platform.version(),
+            "architecture": platform.machine(), "kernel": platform.release(), "release": platform.release(),
             "distribution": distribution, "libc": list(platform.libc_ver()),
             "rust": rust, "rust_host_target": target.group(1) if target else None,
             "cargo_build_target": os.environ.get("CARGO_BUILD_TARGET"),
             "python": {"executable": sys.executable, "version": sys.version},
-            "openssh_client": version(["ssh", "-V"]), "openssh_server": version(["/usr/sbin/sshd", "-V"])}
+            "openssh_client": version(["ssh", "-V"]), "openssh_server": version([server, "-V"])}
 
 
 def source_revision():
@@ -244,6 +268,14 @@ def inventory(config=None, host_platform=None):
         covered.add(identifier)
     if any(source in covered for identifier in covered for source in by_id[identifier]["proof"]):
         raise ValueError("coverage proofs must be executable assertions, not other derived obligations")
+    # An execution profile inherits obligations, never their previous evidence.
+    for profile, definition in config["profiles"].items():
+        shared = set(definition.get("includes", []))
+        if shared - config["profiles"].keys() or profile in shared:
+            raise ValueError(f"invalid shared profiles for {profile}")
+        for entry in entries:
+            if shared.intersection(entry["profiles"]):
+                entry["profiles"] = sorted(set(entry["profiles"]) | {profile})
     for entry in entries:
         if host_platform not in entry.get("platforms", [host_platform]):
             entry["status"] = "not-applicable"
@@ -251,7 +283,7 @@ def inventory(config=None, host_platform=None):
 
 
 def discovered(config):
-    regressions = {str(path.relative_to(ROOT)) for path in ROOT.glob(config["discovery"]["regressions"])}
+    regressions = {path.relative_to(ROOT).as_posix() for path in ROOT.glob(config["discovery"]["regressions"])}
     commands = {name for path in ROOT.glob(config["discovery"]["commands"])
                 for name in re.findall(r'\.name\s*=\s*"([^"]+)"', path.read_text())}
     options = set(re.findall(r'\.name\s*=\s*"([^"]+)"', (ROOT / config["discovery"]["options"]).read_text()))
@@ -287,16 +319,17 @@ def scope_inventory(config):
             entries.append({"id": f"review:{kind}:{name}", "profiles": ["classification"],
                             "requirement": "required", "status": "pending",
                             "reason": "New or removed upstream surface needs explicit assertion disposition."})
-    paths = {str(path.relative_to(ROOT)) for path in (ROOT / "regress").rglob("*") if path.is_file()}
-    paths |= {str(path.relative_to(ROOT)) for path in ROOT.glob(config["discovery"]["commands"])
+    paths = {path.relative_to(ROOT).as_posix() for path in (ROOT / "regress").rglob("*") if path.is_file()}
+    paths |= {path.relative_to(ROOT).as_posix() for path in ROOT.glob(config["discovery"]["commands"])
               if re.search(r'\.name\s*=', path.read_text())}
     paths |= {config["discovery"]["options"], config["discovery"]["formats"]}
     tracked = subprocess.check_output(
         ["git", "ls-files", "-z", "--", "*.c", "*.h", "*.y", "*.l", "*.ac", "*.am"], cwd=ROOT)
     paths |= {os.fsdecode(path) for path in tracked.split(b"\0") if path}
     reviewed = scope["source_sha256"]
+    endings = checkout_line_endings(ROOT)
     for path in sorted(paths | reviewed.keys()):
-        if path not in paths or path not in reviewed or digest(ROOT / path) != reviewed[path]:
+        if path not in paths or path not in reviewed or source_digest(ROOT / path, ROOT, endings) != reviewed[path]:
             entries.append({"id": "review:source:" + path, "profiles": ["classification"],
                             "requirement": "required", "status": "pending",
                             "reason": "Source, fixture or shared helper changed; re-review mapped assertions before updating its hash."})
@@ -613,12 +646,18 @@ def executable_identity(path):
 
 
 def suite_reference(suite, references):
-    role = suite.get("reference", "current")
+    needs_reference = ("$reference" in suite.get("env", {}).values()
+                       or suite.get("reference_version") or suite.get("kind") == "rustty-system-ssh")
+    role = suite.get("reference", "current" if needs_reference else "none")
+    if role == "none":
+        if needs_reference:
+            raise ValueError(f"{suite['id']} declares no reference but uses a C reference")
+        return None
     if role not in ("current", "older"):
         raise ValueError(f"unknown reference role in {suite['id']}: {role}")
     identity = references.get(role)
     if not identity:
-        raise ValueError(f"{suite['id']} requires --older-reference")
+        raise ValueError(f"{suite['id']} requires --{'older-' if role == 'older' else ''}reference")
     expected = suite.get("reference_version")
     if expected and identity.get("version") != expected:
         raise ValueError(f"{suite['id']} requires {expected}, got {identity.get('version')}")
@@ -628,7 +667,33 @@ def suite_reference(suite, references):
 
 
 def suite_observations(suite, returncode, output):
-    completed = {name: result for name, result in re.findall(r"^test (\S+) \.\.\. (ok|FAILED|ignored)(?:[ \t].*)?$", output, re.MULTILINE)}
+    harness = suite.get("harness", "libtest")
+    if harness == "rustty-windows-conpty":
+        manifest = json.loads((ROOT / "rust/windows/conpty.json").read_text())
+        hashes = {file["name"]: file["sha256"] for file in manifest["files"]}
+        expected = {"suite": "windows_conpty", "status": "passed", "completed_redraws": 8,
+                    "byte_boundary_cursor_ordering": True, "version": manifest["version"],
+                    "package_sha256": manifest["sha256"], "conpty_sha256": hashes["conpty.dll"],
+                    "openconsole_sha256": hashes["OpenConsole.exe"]}
+        records = []
+        for line in output.splitlines():
+            if not line.startswith("TMUXX_WINDOWS_CONPTY_RESULT="):
+                continue
+            try:
+                value = json.loads(line.split("=", 1)[1])
+                valid = isinstance(value, dict) and all(
+                    type(value.get(key)) is type(wanted) and value[key] == wanted for key, wanted in expected.items())
+            except ValueError:
+                valid = False
+            records.append(("windows_conpty::synchronized_redraws", "ok" if valid else "FAILED"))
+    elif harness == "libtest":
+        records = re.findall(r"^test (\S+) \.\.\. (ok|FAILED|ignored)(?:[ \t].*)?$", output, re.MULTILINE)
+    else:
+        raise ValueError(f"unknown result harness: {harness}")
+    completed = {}
+    for name, result in records:
+        # Duplicate names are ambiguous; a later success must not erase failure.
+        completed[name] = "duplicate" if name in completed else result
     observations = []
     for assertion in suite["assertions"]:
         passed = returncode == 0 and all(completed.get(name) == "ok" for name in assertion["tests"])
@@ -773,31 +838,114 @@ def stop_suite_session(process):
     return errors
 
 
+class WindowsSuiteJob:
+    """Kill-on-close ownership established before the worker starts any tests."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [("ProcessUserTimeLimit", ctypes.c_int64), ("JobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", BasicLimits), ("IoInfo", ctypes.c_uint64 * 6),
+                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        for name, arguments, result in [
+            ("CreateJobObjectW", [ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
+            ("SetInformationJobObject", [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
+            ("AssignProcessToJobObject", [wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+            ("TerminateJobObject", [wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+            ("CloseHandle", [wintypes.HANDLE], wintypes.BOOL),
+        ]:
+            function = getattr(self.api, name)
+            function.argtypes, function.restype = arguments, result
+        self.handle = self.api.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close()
+            raise error
+
+    def assign(self, process):
+        import ctypes
+        if not self.api.AssignProcessToJobObject(self.handle, int(process._handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def stop(self):
+        import ctypes
+        if not self.api.TerminateJobObject(self.handle, 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self):
+        if self.handle:
+            self.api.CloseHandle(self.handle)
+            self.handle = None
+
+
 def run_suite_process(command, *, cwd, env, timeout):
+    job = WindowsSuiteJob() if os.name == "nt" else None
     owner_token = secrets.token_hex(32)
-    process = subprocess.Popen(command, cwd=cwd, env={**env, SUITE_OWNER_ENV: owner_token}, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=os.name == "posix")
-    process.tmuxx_suite_owner_token = owner_token
+    process = None
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        cleanup_errors = stop_suite_session(process)
+        # Before assignment the worker can only wait for this byte. If startup
+        # or the owner fails, EOF ends it without ever spawning the test command.
+        invocation = [sys.executable, str(Path(__file__).resolve()), "--suite-child", *command] if job else command
+        process = subprocess.Popen(invocation, cwd=cwd, env={**env, SUITE_OWNER_ENV: owner_token}, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, stdin=subprocess.PIPE if job else None,
+                                   start_new_session=os.name == "posix")
+        process.tmuxx_suite_owner_token = owner_token
+        if job:
+            job.assign(process)
+            process.stdin.write(b"\x01")
+            process.stdin.close()
+            process.stdin = None
         try:
-            stdout, stderr = process.communicate(timeout=2)
-        except subprocess.TimeoutExpired as drain:
-            # A separately detached process may still hold inherited pipe writers.
-            stdout, stderr = drain.output or error.output or b"", drain.stderr or error.stderr or b""
-            process.stdout.close()
-            process.stderr.close()
-            cleanup_errors.append("suite output pipes remained open after session cleanup")
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            if job:
+                job.stop()
+            cleanup_errors = stop_suite_session(process)
             try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                cleanup_errors.append("suite child could not be reaped within cleanup timeout")
-        error.output, error.stderr = stdout, stderr
-        error.cleanup_errors = cleanup_errors
+                stdout, stderr = process.communicate(timeout=2)
+            except subprocess.TimeoutExpired as drain:
+                # A separately detached Unix process may retain output writers.
+                stdout, stderr = drain.output or error.output or b"", drain.stderr or error.stderr or b""
+                process.stdout.close()
+                process.stderr.close()
+                cleanup_errors.append("suite output pipes remained open after session cleanup")
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    cleanup_errors.append("suite child could not be reaped within cleanup timeout")
+            error.output, error.stderr = stdout, stderr
+            error.cleanup_errors = cleanup_errors
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    except BaseException:
+        if process and process.poll() is None:
+            if job:
+                job.stop()
+            stop_suite_session(process)
+            process.wait(timeout=2)
         raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        if job:
+            job.close()
+        if process:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream and not stream.closed:
+                    stream.close()
 
 
 def run_suite(suite, reference):
@@ -809,10 +957,14 @@ def run_suite(suite, reference):
     try:
         if sys.platform not in suite_platforms(suite):
             raise ValueError(f"suite {suite['id']} requires execution on {suite_platforms(suite)}, not {sys.platform}")
+        if reference is None and "$reference" in suite.get("env", {}).values():
+            raise ValueError(f"{suite['id']} needs an explicit C reference")
         external = None
         if suite.get("kind") in ("rustty-cargo", "rustty-system-ssh", "rustty-desktop-smoke"):
             external = rustty_identity()
             cwd = Path(external["root"])
+            if sys.platform == "win32":
+                env.setdefault("TMUXX_CONPTY_RESOURCES", str(cwd / "target/debug/Rustty/resources"))
             if suite["kind"] == "rustty-system-ssh":
                 command = [sys.executable, str(HERE / "rustty_system_ssh.py"), "--rustty", str(cwd), "--reference", str(reference)]
             elif suite["kind"] == "rustty-desktop-smoke":
@@ -822,7 +974,8 @@ def run_suite(suite, reference):
         result = run_suite_process(command, cwd=cwd, env=env, timeout=suite.get("timeout", 300))
         output = result.stdout.decode("utf-8", "replace")
         observations, completed = suite_observations(suite, result.returncode, output)
-        details = {"argv": command, "cwd": str(cwd), "env": {key: env[key] for key in suite.get("env", {})}, "status": result.returncode,
+        recorded_env = set(suite.get("env", {})) | ({"TMUXX_CONPTY_RESOURCES"} if "TMUXX_CONPTY_RESOURCES" in env else set())
+        details = {"argv": command, "cwd": str(cwd), "env": {key: env[key] for key in sorted(recorded_env)}, "status": result.returncode,
                    "stdout_base64": b64(result.stdout), "stderr_base64": b64(result.stderr), "completed_tests": completed}
         if external:
             details["rustty"] = external
@@ -844,8 +997,10 @@ def run_suite(suite, reference):
 def smoke(args):
     config = manifest()
     fingerprint = implementation_fingerprint()
-    reference = executable_identity(args.reference)
-    if not reference["version"].startswith("tmux "):
+    if not args.no_smoke and not args.reference:
+        raise ValueError("C/R smoke scenarios require --reference; use --no-smoke for native suites")
+    reference = executable_identity(args.reference) if args.reference else None
+    if reference and not reference["version"].startswith("tmux "):
         raise ValueError("reference must identify as C tmux")
     older = executable_identity(args.older_reference) if args.older_reference else None
     if older and not older["version"].startswith("tmux "):
@@ -861,7 +1016,8 @@ def smoke(args):
         raise ValueError("Rust executable suites cannot be attached to C/C evidence")
     selected_references = {name: suite_reference(suite, references) for name, suite in selected.items()}
     for name, suite in selected.items():
-        evidence, suite_details[name] = run_suite(suite, selected_references[name]["path"])
+        identity = selected_references[name]
+        evidence, suite_details[name] = run_suite(suite, identity["path"] if identity else None)
         suite_details[name]["reference"] = selected_references[name]
         observations.extend(evidence)
         passed = all(item["status"] == "pass" for item in evidence)
@@ -892,7 +1048,8 @@ def smoke(args):
     references_changed = any(identity and (not Path(identity["path"]).is_file() or digest(identity["path"]) != identity["sha256"]) for identity in references.values())
     report = {"schema_version": 2, "kind": "exact-assertion-evidence", "candidate_kind": args.candidate_kind,
               "checkout_revision": source_revision(), "reference_revision": config["reference_revision"], "manifest_sha256": digest(MANIFEST),
-              "implementation_fingerprint": fingerprint, "source_changed_during_run": changed, "platform": sys.platform, "host": host_identity(), "platform_execution": config["platform_execution"],
+              "implementation_fingerprint": fingerprint, "source_changed_during_run": changed, "platform": sys.platform,
+              "host": host_identity(), "platform_execution": config["platform_execution"],
               "reference": reference, "older_reference": older, "references_changed_during_run": references_changed,
               "candidate": candidate, "summary": counts(entries),
               "entries": entries, "scenarios": details, "suites": suite_details, "blocked_suites": blocked_suites, "profile_release_ready": False}
@@ -931,8 +1088,8 @@ def blockers(report, profile, config=None):
                               cwd=ROOT, capture_output=True)
     if baseline.returncode:
         problems.append("reviewed C baseline is missing or not an ancestor; review the upstream history")
-    for role in ("reference", "candidate", *(["older_reference"] if report.get("older_reference") else [])):
-        recorded = report.get(role, {})
+    for role in ("candidate", *(["reference"] if report.get("reference") else []), *(["older_reference"] if report.get("older_reference") else [])):
+        recorded = report.get(role) or {}
         path = recorded.get("path")
         if not path or not Path(path).is_file() or digest(path) != recorded.get("sha256"):
             problems.append(f"{role} executable is missing or changed since evidence was collected")
@@ -958,6 +1115,12 @@ def blockers(report, profile, config=None):
                 (profile in entry["profiles"] or "classification" in entry["profiles"])}
     required.update(source for entry in current_entries if entry["id"] in required for source in entry.get("proof", []))
     by_id = {entry["id"]: entry for entry in current_entries}
+    if not report.get("reference") and any(
+        entry["id"] in required and entry.get("scenario")
+        and entry["observation_results"].get(entry["scenario"]) in ("pass", "intentional-difference")
+        for entry in current_entries
+    ):
+        problems.append("C/R scenario evidence requires a genuine C reference executable")
     references = {"current": report.get("reference"), "older": report.get("older_reference")}
     for suite in suites().values():
         if not any(assertion["id"] in required for assertion in suite["assertions"]):
@@ -1003,7 +1166,7 @@ def main(argv=None):
     inv = sub.add_parser("inventory", help="show reviewed scoped assertions and upstream drift without certifying them")
     inv.add_argument("--json", action="store_true")
     smoke_parser = sub.add_parser("smoke", help="run declared narrow C/C or C/R scenarios, not the complete release gate")
-    smoke_parser.add_argument("--reference", required=True)
+    smoke_parser.add_argument("--reference", help="C tmux executable required by smoke scenarios and C-reference suites")
     smoke_parser.add_argument("--older-reference", help="explicit C3.7c executable required by the supported-version suites")
     smoke_parser.add_argument("--candidate", required=True)
     smoke_parser.add_argument("--candidate-kind", choices=("c", "rust"), default="rust")
@@ -1043,4 +1206,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--suite-child":
+        # Private Windows Job Object handshake, deliberately outside argparse.
+        if sys.stdin.buffer.read(1) != b"\x01":
+            raise SystemExit(125)
+        raise SystemExit(subprocess.call(sys.argv[2:], stdin=subprocess.DEVNULL))
     raise SystemExit(main())

@@ -21,6 +21,7 @@ import runner
 class InventoryTests(unittest.TestCase):
     def version_suites(self):
         return {name: {"id": name, "reference": role, "reference_version": version, "profiles": ["system-client"],
+                       "platforms": ["darwin", "linux", "win32"],
                        "args": ["test"], "assertions": [{"id": name + ".exact", "tests": ["pairings"]}]}
                 for name, role, version in [("current", "current", "tmux next-3.9"), ("older", "older", "tmux 3.7c")]}
 
@@ -161,7 +162,7 @@ class InventoryTests(unittest.TestCase):
             (integration / "rustty.patch").write_text("patch")
             (integration / "manifest.json").write_text(json.dumps({"base_revision": "base", "files": {
                 "crates/example/lib.rs": {"result_sha256": hashlib.sha256(b"original").hexdigest()}}}))
-            with patch.object(runner, "rustty_root", return_value=root), patch.object(runner, "RUSTTY_INTEGRATION", integration), patch.object(runner.subprocess, "check_output", return_value="base\n"):
+            with patch.object(runner, "rustty_root", return_value=root), patch.object(runner, "RUSTTY_INTEGRATION", integration), patch.object(runner, "checkout_line_endings", return_value={}), patch.object(runner.subprocess, "check_output", return_value="base\n"):
                 original = runner.rustty_identity()
                 self.assertEqual(original["sources"]["crates/example/lib.rs"], runner.digest(source))
                 with patch.object(runner.subprocess, "check_output", return_value="changed\n"):
@@ -178,7 +179,7 @@ class InventoryTests(unittest.TestCase):
                     runner.rustty_identity()
 
     def test_rustty_suite_runs_exact_tests_and_rejects_source_change(self):
-        suite = {"id": "external", "kind": "rustty-cargo", "args": ["test"],
+        suite = {"id": "external", "kind": "rustty-cargo", "args": ["test"], "platforms": [sys.platform],
                  "assertions": [{"id": "external.exact", "tests": ["module::one"]}]}
         identity = {"root": "/actual/rustty", "sources": {"lib.rs": "before"}}
         result = subprocess.CompletedProcess([], 0, b"test module::one ... ok\n", b"")
@@ -247,10 +248,10 @@ class InventoryTests(unittest.TestCase):
             {"assertion": "graph.create-split-rename", "scenario": "graph", "status": "pass"}])
         target = config["coverage"][0]["obligation"]
         next(entry for entry in entries if entry["id"] == target)["status"] = "pass"
-        with tempfile.NamedTemporaryFile() as executable:
-            executable.write(b"test executable")
-            executable.flush()
-            identity = {"path": executable.name, "sha256": runner.digest(executable.name)}
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "binary"
+            executable.write_bytes(b"test executable")
+            identity = {"path": str(executable), "sha256": runner.digest(executable)}
             report = {"candidate_kind": "rust", "checkout_revision": runner.source_revision(),
                       "reference_revision": config["reference_revision"], "manifest_sha256": runner.digest(runner.MANIFEST),
                       "implementation_fingerprint": "stale", "platform": "darwin", "reference": identity,
@@ -258,6 +259,9 @@ class InventoryTests(unittest.TestCase):
             problems = runner.blockers(report, "command-control", config)
             self.assertIn(f"{target}: pending", problems)
             self.assertIn("implementation changed since evidence was collected", problems)
+            report["reference"] = None
+            self.assertIn("C/R scenario evidence requires a genuine C reference executable",
+                          runner.blockers(report, "command-control", config))
 
     def test_generated_metadata_drift_blocks_inventory(self):
         for metadata in [runner.generate_command_metadata, runner.generate_option_metadata]:
@@ -284,9 +288,9 @@ class InventoryTests(unittest.TestCase):
         with patch.object(runner, "discovered", return_value=discovered):
             ids = {entry["id"] for entry in runner.inventory()}
         self.assertIn("review:commands:new-upstream-command", ids)
-        digest = runner.digest
+        source_digest = runner.source_digest
         changed = runner.ROOT / "regress/targets-panes.sh"
-        with patch.object(runner, "digest", side_effect=lambda path: "changed" if path == changed else digest(path)):
+        with patch.object(runner, "source_digest", side_effect=lambda path, root, endings: "changed" if path == changed else source_digest(path, root, endings)):
             entries = runner.inventory()
         identifier = "review:source:regress/targets-panes.sh"
         self.assertIn(identifier, {entry["id"] for entry in entries})
@@ -299,15 +303,15 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(by_id["graph.create-split-rename"]["status"], "pass")
         self.assertEqual(by_id["scope:sessions-windows-targets:1"]["status"], "pending")
         self.assertEqual(by_id["scope:pane-layout:1"]["status"], "pending")
-        self.assertTrue(all(entry["status"] == "deferred" for entry in entries if "windows" in entry["profiles"]))
+        self.assertTrue(all(entry["status"] == "pending" for entry in entries if entry["id"].startswith("windows.")))
         with self.assertRaises(ValueError):
             runner.apply_observations(entries, [{"assertion": "undeclared", "scenario": "graph", "status": "pass"}])
 
     def test_pending_and_reference_only_evidence_block_gate(self):
-        with tempfile.NamedTemporaryFile() as executable:
-            executable.write(b"test binary identity")
-            executable.flush()
-            identity = {"path": executable.name, "sha256": runner.digest(executable.name)}
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "binary"
+            executable.write_bytes(b"test binary identity")
+            identity = {"path": str(executable), "sha256": runner.digest(executable)}
             report = {"candidate_kind": "rust", "checkout_revision": runner.source_revision(), "reference_revision": runner.manifest()["reference_revision"],
                       "manifest_sha256": runner.digest(runner.MANIFEST), "implementation_fingerprint": runner.implementation_fingerprint(),
                       "platform": "darwin", "reference": identity, "candidate": identity, "entries": runner.inventory()}
@@ -328,6 +332,96 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(observations[0]["status"], "failure")
         observations, _ = runner.suite_observations(suite, 0, "test module::one ... ok\ntest module::two ... ok\n")
         self.assertEqual(observations[0]["status"], "pass")
+
+    def test_windows_profile_retains_shared_contracts_and_every_windows_obligation(self):
+        config = runner.manifest()
+        self.assertEqual(config["platform_execution"]["win32"]["status"], "active")
+        self.assertEqual(config["profiles"]["windows"]["execution"], "active")
+        required = {entry["id"]: entry for entry in runner.inventory() if "windows" in entry["profiles"]}
+        for name in ["windows.named-pipe-acl-desktop-ssh", "windows.bridge-no-duplicate-server",
+                     "windows.conpty-runtime-packaging", "windows.input-resize-descendant-lifetime",
+                     "parser.byte-grammar-and-quoting", "control.every-byte-fragmentation",
+                     "terminal.main-alternate-history", "lifetime.persist-ack-gui-restart",
+                     "scope:configuration:1", "scope:terminal-state:1"]:
+            self.assertEqual(required[name]["requirement"], "required", name)
+            self.assertEqual(required[name]["status"], "pending", name)
+
+    def test_native_suites_need_no_c_reference_but_reference_suites_still_do(self):
+        self.assertIsNone(runner.suite_reference({"id": "native", "env": {}}, {}))
+        for suite in [{"id": "c", "env": {"TMUXX_C_TMUX": "$reference"}},
+                      {"id": "c", "reference": "current"},
+                      {"id": "c", "kind": "rustty-system-ssh"}]:
+            with self.subTest(suite=suite), self.assertRaisesRegex(ValueError, "requires --reference"):
+                runner.suite_reference(suite, {})
+        with self.assertRaisesRegex(ValueError, "declares no reference"):
+            runner.suite_reference({"id": "c", "reference": "none", "env": {"C": "$reference"}}, {})
+
+    def test_native_collection_without_a_fictitious_c_binary(self):
+        suite = {"id": "native", "profiles": ["windows"], "args": ["test"], "platforms": [sys.platform],
+                 "assertions": [{"id": "native.exact", "tests": ["one"]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "candidate.exe"
+            binary.write_bytes(b"candidate fixture")
+            identity = {"path": str(binary), "version": "tmuxx 0.1.0", "sha256": runner.digest(binary)}
+            entries = [{"id": "native.exact", "requirement": "required", "status": "pending", "suites": ["native"]}]
+            args = SimpleNamespace(reference=None, older_reference=None, candidate=str(binary), candidate_kind="rust",
+                                   suite=["native"], no_smoke=True, scenario=None, report=str(Path(directory) / "report.json"))
+            result = ([{"assertion": "native.exact", "scenario": "suite:native", "status": "pass"}], {"status": 0})
+            with patch.object(runner, "suites", return_value={"native": suite}), patch.object(runner, "inventory", return_value=entries), \
+                 patch.object(runner, "implementation_fingerprint", return_value="source"), \
+                 patch.object(runner, "executable_identity", return_value=identity) as identify, \
+                 patch.object(runner, "run_suite", return_value=result) as execute:
+                self.assertEqual(runner.smoke(args), 0)
+                identify.assert_called_once_with(str(binary))
+                execute.assert_called_once_with(suite, None)
+            report = json.loads(Path(args.report).read_text())
+            self.assertIsNone(report["reference"])
+            self.assertIsNone(report["suites"]["native"]["reference"])
+            self.assertEqual(report["host"]["system"], runner.platform.system())
+            self.assertEqual(report["host"]["platform"], sys.platform)
+            self.assertEqual(report["host"]["python"]["executable"], sys.executable)
+            args.no_smoke = False
+            with self.assertRaisesRegex(ValueError, "smoke scenarios require --reference"):
+                runner.smoke(args)
+
+    def test_exact_custom_conpty_result_rejects_skip_zero_duplicate_and_nonzero_exit(self):
+        suite = {"id": "conpty", "harness": "rustty-windows-conpty", "assertions": [
+            {"id": "cursor", "tests": ["windows_conpty::synchronized_redraws"]}]}
+        manifest = json.loads((runner.ROOT / "rust/windows/conpty.json").read_text())
+        hashes = {file["name"]: file["sha256"] for file in manifest["files"]}
+        result = {"suite": "windows_conpty", "status": "passed", "completed_redraws": 8,
+                  "byte_boundary_cursor_ordering": True, "version": manifest["version"],
+                  "package_sha256": manifest["sha256"], "conpty_sha256": hashes["conpty.dll"],
+                  "openconsole_sha256": hashes["OpenConsole.exe"]}
+        marker = "TMUXX_WINDOWS_CONPTY_RESULT=" + json.dumps(result) + "\n"
+        for code, output in [(0, ""), (0, "running 0 tests\n"), (0, "windows_conpty: ignored\n"),
+                             (1, marker), (0, marker * 2), (0, "test windows_conpty::synchronized_redraws ... ok\n")]:
+            with self.subTest(code=code, output=output):
+                self.assertEqual(runner.suite_observations(suite, code, output)[0][0]["status"], "failure")
+        self.assertEqual(runner.suite_observations(suite, 0, marker)[0][0]["status"], "pass")
+        for key, invalid in [("package_sha256", "wrong"), ("conpty_sha256", "wrong"), ("openconsole_sha256", "wrong"),
+                             ("version", "wrong"), ("completed_redraws", 7), ("byte_boundary_cursor_ordering", 1)]:
+            changed = "TMUXX_WINDOWS_CONPTY_RESULT=" + json.dumps({**result, key: invalid})
+            with self.subTest(key=key):
+                self.assertEqual(runner.suite_observations(suite, 0, changed)[0][0]["status"], "failure")
+        self.assertEqual(runner.suite_observations(suite, 0, "TMUXX_WINDOWS_CONPTY_RESULT=invalid")[0][0]["status"], "failure")
+        suite.pop("harness")
+        output = "test windows_conpty::synchronized_redraws ... FAILED\ntest windows_conpty::synchronized_redraws ... ok\n"
+        self.assertEqual(runner.suite_observations(suite, 0, output)[0][0]["status"], "failure")
+
+    def test_source_ledger_handles_git_crlf_checkout_without_hiding_edits_or_binary_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.c"
+            source.write_bytes(b"one\r\ntwo\r\n")
+            expected = hashlib.sha256(b"one\ntwo\n").hexdigest()
+            endings = {"source.c": [b"i/lf", b"w/crlf", b"attr/"]}
+            self.assertEqual(runner.source_digest(source, root, endings), expected)
+            self.assertEqual(source.read_bytes(), b"one\r\ntwo\r\n")
+            self.assertNotEqual(runner.source_digest(source, root, {}), expected)
+            self.assertNotEqual(runner.source_digest(source, root, {"source.c": [b"i/lf", b"w/crlf", b"attr/-text"]}), expected)
+            source.write_bytes(b"one\r\nchanged\r\n")
+            self.assertNotEqual(runner.source_digest(source, root, endings), expected)
 
     def test_failure_cannot_be_overwritten_by_another_passing_observation(self):
         observations = [{"assertion": "graph.create-split-rename", "scenario": "a", "status": "failure"},
@@ -396,10 +490,10 @@ class PlatformEvidenceTests(unittest.TestCase):
                  "assertions": [{"id": "desktop.exact", "tests": ["frame"]}]}
         entry = {"id": "desktop.exact", "profiles": ["native-views"], "requirement": "required", "status": "pending", "suites": ["desktop"]}
         config = {"profiles": {"native-views": {"platforms": ["linux", "darwin"]}}, "reference_revision": "baseline"}
-        with tempfile.NamedTemporaryFile() as executable:
-            executable.write(b"test identity")
-            executable.flush()
-            identity = {"path": executable.name, "sha256": runner.digest(executable.name)}
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "candidate"
+            executable.write_bytes(b"test identity")
+            identity = {"path": str(executable), "sha256": runner.digest(executable)}
             report = {"platform": "linux", "candidate_kind": "rust", "checkout_revision": "head", "reference_revision": "baseline",
                       "manifest_sha256": runner.digest(runner.MANIFEST), "implementation_fingerprint": "sources",
                       "reference": identity, "candidate": identity,
@@ -431,10 +525,10 @@ class PlatformEvidenceTests(unittest.TestCase):
         host = {"platform": "linux", "architecture": "aarch64", "kernel": "test-kernel",
                 "distribution": {"ID": "ubuntu"}, "libc": ["glibc", "2.43"],
                 "rust_host_target": "aarch64-unknown-linux-gnu", "cargo_build_target": None}
-        with tempfile.NamedTemporaryFile() as executable:
-            executable.write(b"test identity")
-            executable.flush()
-            identity = {"path": executable.name, "sha256": runner.digest(executable.name)}
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "candidate"
+            executable.write_bytes(b"test identity")
+            identity = {"path": str(executable), "sha256": runner.digest(executable)}
             report = {"platform": "linux", "host": host, "candidate_kind": "rust", "checkout_revision": "head",
                       "reference_revision": "baseline", "manifest_sha256": runner.digest(runner.MANIFEST),
                       "implementation_fingerprint": "sources", "reference": identity, "candidate": identity, "entries": []}
@@ -457,6 +551,86 @@ class PlatformEvidenceTests(unittest.TestCase):
 
 
 class SuiteCleanupTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "native Windows Job Object qualification")
+    def test_windows_job_cleans_descendants_on_success_failure_timeout_and_interruption(self):
+        import ctypes
+        from ctypes import wintypes
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.OpenProcess.argtypes, api.OpenProcess.restype = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE
+        api.WaitForSingleObject.argtypes, api.WaitForSingleObject.restype = [wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for mode in ("success", "failure", "timeout", "interrupt", "owner-death", "startup-failure"):
+                with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    log = root / "pids"
+                    fixture = root / "fixture.py"
+                    fixture.write_text("""import os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+with open(os.environ['SUITE_PID_LOG'], 'w') as log:
+    print(os.getpid(), child.pid, file=log, flush=True)
+os.write(1, b'test owned ... ok\\n\\xffstdout\\n')
+os.write(2, b'\\xfestderr\\n')
+mode = os.environ['SUITE_MODE']
+if mode in ('success', 'failure'):
+    sys.exit(0 if mode == 'success' else 3)
+time.sleep(60)
+""")
+                    env = {**os.environ, "SUITE_PID_LOG": str(log), "SUITE_MODE": mode}
+                    command = [sys.executable, str(fixture)]
+                    def wait_for_fixture():
+                        deadline = time.monotonic() + 5
+                        while not log.exists() and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        self.assertTrue(log.exists(), "owned fixture must start before interruption")
+                    if mode == "interrupt":
+                        def interrupted(*args, **kwargs):
+                            wait_for_fixture()
+                            raise KeyboardInterrupt()
+                        with patch.object(subprocess.Popen, "communicate", interrupted), self.assertRaises(KeyboardInterrupt):
+                            runner.run_suite_process(command, cwd=root, env=env, timeout=3)
+                    elif mode == "startup-failure":
+                        with patch.object(runner.WindowsSuiteJob, "assign", side_effect=OSError("assignment fixture")), \
+                             self.assertRaisesRegex(OSError, "assignment fixture"):
+                            runner.run_suite_process(command, cwd=root, env=env, timeout=3)
+                        self.assertFalse(log.exists(), "tests cannot start before Job Object assignment")
+                    elif mode == "owner-death":
+                        script = ("import sys; sys.path.insert(0, sys.argv[1]); import runner; "
+                                  "runner.run_suite_process(sys.argv[2:], cwd='.', env=__import__('os').environ.copy(), timeout=60)")
+                        owner = subprocess.Popen([sys.executable, "-c", script, str(runner.HERE), *command], cwd=root, env=env,
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        try:
+                            wait_for_fixture()
+                        finally:
+                            owner.kill()
+                            owner.wait(timeout=3)
+                    elif mode == "timeout":
+                        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                            runner.run_suite_process(command, cwd=root, env=env, timeout=2)
+                        self.assertIn(b"\xffstdout", caught.exception.output)
+                        self.assertIn(b"\xfestderr", caught.exception.stderr)
+                        self.assertEqual(caught.exception.cleanup_errors, [])
+                    else:
+                        result = runner.run_suite_process(command, cwd=root, env=env, timeout=3)
+                        self.assertEqual(result.returncode, 0 if mode == "success" else 3)
+                        self.assertIn(b"\xffstdout", result.stdout)
+                        self.assertIn(b"\xfestderr", result.stderr)
+                    self.assertIsNone(unrelated.poll(), "cleanup must leave independent processes alive")
+                    if log.exists():
+                        for pid in map(int, log.read_text().split()):
+                            handle = api.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+                            if handle:
+                                try:
+                                    self.assertEqual(api.WaitForSingleObject(handle, 3000), 0, f"test-owned PID {pid} survived")
+                                finally:
+                                    api.CloseHandle(handle)
+        finally:
+            unrelated.kill()
+            unrelated.wait(timeout=3)
+
     @unittest.skipUnless(os.name == "posix", "suite-session cleanup is Unix-only")
     def test_timeout_stops_owned_nested_and_orphan_groups_and_preserves_evidence(self):
         for mode in ("running", "exited"):
@@ -549,6 +723,7 @@ time.sleep(60)
             subprocess.TimeoutExpired(["suite"], 2, output=b"latest-out", stderr=b"latest-err"),
         ]
         with patch.object(runner.subprocess, "Popen", return_value=process), \
+             patch.object(runner, "WindowsSuiteJob", return_value=MagicMock()), \
              patch.object(runner, "stop_suite_session", return_value=[]):
             with self.assertRaises(subprocess.TimeoutExpired) as caught:
                 runner.run_suite_process(["suite"], cwd="/unused", env={}, timeout=1)
