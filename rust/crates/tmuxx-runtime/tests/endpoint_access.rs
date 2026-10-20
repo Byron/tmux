@@ -73,3 +73,61 @@ fn native_and_ipc_endpoints_are_owner_private_and_lock_symlinks_are_rejected() {
             .is_symlink()
     );
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires passwordless sudo to run an isolated nobody socket client"]
+fn linux_native_and_ipc_reject_other_uid_with_and_without_mode_barrier() {
+    let directory = Directory::new();
+    std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let native = directory.path("native");
+    let ipc = directory.path("ipc");
+    let mut options = tmuxx_runtime::Options::new(&native);
+    options.tmux_endpoint = Some(ipc.clone());
+    let host = tmuxx_runtime::start(options).unwrap();
+    let script = r#"
+import errno, os, socket, sys
+assert os.geteuid() != int(sys.argv[1]), 'test requires a distinct real OS user'
+for path in sys.argv[3:]:
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(3)
+        try:
+            client.connect(path)
+        except PermissionError:
+            assert sys.argv[2] == 'private'
+        else:
+            assert sys.argv[2] == 'peer', 'private socket admitted a different user'
+            try:
+                data = client.recv(1)
+            except ConnectionResetError:
+                data = b''
+            assert data == b'', 'unauthorized peer received protocol output'
+print('both endpoints rejected the distinct uid')
+"#;
+    for mode in ["private", "peer"] {
+        if mode == "peer" {
+            // Bypass only these fixture modes to exercise SO_PEERCRED itself.
+            for path in [&native, &ipc] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666)).unwrap();
+            }
+        } else {
+            assert_private_socket(&native);
+            assert_private_socket(&ipc);
+        }
+        let result = std::process::Command::new("sudo")
+            .args(["-n", "-u", "nobody", "--", "/usr/bin/python3", "-c", script])
+            .arg(unsafe { libc::geteuid() }.to_string())
+            .arg(mode)
+            .args([&native, &ipc])
+            .output()
+            .expect("sudo and the nobody account are required for this exact access test");
+        assert!(result.status.success(), "{mode}: {result:?}");
+        assert_eq!(result.stdout, b"both endpoints rejected the distinct uid\n");
+        let mut same_user = UnixStream::connect(&native).unwrap();
+        same_user
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        tmuxx_runtime::native_handshake(&mut same_user).unwrap();
+    }
+    host.shutdown().unwrap();
+}
