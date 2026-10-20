@@ -113,16 +113,22 @@ impl Engine {
                 } else {
                     &screen.primary
                 };
-                let found = (0..screen.height()).find(|row| {
-                    let text = screen.row_text(screen.row(*row));
+                let mut found = None;
+                for row in 0..screen.height() {
+                    let text = screen.row_text(screen.row(row));
                     let text = text.trim_end_matches(|c: char| c.is_ascii_whitespace());
-                    tmuxx_format::content_match(
+                    if tmuxx_format::content_match(
                         &needle,
                         text.as_bytes(),
                         flags.contains(&b'r'),
                         flags.contains(&b'i'),
                     )
-                });
+                    .map_err(|error| error.to_string())?
+                    {
+                        found = Some(row);
+                        break;
+                    }
+                }
                 Ok(found.map_or(0, |row| row + 1).to_string().into_bytes())
             })());
         }
@@ -336,6 +342,92 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_content_formats_search_visible_unicode_rows_and_alternate_screen() {
+        let mut engine = Engine::default();
+        let mut context = ClientContext::default();
+        let command = Command {
+            blocks: Default::default(),
+            args: ["new-session", "-d", "-s", "content", ""]
+                .into_iter()
+                .map(|arg| arg.as_bytes().to_vec())
+                .collect(),
+        };
+        engine.execute(&command, &mut context).unwrap();
+        engine.feed(0, "first\r\nÉté 界面".as_bytes());
+        for (format, expected) in [
+            ("#{C/ri:été}", "2"),
+            ("#{C:É?? ??}", "2"),
+            ("#{C/r:^[[:alpha:]]+ ..$}", "2"),
+            ("#{C/r:[}", "0"),
+            ("#{C:missing}", "0"),
+        ] {
+            assert_eq!(
+                engine
+                    .expand(format.as_bytes(), Some(0), Some(0), Some(0), &context)
+                    .unwrap(),
+                expected.as_bytes(),
+                "{format}"
+            );
+        }
+        engine.feed(0, b"\x1b[?1049h\x1b[HALTERNATE");
+        assert_eq!(
+            engine
+                .expand(b"#{C/r:^ALTERNATE$}", Some(0), Some(0), Some(0), &context)
+                .unwrap(),
+            b"1"
+        );
+        assert_eq!(
+            engine
+                .expand("#{C:Été}".as_bytes(), Some(0), Some(0), Some(0), &context)
+                .unwrap(),
+            b"0"
+        );
+        engine.feed(0, b"\x1b[?1049l");
+        assert_eq!(
+            engine
+                .expand("#{C:Été}".as_bytes(), Some(0), Some(0), Some(0), &context)
+                .unwrap(),
+            b"2"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pane_content_regex_resource_errors_are_not_reported_as_no_match() {
+        let mut engine = Engine::default();
+        let mut context = ClientContext::default();
+        engine
+            .execute(
+                &Command {
+                    blocks: Default::default(),
+                    args: ["new-session", "-d", ""]
+                        .into_iter()
+                        .map(|arg| arg.as_bytes().to_vec())
+                        .collect(),
+                },
+                &mut context,
+            )
+            .unwrap();
+        engine.feed(0, &b"a".repeat(48));
+        assert!(
+            engine
+                .expand(b"#{C/r:(a|aa)*b}", Some(0), Some(0), Some(0), &context)
+                .unwrap_err()
+                .contains("work limit")
+        );
+        context
+            .formats
+            .insert(b"needle".to_vec(), b"a".repeat(65537));
+        assert!(
+            engine
+                .expand(b"#{C/r:#{needle}}", Some(0), Some(0), Some(0), &context)
+                .unwrap_err()
+                .contains("complexity limit")
+        );
+    }
+
     #[test]
     fn context_recursion_and_loop_output_are_bounded() {
         let mut engine = Engine::default();

@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["vendor/rustty-parser", "vendor/rustty-vt", "vendor/portable-pty"]
+exclude = ["vendor/rustty-parser", "vendor/rustty-vt", "vendor/portable-pty", "vendor/posix-regex"]
 resolver = "3"
 
 [workspace.package]

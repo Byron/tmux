@@ -9,9 +9,16 @@ mod locale;
 mod locale;
 #[cfg(unix)]
 mod regex;
+#[cfg(windows)]
+#[path = "windows_regex.rs"]
+mod regex;
 #[cfg(any(unix, windows))]
 mod time;
 mod width;
+#[cfg(windows)]
+mod windows_glob;
+#[cfg(windows)]
+mod windows_paths;
 
 use std::fmt;
 use unicode_width::UnicodeWidthChar;
@@ -21,15 +28,22 @@ use unicode_width::UnicodeWidthChar;
 pub const JOB_PREFIX: &[u8] = b"\0tmuxx-job:";
 
 /// Match the same POSIX regex or glob used by C pane-content formats.
-pub fn content_match(pattern: &[u8], text: &[u8], regex: bool, ignore: bool) -> bool {
+pub fn content_match(
+    pattern: &[u8],
+    text: &[u8],
+    regex: bool,
+    ignore: bool,
+) -> Result<bool, Error> {
     if regex {
         #[cfg(unix)]
-        return self::regex::matches(pattern, text, ignore);
-        #[cfg(not(unix))]
-        return false;
+        return Ok(self::regex::matches(pattern, text, ignore));
+        #[cfg(windows)]
+        return self::regex::matches(pattern, text, ignore).map_err(|message| error(0, message));
+        #[cfg(not(any(unix, windows)))]
+        return Err(error(0, "POSIX matching is unavailable on this platform"));
     }
     let pattern = [b"*", pattern, b"*"].concat();
-    glob_match_case(&pattern, text, ignore).unwrap_or(false)
+    glob_match_case(&pattern, text, ignore).map_err(|message| error(0, message))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -578,8 +592,16 @@ fn compound(
             value = regex::substitute(&pattern, &replacement, &value, ignore)
                 .ok_or_else(|| error(base, "substitution output exceeds limit"))?;
         }
-        #[cfg(not(unix))]
-        return Err(error(base, "POSIX substitution requires a Unix platform"));
+        #[cfg(windows)]
+        {
+            value = regex::substitute(&pattern, &replacement, &value, ignore)
+                .map_err(|message| error(base, message))?;
+        }
+        #[cfg(not(any(unix, windows)))]
+        return Err(error(
+            base,
+            "POSIX substitution is unavailable on this platform",
+        ));
     }
     for kind in *b"=p" {
         if let Some(modifier) = modifiers
@@ -699,8 +721,16 @@ fn operator(
                     {
                         regex::matches(&left, &right, flags.contains(&b'i'))
                     }
-                    #[cfg(not(unix))]
-                    return Err(error(base, "POSIX matching requires a Unix platform"));
+                    #[cfg(windows)]
+                    {
+                        regex::matches(&left, &right, flags.contains(&b'i'))
+                            .map_err(|message| error(base, message))?
+                    }
+                    #[cfg(not(any(unix, windows)))]
+                    return Err(error(
+                        base,
+                        "POSIX matching is unavailable on this platform",
+                    ));
                 }
                 b"m" => glob_match_case(&left, &right, flags.contains(&b'i'))
                     .map_err(|message| error(base, message))?,
@@ -910,6 +940,12 @@ fn width_modifier(
     }
 }
 
+#[cfg(windows)]
+fn path_basename(path: &[u8]) -> Vec<u8> {
+    windows_paths::basename(path)
+}
+
+#[cfg(not(windows))]
 fn path_basename(path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
         return b".".to_vec();
@@ -925,6 +961,12 @@ fn path_basename(path: &[u8]) -> Vec<u8> {
     path[start..end].to_vec()
 }
 
+#[cfg(windows)]
+fn path_dirname(path: &[u8]) -> Vec<u8> {
+    windows_paths::dirname(path)
+}
+
+#[cfg(not(windows))]
 fn path_dirname(path: &[u8]) -> Vec<u8> {
     let end = path.iter().rposition(|&b| b != b'/').map_or(0, |i| i + 1);
     if end == 0 {
@@ -948,7 +990,7 @@ fn path_dirname(path: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Match tmux globs using the platform's POSIX text contract on Unix.
+/// Match tmux globs using the platform's POSIX text contract.
 pub fn glob_match(pattern: &[u8], text: &[u8]) -> Result<bool, &'static str> {
     glob_match_case(pattern, text, false)
 }
@@ -967,7 +1009,12 @@ fn glob_match_case(pattern: &[u8], text: &[u8], ignore: bool) -> Result<bool, &'
     .ok_or("UTF-8 locale is unavailable")
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn glob_match_case(pattern: &[u8], text: &[u8], ignore: bool) -> Result<bool, &'static str> {
+    windows_glob::matches(pattern, text, ignore)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn glob_match_case(pattern: &[u8], text: &[u8], ignore: bool) -> Result<bool, &'static str> {
     let (pattern, text) = if ignore {
         (pattern.to_ascii_lowercase(), text.to_ascii_lowercase())
@@ -1052,12 +1099,42 @@ mod tests {
                     let before = unsafe { libc::uselocale(std::ptr::null_mut()) };
                     assert!(glob_match(b"?", "界".as_bytes()).unwrap());
                     assert!(glob_match_case("é".as_bytes(), "É".as_bytes(), true).unwrap());
-                    assert!(content_match("é".as_bytes(), "xÉx".as_bytes(), true, true));
+                    assert!(content_match("é".as_bytes(), "xÉx".as_bytes(), true, true).unwrap());
                     assert_eq!(unsafe { libc::uselocale(std::ptr::null_mut()) }, before);
                 });
             }
         });
         assert_eq!(unsafe { libc::uselocale(std::ptr::null_mut()) }, before);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn unicode_posix_matching_preserves_embedding_thread_locale() {
+        unsafe extern "C" {
+            fn _configthreadlocale(mode: i32) -> i32;
+        }
+        fn locale() -> (std::ffi::CString, i32) {
+            let name = unsafe { libc::setlocale(libc::LC_ALL, std::ptr::null()) };
+            assert!(!name.is_null());
+            (
+                unsafe { std::ffi::CStr::from_ptr(name) }.to_owned(),
+                unsafe { _configthreadlocale(0) },
+            )
+        }
+        let before = locale();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let before = locale();
+                    assert!(glob_match(b"?", "界".as_bytes()).unwrap());
+                    assert!(glob_match_case("é".as_bytes(), "É".as_bytes(), true).unwrap());
+                    assert!(content_match("é".as_bytes(), "xÉx".as_bytes(), true, true).unwrap());
+                    assert!(!content_match(b"[", b"text", true, false).unwrap());
+                    assert_eq!(locale(), before);
+                });
+            }
+        });
+        assert_eq!(locale(), before);
     }
 
     fn lookup(key: &[u8]) -> Option<Vec<u8>> {
@@ -1165,7 +1242,7 @@ mod tests {
         assert!(expand(b"#{E:loop}", |_| Some(b"#{E:loop}".to_vec())).is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn posix_regex_longest_match_captures_and_empty_matches() {
         for (input, expected) in [
@@ -1183,5 +1260,120 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_globs_use_unicode_posix_classes_ranges_and_literal_escapes() {
+        for (pattern, text, ignore, expected) in [
+            ("?", "界", false, true),
+            ("??", "😀", false, false),
+            ("é", "É", true, true),
+            ("[[:alpha:]]*", "界É", false, true),
+            ("[[:digit:]]", "１", false, false),
+            ("[[:upper:]]", "a", true, false),
+            ("[A-z]", "_", true, true),
+            ("[!é-ê]", "ê", false, false),
+            ("[[.界.]]", "界", false, true),
+            ("[[=e=]]", "é", false, true),
+            (r"[a\-z]", "-", false, true),
+            (r"[a\-z]", "b", false, false),
+            (r"[\]]", "]", false, true),
+            (r"[\^]", "^", false, true),
+            (r"[\界]", "界", false, true),
+            (r"[a-\z]", "c", false, true),
+            (r"a\*b", "a*b", false, true),
+            ("[broken", "[broken", false, true),
+            ("x\\", "x\\", false, false),
+            ("*", "a\nb", false, true),
+            ("a?", "ab\n", false, false),
+        ] {
+            assert_eq!(
+                glob_match_case(pattern.as_bytes(), text.as_bytes(), ignore).unwrap(),
+                expected,
+                "{pattern:?} on {text:?}"
+            );
+        }
+        assert!(glob_match(b"\xff", b"\xff").unwrap());
+        assert!(!glob_match(b"\xff", "�".as_bytes()).unwrap());
+        assert!(glob_match(b"*", b"nul\0byte").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_regex_substitution_preserves_captures_unicode_and_byte_progression() {
+        for (pattern, replacement, text, expected) in [
+            ("(界|界面)(😀?)", r"<\1/\2>", "界面😀", "<界面/😀>"),
+            ("(a*)(a*)", r"[\1][\2]", "aa", "[aa][2]"),
+            ("(a)?(b)", r"\1-\2", "b", "1-b"),
+            ("()", "X", "é", "\u{c3}X\u{a9}X"),
+        ] {
+            let actual = regex::substitute(
+                pattern.as_bytes(),
+                replacement.as_bytes(),
+                text.as_bytes(),
+                false,
+            )
+            .unwrap();
+            let expected = if pattern == "()" {
+                vec![0xc3, b'X', 0xa9, b'X']
+            } else {
+                expected.as_bytes().to_vec()
+            };
+            assert_eq!(actual, expected, "{pattern:?} on {text:?}");
+        }
+        assert!(content_match("(é)\\1".as_bytes(), "Éé".as_bytes(), true, true).unwrap());
+        assert!(
+            content_match(
+                "界?".as_bytes(),
+                "prefix界面suffix".as_bytes(),
+                false,
+                false
+            )
+            .unwrap()
+        );
+        assert!(!content_match(b"[", b"content", true, false).unwrap());
+        assert_eq!(
+            regex::substitute(b"\xff", b"X", b"\xff\xfe", false).unwrap(),
+            b"X\xfe"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pattern_and_output_limits_propagate_as_errors() {
+        assert!(
+            content_match(&b"a".repeat(65537), b"a", true, false)
+                .unwrap_err()
+                .message
+                .contains("complexity limit")
+        );
+        assert!(
+            glob_match(&b"?".repeat(65537), b"a")
+                .unwrap_err()
+                .contains("complexity limit")
+        );
+        assert!(
+            content_match(b"(a|aa)*b", &b"a".repeat(48), true, false)
+                .unwrap_err()
+                .message
+                .contains("work limit")
+        );
+        assert!(
+            regex::substitute(b"a", &b"x".repeat(1024 * 1024), b"aa", false)
+                .unwrap_err()
+                .contains("output exceeds limit")
+        );
+        assert!(
+            regex::substitute(b".", b"x", &b"a".repeat(500_000), false)
+                .unwrap_err()
+                .contains("work limit")
+        );
+        assert!(
+            content_match(b"x", &vec![b'x'; 16 * 1024 * 1024 + 1], true, false)
+                .unwrap_err()
+                .message
+                .contains("input exceeds")
+        );
     }
 }
