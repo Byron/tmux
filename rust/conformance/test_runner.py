@@ -536,6 +536,78 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(report["candidate_changed_during_run"], change in ("candidate", "missing-candidate"))
                 self.assertEqual(report["checkout_changed_during_run"], change == "revision")
 
+    def test_windows_ssh_requires_and_preserves_the_trusted_command_role_paths(self):
+        suite = {"id": "ssh", "kind": "windows-ssh", "harness": "windows-external-json", "platforms": [sys.platform],
+                 "assertions": [{"id": "ssh.exact", "tests": ["ssh::exact"]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gui, candidate = root / "gui.exe", root / "candidate.exe"
+            gui.write_bytes(b"gui")
+            candidate.write_bytes(b"candidate")
+            env = {"TMUXX_WINDOWS_GUI": str(gui), "TMUXX_WINDOWS_SSH_KEY": "desktop-key",
+                   "TMUXX_WINDOWS_SSH_KNOWN_HOSTS": "known-hosts", "TMUXX_WINDOWS_SSH_HOST": "same-account@host",
+                   "TMUXX_WINDOWS_SSH_VIEWER_KEY": "default-key", "TMUXX_WINDOWS_SSH_VIEWER_BRIDGE": "default-bridge",
+                   "TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_KEY": str(root / "key 雪 &^ % !;"),
+                   "TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_BRIDGE": str(root / "Rustty 雪 &^ % !;" / "rustty.exe")}
+            def execute(command, **kwargs):
+                self.assertEqual(command[command.index("--rustty-viewer-key") + 1], env["TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_KEY"])
+                self.assertEqual(command[command.index("--rustty-bridge") + 1], env["TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_BRIDGE"])
+                record = {"schema": 1, "kind": "windows-ssh", "passed": True, "tests": ["ssh::exact"],
+                          "failures": [], "cleanup_remaining": [], "gui_sha256": runner.digest(gui),
+                          "candidate_sha256": runner.digest(candidate)}
+                Path(command[command.index("--report") + 1]).write_text(json.dumps(record), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, json.dumps(record).encode(), b"")
+            with patch.dict(runner.os.environ, env), patch.object(runner, "rustty_identity", return_value={"root": str(root)}):
+                for field in ("TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_KEY", "TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_BRIDGE"):
+                    with self.subTest(missing=field), patch.dict(runner.os.environ, {field: ""}), \
+                         patch.object(runner, "run_suite_process") as process:
+                        observations, details = runner.run_suite(suite, None, candidate=str(candidate))
+                        process.assert_not_called()
+                        self.assertEqual(observations[0]["status"], "failure")
+                        self.assertIn(field, details["error"])
+                with patch.object(runner, "run_suite_process", side_effect=execute):
+                    observations, _ = runner.run_suite(suite, None, candidate=str(candidate))
+                    self.assertEqual(observations[0]["status"], "pass")
+
+    @unittest.skipUnless(sys.platform == "win32", "requires the native Windows SSH fixture parser and identity APIs")
+    def test_windows_ssh_generated_command_is_accepted_by_the_actual_fixture_parser(self):
+        suite = {"id": "ssh-parser", "kind": "windows-ssh", "harness": "windows-external-json", "platforms": ["win32"],
+                 "args": ["--identity"], "assertions": [{"id": "ssh.parser", "tests": ["ssh::parser"]}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gui, candidate = root / "gui.exe", root / "candidate.exe"
+            gui.write_bytes(b"not an executable: parser-only check")
+            candidate.write_bytes(b"not an executable: parser-only check")
+            env = {"TMUXX_WINDOWS_GUI": str(gui), "TMUXX_WINDOWS_SSH_KEY": "desktop-key",
+                   "TMUXX_WINDOWS_SSH_KNOWN_HOSTS": "known-hosts", "TMUXX_WINDOWS_SSH_HOST": "same-account@host",
+                   "TMUXX_WINDOWS_SSH_VIEWER_KEY": "default-key", "TMUXX_WINDOWS_SSH_VIEWER_BRIDGE": "default-bridge",
+                   "TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_KEY": str(root / "key 雪 &^ % !;"),
+                   "TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_BRIDGE": str(root / "Rustty 雪 &^ % !;" / "rustty.exe"),
+                   "TMUXX_WINDOWS_SSH_EXE": str(root / "not-an-ssh-executable.exe"),
+                   "TMUXX_WINDOWS_SSH_DENIAL_DIRECTORY": str(root / "denial 雪 &^ % !;")}
+            parsed = []
+
+            def execute(command, **kwargs):
+                # The real parser must accept the runner's complete argv before
+                # --identity returns. No SSH, GUI or product process can start.
+                result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                        timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                parsed.append(result)
+                return result
+
+            with patch.dict(runner.os.environ, env), patch.object(runner, "rustty_identity", return_value={"root": str(root)}), \
+                 patch.object(runner, "run_suite_process", side_effect=execute):
+                observations, _ = runner.run_suite(suite, None, candidate=str(candidate))
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0].returncode, 0, parsed[0].stderr.decode("utf-8", "replace"))
+            self.assertEqual(parsed[0].stderr, b"")
+            identity = json.loads(parsed[0].stdout)
+            self.assertRegex(identity["account_sid"], r"^S-1-")
+            self.assertGreater(identity["pid"], 0)
+            # Identity output is deliberately not a conformance success record.
+            self.assertEqual(observations[0]["status"], "failure")
+            self.assertFalse(Path(parsed[0].args[parsed[0].args.index("--report") + 1]).exists())
+
     def test_native_suite_rejects_replacement_before_executing_any_fixture(self):
         suite = {"id": "native", "kind": "windows-native-views", "harness": "windows-external-json", "platforms": [sys.platform],
                  "assertions": [{"id": "native", "tests": ["views::one"]}]}

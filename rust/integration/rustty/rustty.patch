@@ -1,28 +1,135 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index f038191e3..3753b2f0b 100644
+index f038191e3..1f9b17d5d 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -2027,15 +2027,15 @@ checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
- 
- [[package]]
- name = "linux-raw-sys"
--version = "0.4.15"
-+version = "0.12.1"
+@@ -189,12 +189,56 @@ version = "0.1.6"
  source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
-+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
  
++[[package]]
++name = "anstream"
++version = "1.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d"
++dependencies = [
++ "anstyle",
++ "anstyle-parse",
++ "anstyle-query",
++ "anstyle-wincon",
++ "colorchoice",
++ "is_terminal_polyfill",
++ "utf8parse",
++]
++
  [[package]]
- name = "linux-raw-sys"
--version = "0.12.1"
-+version = "0.4.15"
+ name = "anstyle"
+ version = "1.0.14"
  source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
+ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
+ 
++[[package]]
++name = "anstyle-parse"
++version = "1.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e"
++dependencies = [
++ "utf8parse",
++]
++
++[[package]]
++name = "anstyle-query"
++version = "1.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
++dependencies = [
++ "windows-sys 0.60.2",
++]
++
++[[package]]
++name = "anstyle-wincon"
++version = "3.0.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
++dependencies = [
++ "anstyle",
++ "once_cell_polyfill",
++ "windows-sys 0.60.2",
++]
++
+ [[package]]
+ name = "anyhow"
+ version = "1.0.104"
+@@ -703,6 +747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "aa8876b300ab35ba921adea3dfd70157a46249b33f95c9084ae5709785478946"
+ dependencies = [
+  "clap_builder",
++ "clap_derive",
+ ]
  
  [[package]]
- name = "litemap"
-@@ -2947,8 +2947,6 @@ dependencies = [
+@@ -711,8 +756,22 @@ version = "4.6.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ec0797fb7aeb1406c84efac526901f7ec3ead2124f946b494e72879d4b54704d"
+ dependencies = [
++ "anstream",
+  "anstyle",
+  "clap_lex",
++ "strsim",
++]
++
++[[package]]
++name = "clap_derive"
++version = "4.6.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f9c751b79415d4e559e3d1fcf128e09e720eb673a06d26cf6f392d37d75b66e0"
++dependencies = [
++ "heck 0.5.0",
++ "proc-macro2",
++ "quote",
++ "syn 3.0.5",
+ ]
+ 
+ [[package]]
+@@ -748,6 +807,12 @@ dependencies = [
+  "bytemuck",
+ ]
+ 
++[[package]]
++name = "colorchoice"
++version = "1.0.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
++
+ [[package]]
+ name = "combine"
+ version = "4.6.8"
+@@ -1834,6 +1899,12 @@ dependencies = [
+  "hashbrown 0.17.1",
+ ]
+ 
++[[package]]
++name = "is_terminal_polyfill"
++version = "1.70.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
++
+ [[package]]
+ name = "itertools"
+ version = "0.13.0"
+@@ -2677,6 +2748,12 @@ version = "1.21.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+ 
++[[package]]
++name = "once_cell_polyfill"
++version = "1.70.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
++
+ [[package]]
+ name = "oorandom"
+ version = "11.1.5"
+@@ -2947,8 +3024,6 @@ dependencies = [
  [[package]]
  name = "portable-pty"
  version = "0.9.0"
@@ -31,7 +138,7 @@ index f038191e3..3753b2f0b 100644
  dependencies = [
   "anyhow",
   "bitflags 1.3.2",
-@@ -3238,11 +3236,20 @@ dependencies = [
+@@ -3238,11 +3313,20 @@ dependencies = [
  name = "rustty"
  version = "0.1.0"
  dependencies = [
@@ -53,7 +160,16 @@ index f038191e3..3753b2f0b 100644
  ]
  
  [[package]]
-@@ -3311,8 +3318,8 @@ name = "rustty-render"
+@@ -3276,6 +3360,8 @@ dependencies = [
+  "rustty-render-wgpu",
+  "serde",
+  "serde_json",
++ "tmuxx-cli",
++ "tmuxx-runtime",
+  "unicode-segmentation",
+  "wgpu",
+  "windows",
+@@ -3311,8 +3397,8 @@ name = "rustty-render"
  version = "0.1.0"
  dependencies = [
   "rustty-font",
@@ -63,7 +179,20 @@ index f038191e3..3753b2f0b 100644
  ]
  
  [[package]]
-@@ -3829,6 +3836,139 @@ dependencies = [
+@@ -3655,6 +3741,12 @@ version = "0.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+ 
++[[package]]
++name = "strsim"
++version = "0.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
++
+ [[package]]
+ name = "syn"
+ version = "1.0.109"
+@@ -3829,6 +3921,153 @@ dependencies = [
   "serde_json",
  ]
  
@@ -72,6 +201,20 @@ index f038191e3..3753b2f0b 100644
 +version = "1.13.3"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
++
++[[package]]
++name = "tmuxx-cli"
++version = "0.1.0"
++dependencies = [
++ "clap",
++ "libc",
++ "serde_json",
++ "tmuxx-command",
++ "tmuxx-protocol",
++ "tmuxx-runtime",
++ "tmuxx-unix-ipc",
++ "windows-sys 0.61.2",
++]
 +
 +[[package]]
 +name = "tmuxx-client"
@@ -203,7 +346,7 @@ index f038191e3..3753b2f0b 100644
  [[package]]
  name = "toml"
  version = "0.8.2"
-@@ -3995,6 +4135,15 @@ version = "1.0.24"
+@@ -3995,6 +4234,15 @@ version = "1.0.24"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
  
@@ -219,15 +362,29 @@ index f038191e3..3753b2f0b 100644
  [[package]]
  name = "unicode-segmentation"
  version = "1.13.3"
+@@ -4025,6 +4273,12 @@ version = "1.0.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+ 
++[[package]]
++name = "utf8parse"
++version = "0.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
++
+ [[package]]
+ name = "uuid"
+ version = "1.26.1"
 diff --git a/Cargo.toml b/Cargo.toml
-index 382c3bdb3..44099cb92 100644
+index 382c3bdb3..e5ac08c8c 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -11,13 +11,13 @@ license = "MIT"
+@@ -11,13 +11,14 @@ license = "MIT"
  
  [workspace.dependencies]
  rustty-parser = { path = "crates/rustty-parser" }
 -rustty-vt = { path = "crates/rustty-vt" }
++tmuxx-cli = { path = "../../tmux/tmux/rust/crates/tmuxx-cli" }
 +rustty-vt = { package = "tmuxx-vendored-rustty-vt", path = "../../tmux/tmux/rust/vendor/rustty-vt" }
  rustty-font = { path = "crates/rustty-font" }
  rustty-render = { path = "crates/rustty-render" }
@@ -239,7 +396,7 @@ index 382c3bdb3..44099cb92 100644
  serde_json = "1.0"
  regex = "1.13"
  base64 = "0.22"
-@@ -40,6 +40,7 @@ objc2-app-kit = "0.3.2"
+@@ -40,6 +41,7 @@ objc2-app-kit = "0.3.2"
  objc2-user-notifications = "0.3.2"
  
  [patch.crates-io]
@@ -248,10 +405,18 @@ index 382c3bdb3..44099cb92 100644
  
  [profile.release]
 diff --git a/crates/rustty-app/Cargo.toml b/crates/rustty-app/Cargo.toml
-index 25e133f12..99f5bb3c2 100644
+index 25e133f12..9c075b9b0 100644
 --- a/crates/rustty-app/Cargo.toml
 +++ b/crates/rustty-app/Cargo.toml
-@@ -86,7 +86,7 @@ windows = { version = "0.62.2", features = [
+@@ -42,6 +42,7 @@ path = "tests/windows_conpty.rs"
+ harness = false
+ 
+ [dependencies]
++tmuxx-cli.workspace = true
+ rustty = { workspace = true, features = ["sessions"] }
+ rustty-font.workspace = true
+ rustty-render.workspace = true
+@@ -86,7 +87,7 @@ windows = { version = "0.62.2", features = [
      "Win32_System_Registry", "Win32_System_Threading", "Win32_System_WinRT", "Win32_System_ProcessStatus",
      "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem",
      "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Notifications",
@@ -260,8 +425,13 @@ index 25e133f12..99f5bb3c2 100644
  ] }
  
  [target.'cfg(windows)'.build-dependencies]
+@@ -94,3 +95,4 @@ embed-resource = "3"
+ 
+ [target.'cfg(windows)'.dev-dependencies]
+ portable-pty.workspace = true
++tmuxx-runtime = { path = "../../../../tmux/tmux/rust/crates/tmuxx-runtime" }
 diff --git a/crates/rustty-app/README.md b/crates/rustty-app/README.md
-index bbca7bd43..d9bc53b7b 100644
+index bbca7bd43..088b272a5 100644
 --- a/crates/rustty-app/README.md
 +++ b/crates/rustty-app/README.md
 @@ -139,7 +139,10 @@ The native CPU opacity/menu test is opt-in:
@@ -276,7 +446,7 @@ index bbca7bd43..d9bc53b7b 100644
  
  ## macOS
  
-@@ -304,3 +307,148 @@ unchanged cursor events, actual pointer movement and egui repaint requests.
+@@ -304,3 +307,170 @@ unchanged cursor events, actual pointer movement and egui repaint requests.
  Set `RUSTTY_SMOKE_HOVER=1` in a foreground run to require a stationary pointer over a shell pane
  during the idle interval. Move the pointer into a test pane before the 45-second
  timeout; leaving the pane or moving the pointer restarts the interval.
@@ -292,12 +462,23 @@ index bbca7bd43..d9bc53b7b 100644
 +| Launch argument | Pane owner |
 +| --- | --- |
 +| `--tmuxx=embedded` | This Rustty process; shutdown ends its PTYs |
++| `--tmuxx=persistent` | Independent local daemon; explicitly starts one if absent |
 +| `--tmuxx=unix:/path/to/default.native` | An existing standalone tmuxx daemon on Unix |
 +| `--tmuxx=pipe:INSTANCE` | An existing standalone or Rustty owner on Windows |
 +| `--tmuxx=ssh:host` | The remote `tmuxx --native-stdio` endpoint over SSH |
 +| `--tmuxx=system-ssh:host` | An existing remote C `tmux -C` server |
 +
-+Embedded mode binds `TMUXX_ENDPOINT`, or the same per-user default native socket
++The same executable includes the command driver: `rustty tmux` (Windows:
++`rustty.exe tmux`) dispatches before GUI registration and PTY initialization.
++`rustty tmux --native-stdio` is a binary bridge to an existing owner. Diagnostics
++stay on stderr and instance selection travels in the native protocol. Windows
++startup is explicit: `rustty.exe tmux -D --instance NAME`; an ordinary Windows CLI
++or bridge attachment never starts an owner. `--tmuxx=persistent` explicitly reuses
++or starts a detached `rustty tmux -D` process through the shared daemon builder.
++The first session is created atomically, including concurrent GUI launches. Keep
++Pane After Disconnect controls which panes survive the last view closing.
++
++Embedded and persistent modes bind `TMUXX_ENDPOINT`, or the same per-user default native socket
 +as the tmuxx CLI. Thus `ssh host tmuxx --native-stdio` can reach an engine owned by
 +remote Rustty. Only one owner may bind an endpoint. Use the Unix or Windows pipe
 +connection mode to attach to an already running local owner. On Windows, embedded
@@ -312,8 +493,15 @@ index bbca7bd43..d9bc53b7b 100644
 +SSH attachment needs a private identity or known-hosts file. Rustty passes that
 +path directly with `ssh -F`, also for each window's resize connection, without
 +changing account-wide SSH settings. Native and system C tmux connections preserve
-+that configuration when adding sessions or reconnecting. The native no-PTY bridge command remains fixed;
-+an administrator may alternatively bind a restricted SSH key to that bridge.
++that configuration when adding sessions or reconnecting. The native no-PTY bridge
++command defaults to `tmuxx --native-stdio`; an administrator may bind a restricted
++SSH key to that bridge. The explicit `tmuxx-ssh-command` setting (also
++`--tmuxx-ssh-command=COMMAND`) overrides the complete remote shell command, for
++example `"C:\Program Files\Rustty\rustty.exe" tmux --native-stdio` for a cmd.exe
++SSH shell, or `& 'C:\Program Files\Rustty\rustty.exe' tmux --native-stdio` for
++PowerShell. Use the syntax of the configured remote shell. This trusted command
++is passed verbatim and retained for each resize/reconnect connection. Instance
++selection stays in the protocol and is never appended to the command.
 +
 +Both Windows owners initialize the same bundled ConPTY before any PTY creation.
 +The tmux checkout's `rust/windows/conpty.json` pins the package and both runtime
@@ -334,6 +522,10 @@ index bbca7bd43..d9bc53b7b 100644
 +owner before encoding, so synchronized panes use their own terminal modes. Mouse
 +reports and terminal protocol replies stay with their destination pane.
 +A GUI view never replays snapshot clipboard actions or terminal replies.
++Agent registrations are retained with the pane, including their shell-command
++context. Reattachment restores the current report without replaying command
++notifications; unchanged snapshots do not register it again. Respawn and process
++exit clear the preceding report while retaining the pane identity.
 +Native one-shot host actions go to the server-elected GUI client and one view;
 +clipboard results return the server event ID through the normal Rustty policy UI.
 +Native focus/visibility and color scheme state aggregate across linked views and
@@ -508,10 +700,30 @@ index 14d1cd9da..bec797cca 100644
          ("Redo Layout Change", Action::Redo),
      ];
 diff --git a/crates/rustty-app/src/deck.rs b/crates/rustty-app/src/deck.rs
-index 95890d2cb..6d11f2830 100644
+index 95890d2cb..043db3cd3 100644
 --- a/crates/rustty-app/src/deck.rs
 +++ b/crates/rustty-app/src/deck.rs
-@@ -364,7 +364,7 @@ impl Dashboard {
+@@ -196,7 +196,7 @@ impl Board {
+     }
+ }
+ 
+-/// Exists only in the owning live pane, never in a VT or workspace snapshot.
++/// View-local presentation and acknowledgement of a live or restored agent report.
+ #[derive(Default)]
+ pub struct Report {
+     snapshot: Option<Snapshot>,
+@@ -213,6 +213,10 @@ struct Attention {
+     unseen: bool,
+ }
+ impl Report {
++    /// Inspect the actual desktop report without changing its acknowledgement.
++    pub fn retained_status(&self) -> (&Option<Snapshot>, u64, bool) {
++        (&self.snapshot, self.generation, self.enclosing_command)
++    }
+     pub fn is_registered(&self) -> bool {
+         self.snapshot.is_some()
+     }
+@@ -364,7 +368,7 @@ impl Dashboard {
              .windows
              .iter()
              .flat_map(|w| &w.tabs)
@@ -521,7 +733,7 @@ index 95890d2cb..6d11f2830 100644
          if self.gesture.is_some_and(|source| {
              source.target.is_none_or(|target| {
 diff --git a/crates/rustty-app/src/desktop.rs b/crates/rustty-app/src/desktop.rs
-index 1ed7e783a..32e26dd1c 100644
+index 1ed7e783a..ba5b1dd6a 100644
 --- a/crates/rustty-app/src/desktop.rs
 +++ b/crates/rustty-app/src/desktop.rs
 @@ -15,7 +15,7 @@ use egui::{Color32, Pos2, Sense, Vec2, ViewportId};
@@ -807,7 +1019,7 @@ index 1ed7e783a..32e26dd1c 100644
      if args.iter().any(|arg| arg == "--help" || arg == "-h") {
          println!(
 -            "Rustty — native Rust terminal\n\nUsage: rustty [--config-file=PATH] [--key=value] [-e COMMAND ...]\n       rustty --config-info\n\nRustty settings override Ghostty settings. See crates/rustty-app/README.md."
-+            "Rustty — native Rust terminal\n\nUsage: rustty [--config-file=PATH] [--key=value] [-e COMMAND ...]\n       rustty --tmuxx=embedded|unix:PATH|pipe:INSTANCE|ssh:HOST|system-ssh:HOST\n       rustty --config-info\n\nRustty settings override Ghostty settings. See crates/rustty-app/README.md."
++            "Rustty — native Rust terminal\n\nUsage: rustty [--config-file=PATH] [--key=value] [-e COMMAND ...]\n       rustty --tmuxx=embedded|persistent|unix:PATH|pipe:INSTANCE|ssh:HOST|system-ssh:HOST\n       rustty --config-info\n\nRustty settings override Ghostty settings. See crates/rustty-app/README.md."
          );
          return Ok(());
      }
@@ -853,7 +1065,7 @@ index 1ed7e783a..32e26dd1c 100644
 +        let wake = Arc::new(move || {
 +            let _ = wake_proxy.send_event(Event::Tmuxx);
 +        });
-+        let connection = if mode == "embedded" {
++        let connection = if mode == "embedded" || mode == "persistent" {
 +            let endpoint = if let Some(path) = std::env::var_os("TMUXX_ENDPOINT") {
 +                PathBuf::from(path)
 +            } else {
@@ -865,12 +1077,7 @@ index 1ed7e783a..32e26dd1c 100644
 +                }
 +                #[cfg(unix)]
 +                {
-+                    use std::os::unix::fs::PermissionsExt;
-+                    let user = unsafe { libc::geteuid() }.to_string();
-+                    let directory = std::env::temp_dir().join(format!("tmuxx-{user}"));
-+                    std::fs::create_dir_all(&directory)?;
-+                    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
-+                    directory.join("default.native")
++                    tmuxx_cli::default_native_endpoint()?
 +                }
 +            };
 +            let initial = if tmuxx_smoke.is_some() {
@@ -902,15 +1109,20 @@ index 1ed7e783a..32e26dd1c 100644
 +                    None => Vec::new(),
 +                }
 +            };
-+            rustty::tmuxx::Connection::embedded_with_command(&endpoint, wake, initial)?
++            if mode == "persistent" {
++                rustty_app::tmuxx_launcher::connect_or_start(&endpoint, wake, initial)?
++            } else {
++                rustty::tmuxx::Connection::embedded_with_command(&endpoint, wake, initial)?
++            }
 +        } else if let Some(host) = mode.strip_prefix("system-ssh:") {
 +            rustty::tmuxx::Connection::system_ssh(host, wake)?
 +        } else if let Some(host) = mode.strip_prefix("ssh:") {
-+            if let Some(instance) = &tmuxx_selected_instance {
-+                rustty::tmuxx::Connection::native_ssh_instance(host, instance, wake)?
-+            } else {
-+                rustty::tmuxx::Connection::ssh(host, wake)?
-+            }
++            rustty::tmuxx::Connection::native_ssh_command(
++                host,
++                tmuxx_selected_instance.as_deref(),
++                &loaded.config.tmuxx_ssh_command,
++                wake,
++            )?
 +        } else {
 +            #[cfg(unix)]
 +            {
@@ -1212,7 +1424,26 @@ index 1ed7e783a..32e26dd1c 100644
              .filter(|id| {
                  self.panes.get(id).is_some_and(|pane| {
                      pane.agent.is_registered() || pane.deck_progress.state().is_some()
-@@ -2339,9 +2701,7 @@ impl App {
+@@ -1961,6 +2323,18 @@ impl App {
+                 SessionEvent::Effect(vt::Effect::Title(_) | vt::Effect::AgentStatus(_))
+             );
+             match event {
++                SessionEvent::RestoredAgentStatus {
++                    event,
++                    enclosing_command,
++                } => {
++                    if matches!(event, vt::agent::Event::End) || live && !pane.exited {
++                        if matches!(event, vt::agent::Event::Begin(_)) {
++                            self.deck.report_generation += 1;
++                        }
++                        pane.agent
++                            .apply(event, self.deck.report_generation, enclosing_command);
++                    }
++                }
+                 SessionEvent::Effect(vt::Effect::AgentStatus(event)) if live && !pane.exited => {
+                     if matches!(event, vt::agent::Event::Begin(_)) {
+                         self.deck.report_generation += 1;
+@@ -2339,9 +2713,7 @@ impl App {
                  if let ReadResult::Success(success) = &mut result {
                      success.remember = remember && read.can_remember;
                  }
@@ -1223,7 +1454,7 @@ index 1ed7e783a..32e26dd1c 100644
              }
              vt::Effect::ClipboardWrite(write) => {
                  let mut result = if allow {
-@@ -2354,9 +2714,7 @@ impl App {
+@@ -2354,9 +2726,7 @@ impl App {
                  if let WriteResult::Success { remember: grant } = &mut result {
                      *grant = remember && write.can_remember;
                  }
@@ -1234,7 +1465,7 @@ index 1ed7e783a..32e26dd1c 100644
              }
              _ => return,
          };
-@@ -2436,7 +2794,7 @@ impl App {
+@@ -2436,7 +2806,7 @@ impl App {
                  Action::CloseSurface if !exits_app => focused.into_iter().collect::<Vec<_>>(),
                  Action::CloseTab if !exits_app => self
                      .tab(host.id)
@@ -1243,7 +1474,7 @@ index 1ed7e783a..32e26dd1c 100644
                      .unwrap_or_default(),
                  Action::CloseWindow if !exits_app => self
                      .index(host.id)
-@@ -2444,7 +2802,7 @@ impl App {
+@@ -2444,7 +2814,7 @@ impl App {
                          self.workspace.windows[i]
                              .tabs
                              .iter()
@@ -1252,7 +1483,7 @@ index 1ed7e783a..32e26dd1c 100644
                              .collect()
                      })
                      .unwrap_or_default(),
-@@ -2474,6 +2832,19 @@ impl App {
+@@ -2474,6 +2844,19 @@ impl App {
                  return true;
              }
          }
@@ -1272,7 +1503,7 @@ index 1ed7e783a..32e26dd1c 100644
          if exits_app {
              // Closing the last window quits the app. Save its intact layout,
              // just as explicit Quit does, before shutdown closes the sessions.
-@@ -2747,6 +3118,22 @@ impl App {
+@@ -2747,6 +3130,22 @@ impl App {
              Action::ToggleOutliner => {
                  self.toggle_outliner(event_loop);
              }
@@ -1295,7 +1526,7 @@ index 1ed7e783a..32e26dd1c 100644
              Action::TogglePin => {
                  if let Some(pane) = focused {
                      self.workspace.toggle_pin(pane);
-@@ -3424,6 +3811,15 @@ impl App {
+@@ -3424,6 +3823,15 @@ impl App {
                  return true;
              }
          }
@@ -1311,7 +1542,7 @@ index 1ed7e783a..32e26dd1c 100644
          if action == Action::ToggleOutliner {
              self.toggle_outliner(event_loop);
              return true;
-@@ -3495,16 +3891,29 @@ impl App {
+@@ -3495,16 +3903,29 @@ impl App {
      ) -> bool {
          let ui_input = host.ui_input();
          let search_input = host.search_focus.is_some() && !host.modal_input();
@@ -1348,7 +1579,7 @@ index 1ed7e783a..32e26dd1c 100644
              let candidates = if host.sequence_len == 0 {
                  (0..self.config().keybinds.len()).collect::<Vec<_>>()
              } else {
-@@ -3560,12 +3969,14 @@ impl App {
+@@ -3560,12 +3981,14 @@ impl App {
              }
          }
          let ui_input = host.ui_input();
@@ -1369,7 +1600,7 @@ index 1ed7e783a..32e26dd1c 100644
              return !ui_input;
          }
          let Some(id) = self.focused(host.id) else {
-@@ -3586,13 +3997,14 @@ impl App {
+@@ -3586,13 +4009,14 @@ impl App {
                  ),
              };
              let event = input::terminal_key(key, host.modifiers, host.composing, options)?;
@@ -1387,7 +1618,7 @@ index 1ed7e783a..32e26dd1c 100644
          }
          host.repaint();
          // Discard the native translation now, before a later event can open Find.
-@@ -3600,6 +4012,35 @@ impl App {
+@@ -3600,6 +4024,35 @@ impl App {
      }
  }
  
@@ -1423,7 +1654,7 @@ index 1ed7e783a..32e26dd1c 100644
  fn reveal(screen: &mut vt::Screen, point: vt::GridPoint) {
      let index = screen.all_rows().position(|row| row.id == point.row);
      if let Some(index) = index {
-@@ -3648,7 +4089,7 @@ impl App {
+@@ -3648,7 +4101,7 @@ impl App {
          offscreen: Option<&wgpu::Texture>,
      ) -> Result<()> {
          host.messages_open = !self.errors.is_empty();
@@ -1432,7 +1663,7 @@ index 1ed7e783a..32e26dd1c 100644
              self.cancel_selection_drag(host);
              return Ok(());
          }
-@@ -3668,7 +4109,7 @@ impl App {
+@@ -3668,7 +4121,7 @@ impl App {
              .tabs
              .iter()
              .filter(|tab| state.tabs.len() > 1 && tab.id == active.id)
@@ -1441,7 +1672,7 @@ index 1ed7e783a..32e26dd1c 100644
              .map(|id| {
                  let label = self
                      .panes
-@@ -3924,9 +4365,10 @@ impl App {
+@@ -3924,9 +4377,10 @@ impl App {
                          width: content.width(),
                          height: content.height(),
                      };
@@ -1455,7 +1686,7 @@ index 1ed7e783a..32e26dd1c 100644
                      let [r, g, b] = config.background.to_array();
                      let gutter = Color32::from_rgba_unmultiplied(
                          r,
-@@ -3957,13 +4399,25 @@ impl App {
+@@ -3957,13 +4411,25 @@ impl App {
                      host.prepared.retain(|id, _| host.rects.contains_key(id));
                      let mut composed = None;
                      let mut accessible = Vec::new();
@@ -1482,7 +1713,7 @@ index 1ed7e783a..32e26dd1c 100644
                              let Some(pane) = self.panes.get_mut(&id) else {
                                  continue;
                              };
-@@ -4151,6 +4605,10 @@ impl App {
+@@ -4151,6 +4617,10 @@ impl App {
                                      physical.x,
                                      physical.y,
                                  ],
@@ -1493,7 +1724,7 @@ index 1ed7e783a..32e26dd1c 100644
                                  dim: (id != focused && config.unfocused_split_opacity < 1.0).then(
                                      || {
                                          let color = config
-@@ -4161,7 +4619,7 @@ impl App {
+@@ -4161,7 +4631,7 @@ impl App {
                                      },
                                  ),
                              });
@@ -1502,7 +1733,7 @@ index 1ed7e783a..32e26dd1c 100644
                              if id == focused && !pane.exited {
                                  terminal_ime_rect = Some(prepared.ime_rect);
                              }
-@@ -4236,7 +4694,7 @@ impl App {
+@@ -4236,7 +4706,7 @@ impl App {
                                  egui::StrokeKind::Inside,
                              );
                          }
@@ -1511,7 +1742,7 @@ index 1ed7e783a..32e26dd1c 100644
                              let selected = host
                                  .peek
                                  .map(|peek| peek.target == id)
-@@ -4266,7 +4724,7 @@ impl App {
+@@ -4266,7 +4736,7 @@ impl App {
                              pane.activity.reset_progress_animation();
                          }
                      }
@@ -1520,7 +1751,7 @@ index 1ed7e783a..32e26dd1c 100644
                          if let Some(error) = self.failed_panes.get(&id) {
                              ui.scope_builder(
                                  egui::UiBuilder::new().max_rect(rect.shrink(20.0)),
-@@ -4332,7 +4790,7 @@ impl App {
+@@ -4332,7 +4802,7 @@ impl App {
                          }
                      }
                      let mut quadrants = BTreeMap::<Id, egui::Rect>::new();
@@ -1529,7 +1760,7 @@ index 1ed7e783a..32e26dd1c 100644
                          if let Some(quadrant) = active.root.quadrant(pane) {
                              quadrants
                                  .entry(quadrant)
-@@ -4387,7 +4845,7 @@ impl App {
+@@ -4387,7 +4857,7 @@ impl App {
                              .paint(ui);
                          }
                      }
@@ -1538,7 +1769,7 @@ index 1ed7e783a..32e26dd1c 100644
                          let Some(pane) = self.panes.get(&id) else {
                              continue;
                          };
-@@ -4453,7 +4911,7 @@ impl App {
+@@ -4453,7 +4923,7 @@ impl App {
                          }
                      });
                  }
@@ -1547,7 +1778,7 @@ index 1ed7e783a..32e26dd1c 100644
                      let Some(pane) = self.panes.get_mut(&id) else {
                          continue;
                      };
-@@ -4728,7 +5186,228 @@ impl App {
+@@ -4728,7 +5198,239 @@ impl App {
              )?;
              host.capture = false;
          }
@@ -1665,6 +1896,17 @@ index 1ed7e783a..32e26dd1c 100644
 +                        Some((*id, pane.session.terminal().ok()?.plain_text()))
 +                    })
 +                    .collect::<BTreeMap<_, _>>();
++                let mut pane_agents = BTreeMap::<u64, Vec<serde_json::Value>>::new();
++                for (view, id) in &self.tmuxx_mapping.panes {
++                    if let Some(pane) = self.panes.get(view) {
++                        let (snapshot, generation, enclosing_command) =
++                            pane.agent.retained_status();
++                        pane_agents.entry(*id).or_default().push(serde_json::json!({
++                            "view": view, "snapshot": snapshot, "generation": generation,
++                            "enclosing_command": enclosing_command,
++                        }));
++                    }
++                }
 +                let endpoint = self
 +                    .tmuxx
 +                    .as_ref()
@@ -1755,7 +1997,7 @@ index 1ed7e783a..32e26dd1c 100644
 +                        .filter_map(|tab| tab.title.as_deref())
 +                        .all(|title| fonts.has_glyphs(&egui::FontId::proportional(14.0), title))
 +                });
-+                let result = serde_json::json!({ "process_id": std::process::id(), "phase": if initial_capture {"before"} else {"after"}, "endpoint": endpoint, "panes": host.prepared.len(), "windows": self.workspace.windows.len(), "instance": self.tmuxx_instance, "errors": self.errors, "hidden": !host.window.is_visible().unwrap_or(false), "focused": host.window.has_focus(), "floating_panes": host.overlay_panes.len(), "draw_order": host.pane_order, "renderer": self.painter.description(), "pane_processes": pane_processes, "pane_texts": pane_texts, "view_sessions": self.tmuxx_mapping.sessions, "view_windows": self.tmuxx_mapping.windows, "view_panes": self.tmuxx_mapping.panes, "native_hosts": native_hosts, "rendered_hosts": rendered_hosts, "rendered_workspaces": rendered_workspaces, "workspace": self.workspace, "server_sessions": server_sessions, "server_windows": server_windows, "view_graph_consistent": consistent, "ui_labels_supported": ui_labels_supported });
++                let result = serde_json::json!({ "process_id": std::process::id(), "phase": if initial_capture {"before"} else {"after"}, "endpoint": endpoint, "panes": host.prepared.len(), "windows": self.workspace.windows.len(), "instance": self.tmuxx_instance, "errors": self.errors, "hidden": !host.window.is_visible().unwrap_or(false), "focused": host.window.has_focus(), "floating_panes": host.overlay_panes.len(), "draw_order": host.pane_order, "renderer": self.painter.description(), "pane_processes": pane_processes, "pane_texts": pane_texts, "pane_agents": pane_agents, "report_generation": self.deck.report_generation, "view_sessions": self.tmuxx_mapping.sessions, "view_windows": self.tmuxx_mapping.windows, "view_panes": self.tmuxx_mapping.panes, "native_hosts": native_hosts, "rendered_hosts": rendered_hosts, "rendered_workspaces": rendered_workspaces, "workspace": self.workspace, "server_sessions": server_sessions, "server_windows": server_windows, "view_graph_consistent": consistent, "ui_labels_supported": ui_labels_supported });
 +                if consistent {
 +                    std::fs::write(
 +                        directory.join(if initial_capture {
@@ -1777,7 +2019,7 @@ index 1ed7e783a..32e26dd1c 100644
              let state = self.painter.render_state().ok_or("GPU unavailable")?;
              smoke::submit_offscreen(
                  &state,
-@@ -4752,6 +5431,14 @@ impl App {
+@@ -4752,6 +5454,14 @@ impl App {
          host.frames += 1;
          host.last_frame_started = Some(now);
          host.deadline = animation_deadline;
@@ -1792,7 +2034,7 @@ index 1ed7e783a..32e26dd1c 100644
          if let Some(deadline) = host.focus_hint.deadline(now) {
              host.deadline = Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
          }
-@@ -5103,6 +5790,13 @@ impl App {
+@@ -5103,6 +5813,13 @@ impl App {
              return None;
          }
          let divider = host.divider_drag.or_else(|| {
@@ -1806,7 +2048,7 @@ index 1ed7e783a..32e26dd1c 100644
              self.tab(host.id)?.visible_tree(false).divider_at(
                  host.content,
                  [host.mouse.x, host.mouse.y],
-@@ -5209,7 +5903,25 @@ impl App {
+@@ -5209,7 +5926,25 @@ impl App {
                      Axis::Horizontal => (host.mouse.x - bounds.x) / bounds.width,
                      Axis::Vertical => (host.mouse.y - bounds.y) / bounds.height,
                  };
@@ -1833,7 +2075,7 @@ index 1ed7e783a..32e26dd1c 100644
                      tab.root.set_ratio(id, ratio);
                  }
                  self.changed();
-@@ -5220,7 +5932,34 @@ impl App {
+@@ -5220,7 +5955,34 @@ impl App {
          if host.ui_areas.contains(host.mouse) {
              return;
          }
@@ -1869,7 +2111,7 @@ index 1ed7e783a..32e26dd1c 100644
              let divider = self.tab(host.id).and_then(|tab| {
                  tab.visible_tree(false)
                      .divider_at(host.content, [host.mouse.x, host.mouse.y], 3.0)
-@@ -5323,7 +6062,7 @@ impl App {
+@@ -5323,7 +6085,7 @@ impl App {
                  },
              );
              drop(terminal);
@@ -1878,7 +2120,7 @@ index 1ed7e783a..32e26dd1c 100644
              // Mouse reporting does not change the local screen; PTY output will repaint it.
              if action != vt::MouseAction::Move || !self.errors.is_empty() {
                  host.repaint();
-@@ -5429,7 +6168,7 @@ impl ApplicationHandler<Event> for App {
+@@ -5429,7 +6191,7 @@ impl ApplicationHandler<Event> for App {
                  Err(error) => self.errors.push(error),
              }
          }
@@ -1887,7 +2129,7 @@ index 1ed7e783a..32e26dd1c 100644
              self.add_window(false);
          }
          self.reconcile(event_loop);
-@@ -5442,6 +6181,46 @@ impl ApplicationHandler<Event> for App {
+@@ -5442,6 +6204,46 @@ impl ApplicationHandler<Event> for App {
      }
      fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
          match event {
@@ -1934,7 +2176,7 @@ index 1ed7e783a..32e26dd1c 100644
              Event::DeckWake => {}
              Event::Output(id) => {
                  if let Some(smoke) = &mut self.smoke {
-@@ -5919,6 +6698,25 @@ impl ApplicationHandler<Event> for App {
+@@ -5919,6 +6721,25 @@ impl ApplicationHandler<Event> for App {
                  }
              }
              WindowEvent::Ime(ime) if !host.ui_input() => {
@@ -1960,7 +2202,7 @@ index 1ed7e783a..32e26dd1c 100644
                  host.egui
                      .egui_input_mut()
                      .events
-@@ -5939,15 +6737,18 @@ impl ApplicationHandler<Event> for App {
+@@ -5939,15 +6760,18 @@ impl ApplicationHandler<Event> for App {
                          host.preedit.clear();
                          host.preedit_selection = None;
                          if let Some(pane) = self.focused(host.id)
@@ -1987,7 +2229,7 @@ index 1ed7e783a..32e26dd1c 100644
                          }
                      }
                      Ime::Disabled => {
-@@ -6009,6 +6810,57 @@ impl ApplicationHandler<Event> for App {
+@@ -6009,6 +6833,57 @@ impl ApplicationHandler<Event> for App {
      }
      fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
          let now = Instant::now();
@@ -2045,7 +2287,7 @@ index 1ed7e783a..32e26dd1c 100644
          for pane in self.panes.values_mut() {
              pane.deck_progress.expire(now);
          }
-@@ -6122,7 +6974,18 @@ impl ApplicationHandler<Event> for App {
+@@ -6122,7 +6997,18 @@ impl ApplicationHandler<Event> for App {
          if let Some(deadline) = self.platform.as_ref().and_then(Platform::next_deadline) {
              next = Some(next.map_or(deadline, |old| old.min(deadline)));
          }
@@ -2064,7 +2306,7 @@ index 1ed7e783a..32e26dd1c 100644
              if let Some(deadline) = host
                  .selection_drag
                  .as_ref()
-@@ -6133,8 +6996,12 @@ impl ApplicationHandler<Event> for App {
+@@ -6133,8 +7019,12 @@ impl ApplicationHandler<Event> for App {
              if let Some(deadline) = host.deadline {
                  if deadline <= now {
                      host.deadline = None;
@@ -2079,7 +2321,7 @@ index 1ed7e783a..32e26dd1c 100644
                      next = Some(next.map_or(deadline, |old| old.min(deadline)));
                  }
              }
-@@ -6243,7 +7110,7 @@ fn closes_last_window(workspace: &Workspace, window_id: Id, action: &Action) ->
+@@ -6243,7 +7133,7 @@ fn closes_last_window(workspace: &Workspace, window_id: Id, action: &Action) ->
      let closes_window = match action {
          Action::CloseWindow => true,
          Action::CloseTab => window.tabs.len() == 1,
@@ -2088,7 +2330,7 @@ index 1ed7e783a..32e26dd1c 100644
          _ => false,
      };
      closes_window
-@@ -6529,7 +7396,7 @@ fn window_visible_panes(
+@@ -6529,7 +7419,7 @@ fn window_visible_panes(
      window
          .tabs
          .get(window.active_tab)
@@ -2097,7 +2339,7 @@ index 1ed7e783a..32e26dd1c 100644
  }
  
  fn initial_visible_panes(window: &WindowState, native: Option<(bool, bool, bool)>) -> Vec<Id> {
-@@ -6545,8 +7412,8 @@ fn configure_ui_fonts(context: &egui::Context) {
+@@ -6545,8 +7435,8 @@ fn configure_ui_fonts(context: &egui::Context) {
      let path = PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into()))
          .join("Fonts/segoeui.ttf");
      // Use the native UI face; egui's embedded fonts remain fallbacks.
@@ -2108,7 +2350,7 @@ index 1ed7e783a..32e26dd1c 100644
          fonts.font_data.insert(
              "system-ui".into(),
              Arc::new(egui::FontData::from_owned(bytes)),
-@@ -6556,8 +7423,29 @@ fn configure_ui_fonts(context: &egui::Context) {
+@@ -6556,8 +7446,29 @@ fn configure_ui_fonts(context: &egui::Context) {
              .get_mut(&egui::FontFamily::Proportional)
              .unwrap()
              .insert(0, "system-ui".into());
@@ -2139,7 +2381,7 @@ index 1ed7e783a..32e26dd1c 100644
  }
  
  #[cfg(target_os = "macos")]
-@@ -6924,6 +7812,146 @@ mod tests {
+@@ -6924,6 +7835,146 @@ mod tests {
          );
      }
  
@@ -2286,7 +2528,7 @@ index 1ed7e783a..32e26dd1c 100644
      #[test]
      fn retained_window_frames_follow_panes_geometry_and_split_dimming() {
          let mut frame = Frame::empty([20, 20]);
-@@ -6935,6 +7963,7 @@ mod tests {
+@@ -6935,6 +7986,7 @@ mod tests {
          let pane = || ComposedPane {
              frame: Arc::clone(&frame),
              rect: [10.0, 15.0, 20.0, 20.0],
@@ -2295,15 +2537,39 @@ index 1ed7e783a..32e26dd1c 100644
          };
          let retained = ComposedFrame::new([60, 60], vec![pane()]).unwrap();
 diff --git a/crates/rustty-app/src/lib.rs b/crates/rustty-app/src/lib.rs
-index 267eae128..35976ca4d 100644
+index 267eae128..60c68d304 100644
 --- a/crates/rustty-app/src/lib.rs
 +++ b/crates/rustty-app/src/lib.rs
-@@ -15,3 +15,5 @@ pub mod search;
+@@ -15,3 +15,6 @@ pub mod search;
  #[cfg(target_os = "windows")]
  pub mod software_surface;
  pub mod workspace;
 +
++pub mod tmuxx_launcher;
 +pub mod tmuxx_workspace;
+diff --git a/crates/rustty-app/src/main.rs b/crates/rustty-app/src/main.rs
+index d8e01013b..1cad5ddd5 100644
+--- a/crates/rustty-app/src/main.rs
++++ b/crates/rustty-app/src/main.rs
+@@ -14,6 +14,18 @@ fn main() {
+     #[cfg(target_os = "windows")]
+     attach_parent_console();
+ 
++    // Preserve OS arguments verbatim and dispatch before registration, a window,
++    // or process-wide PTY initialization. The driver owns CLI startup semantics.
++    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("tmux")) {
++        tmuxx_cli::run_from(
++            std::env::args_os()
++                .take(1)
++                .chain(std::env::args_os().skip(2)),
++            &["tmux"],
++        );
++        return;
++    }
++
+     let cli_result = match std::env::args().nth(1).as_deref() {
+         Some("agent-status") => Some(agent_cli::run(std::env::args().skip(2))),
+         Some("agent-sim") => Some(agent_sim::run(std::env::args().skip(2))),
 diff --git a/crates/rustty-app/src/outliner.rs b/crates/rustty-app/src/outliner.rs
 index 88404a2b7..576ed1c5e 100644
 --- a/crates/rustty-app/src/outliner.rs
@@ -2746,6 +3012,262 @@ index 40fb05279..840fd66d9 100644
      {
          return Err("Outliner blocked terminal text input".into());
      }
+diff --git a/crates/rustty-app/src/tmuxx_launcher.rs b/crates/rustty-app/src/tmuxx_launcher.rs
+new file mode 100644
+index 000000000..eea73667e
+--- /dev/null
++++ b/crates/rustty-app/src/tmuxx_launcher.rs
+@@ -0,0 +1,250 @@
++//! Explicit startup of an independent local owner. Ordinary attachments never
++//! call this module and never launch a server or a replacement shell.
++use rustty::tmuxx::Connection;
++use std::{
++    io,
++    path::Path,
++    process::Child,
++    sync::Arc,
++    thread,
++    time::{Duration, Instant},
++};
++
++struct StartingOwner(Option<Child>);
++impl Drop for StartingOwner {
++    fn drop(&mut self) {
++        if let Some(child) = &mut self.0 {
++            let _ = child.kill();
++            let _ = child.wait();
++        }
++    }
++}
++
++fn missing_owner(error: &io::Error) -> bool {
++    matches!(
++        error.kind(),
++        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
++    )
++}
++fn wait_graph(connection: &Connection, deadline: Instant) -> io::Result<rustty::tmuxx::Graph> {
++    loop {
++        let errors = connection.errors();
++        if !errors.is_empty() {
++            return Err(io::Error::other(errors.join("; ")));
++        }
++        if let Some(graph) = connection.graph() {
++            return Ok(graph);
++        }
++        if Instant::now() >= deadline {
++            return Err(io::Error::new(
++                io::ErrorKind::TimedOut,
++                "native owner did not publish its graph",
++            ));
++        }
++        thread::sleep(Duration::from_millis(10));
++    }
++}
++
++/// Reuse a daemon, or explicitly start this executable's `tmux` driver. A failed
++/// startup reaps only the child we started. A successful daemon outlives the GUI.
++pub fn connect_or_start(
++    endpoint: &Path,
++    wake: Arc<dyn Fn() + Send + Sync>,
++    initial: Vec<Vec<u8>>,
++) -> io::Result<Connection> {
++    let deadline = Instant::now() + Duration::from_secs(10);
++    let mut starting = StartingOwner(None);
++    let connection = match Connection::local(endpoint, wake.clone()) {
++        Ok(connection) => connection,
++        Err(error) if missing_owner(&error) => {
++            starting.0 = Some(tmuxx_cli::native_daemon_command(endpoint, &["tmux"])?.spawn()?);
++            loop {
++                match Connection::local(endpoint, wake.clone()) {
++                    Ok(connection) => break connection,
++                    Err(error) if missing_owner(&error) => {}
++                    Err(error) => return Err(error),
++                }
++                if let Some(status) = starting.0.as_mut().unwrap().try_wait()? {
++                    // A concurrent GUI may have won the endpoint. Retry once
++                    // after observing our child's exit; never replace its owner.
++                    match Connection::local(endpoint, wake.clone()) {
++                        Ok(connection) => break connection,
++                        Err(error) => {
++                            return Err(io::Error::other(format!(
++                                "native owner startup failed ({status}): {error}"
++                            )));
++                        }
++                    }
++                }
++                if Instant::now() >= deadline {
++                    return Err(io::Error::new(
++                        io::ErrorKind::TimedOut,
++                        "native owner did not create its endpoint",
++                    ));
++                }
++                thread::sleep(Duration::from_millis(10));
++            }
++        }
++        Err(error) => return Err(error),
++    };
++    let graph = wait_graph(&connection, deadline)?;
++    if graph.sessions.is_empty() {
++        create_initial_session(&connection, initial, deadline)?;
++    }
++    // Ownership belongs to the daemon from this point, not to this connection.
++    if let Some(mut child) = starting.0.take() {
++        // Reap eventual exit on Unix; on Windows this also closes the process
++        // handle without coupling daemon lifetime to the GUI's lifetime.
++        let _ = thread::Builder::new()
++            .name("rustty-tmux-owner-reap".into())
++            .spawn(move || {
++                let _ = child.wait();
++            });
++    }
++    Ok(connection)
++}
++
++fn create_initial_session(
++    connection: &Connection,
++    initial: Vec<Vec<u8>>,
++    deadline: Instant,
++) -> io::Result<()> {
++    let mut argv = ["new-session", "-d", "-s", "rustty"]
++        .map(|arg| arg.as_bytes().to_vec())
++        .to_vec();
++    argv.extend(initial);
++    let reply =
++        connection.command_bytes_reply(argv, deadline.saturating_duration_since(Instant::now()))?;
++    // Competing GUIs may both have observed an empty graph. The engine's
++    // duplicate-name check is atomic and does not start a replacement pane.
++    // Wait for this exact reply so the collision cannot surface later as an
++    // unrelated asynchronous GUI error. Every other failure stays an error.
++    if let Some(error) = reply.error
++        && error != "duplicate session: rustty"
++    {
++        return Err(io::Error::other(error));
++    }
++    loop {
++        let graph = wait_graph(connection, deadline)?;
++        if graph
++            .sessions
++            .iter()
++            .any(|session| session.name == "rustty")
++        {
++            return Ok(());
++        }
++        if Instant::now() >= deadline {
++            return Err(io::Error::new(
++                io::ErrorKind::TimedOut,
++                "native owner did not publish its initial session",
++            ));
++        }
++        thread::sleep(Duration::from_millis(10));
++    }
++}
++
++#[cfg(all(test, windows))]
++mod tests {
++    use super::*;
++
++    struct ObservedProcess(windows::Win32::Foundation::HANDLE);
++    impl ObservedProcess {
++        fn open(pid: u32) -> Self {
++            use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
++            Self(unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.unwrap())
++        }
++        fn assert_exited(&self) {
++            use windows::Win32::{
++                Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject,
++            };
++            assert_eq!(
++                unsafe { WaitForSingleObject(self.0, 5000) },
++                WAIT_OBJECT_0,
++                "bootstrap process survived owner shutdown"
++            );
++        }
++    }
++    impl Drop for ObservedProcess {
++        fn drop(&mut self) {
++            let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
++        }
++    }
++
++    #[test]
++    fn concurrent_empty_owner_bootstrap_and_reuse_keep_one_session_and_process() {
++        use std::sync::{
++            Barrier,
++            atomic::{AtomicU64, Ordering},
++        };
++        static NEXT: AtomicU64 = AtomicU64::new(0);
++        let endpoint = rustty::tmuxx::windows_endpoint(&format!(
++            "rustty-bootstrap-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, Ordering::Relaxed)
++        ))
++        .unwrap();
++        let owner = tmuxx_runtime::start(tmuxx_runtime::Options::new(&endpoint)).unwrap();
++        let first = Connection::local(&endpoint, Arc::new(|| {})).unwrap();
++        let second = Connection::local(&endpoint, Arc::new(|| {})).unwrap();
++        for connection in [&first, &second] {
++            assert!(
++                wait_graph(connection, Instant::now() + Duration::from_secs(5))
++                    .unwrap()
++                    .sessions
++                    .is_empty()
++            );
++        }
++        let python =
++            std::env::var("TMUXX_REMOTE_PYTHON").expect("absolute native Python interpreter");
++        let command = [python.as_str(), "-u", "-c", "import time;time.sleep(180)"]
++            .map(|arg| arg.as_bytes().to_vec())
++            .to_vec();
++        let barrier = Arc::new(Barrier::new(2));
++        let results = thread::scope(|scope| {
++            let jobs = [first, second]
++                .into_iter()
++                .map(|connection| {
++                    let barrier = barrier.clone();
++                    let command = command.clone();
++                    scope.spawn(move || {
++                        barrier.wait();
++                        create_initial_session(
++                            &connection,
++                            command,
++                            Instant::now() + Duration::from_secs(10),
++                        )
++                        .unwrap();
++                        let graph = connection.graph().unwrap();
++                        assert!(connection.errors().is_empty());
++                        graph
++                    })
++                })
++                .collect::<Vec<_>>();
++            jobs.into_iter()
++                .map(|job| job.join().unwrap())
++                .collect::<Vec<_>>()
++        });
++        for graph in &results {
++            assert_eq!(graph.sessions.len(), 1);
++            assert_eq!(graph.sessions[0].name, "rustty");
++            assert_eq!(graph.panes.len(), 1);
++        }
++        let pid = results[0].panes[0].pid.expect("native process PID");
++        assert_eq!(results[1].panes[0].pid, Some(pid));
++        let process = ObservedProcess::open(pid);
++        let reused = connect_or_start(
++            &endpoint,
++            Arc::new(|| {}),
++            vec![b"must-not-spawn-this".to_vec()],
++        )
++        .unwrap();
++        let graph = reused.graph().unwrap();
++        assert_eq!(graph.sessions.len(), 1);
++        assert_eq!(graph.panes.len(), 1);
++        assert_eq!(graph.panes[0].pid, Some(pid));
++        assert!(reused.errors().is_empty());
++        drop(reused);
++        drop(owner);
++        process.assert_exited();
++    }
++}
 diff --git a/crates/rustty-app/src/tmuxx_workspace.rs b/crates/rustty-app/src/tmuxx_workspace.rs
 new file mode 100644
 index 000000000..349784316
@@ -3853,6 +4375,246 @@ index c9b3eb988..869640e0f 100644
              panes,
          })
      }
+diff --git a/crates/rustty-app/tests/tmuxx_driver.rs b/crates/rustty-app/tests/tmuxx_driver.rs
+new file mode 100644
+index 000000000..e37cc0cd4
+--- /dev/null
++++ b/crates/rustty-app/tests/tmuxx_driver.rs
+@@ -0,0 +1,234 @@
++#![cfg(windows)]
++//! Execute the GUI binary's early CLI dispatch. Every helper belongs to a Job
++//! from CreateProcessW onward, including failure, timeout, and harness death.
++use rustty::{session::Session, tmuxx::Connection};
++use std::{
++    ffi::OsString,
++    io::{Read, Write},
++    path::{Path, PathBuf},
++    sync::Arc,
++    thread,
++    time::{Duration, Instant},
++};
++use tmuxx_runtime::OwnedStdioChild;
++
++struct ObservedProcess(windows::Win32::Foundation::HANDLE);
++impl ObservedProcess {
++    fn open(pid: u32) -> Self {
++        use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
++        Self(unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.unwrap())
++    }
++    fn assert_exited(&self) {
++        use windows::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject};
++        assert_eq!(
++            unsafe { WaitForSingleObject(self.0, 5000) },
++            WAIT_OBJECT_0,
++            "test-owned pane process survived driver shutdown"
++        );
++    }
++}
++impl Drop for ObservedProcess {
++    fn drop(&mut self) {
++        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
++    }
++}
++
++fn spawn(args: &[OsString]) -> OwnedStdioChild {
++    tmuxx_runtime::spawn_owned_stdio_piped_stderr(Path::new(env!("CARGO_BIN_EXE_rustty")), args)
++        .unwrap()
++}
++fn instance() -> String {
++    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    format!(
++        "rustty-driver-{}-{} 空间 &^%",
++        std::process::id(),
++        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++    )
++}
++fn run(args: &[&str], input: &[u8]) -> std::process::Output {
++    let mut child = spawn(
++        &args
++            .iter()
++            .map(|arg| OsString::from(*arg))
++            .collect::<Vec<_>>(),
++    );
++    let mut stdout = child.stdout.take().unwrap();
++    let mut stderr = child.stderr.take().unwrap();
++    let output = thread::spawn(move || {
++        let mut bytes = Vec::new();
++        stdout.read_to_end(&mut bytes).unwrap();
++        bytes
++    });
++    let errors = thread::spawn(move || {
++        let mut bytes = Vec::new();
++        stderr.read_to_end(&mut bytes).unwrap();
++        bytes
++    });
++    child.stdin.take().unwrap().write_all(input).unwrap();
++    let deadline = Instant::now() + Duration::from_secs(10);
++    let status = loop {
++        if let Some(status) = child.try_wait().unwrap() {
++            break status;
++        }
++        if Instant::now() >= deadline {
++            child.kill().unwrap();
++            child.wait().unwrap();
++            panic!("Rustty tmux driver exceeded its bounded wait");
++        }
++        thread::sleep(Duration::from_millis(10));
++    };
++    std::process::Output {
++        status,
++        stdout: output.join().unwrap(),
++        stderr: errors.join().unwrap(),
++    }
++}
++fn wait_graph(
++    connection: &Connection,
++    predicate: impl Fn(&rustty::tmuxx::Graph) -> bool,
++) -> rustty::tmuxx::Graph {
++    let deadline = Instant::now() + Duration::from_secs(10);
++    loop {
++        let errors = connection.errors();
++        assert!(errors.is_empty(), "{errors:?}");
++        if let Some(graph) = connection.graph()
++            && predicate(&graph)
++        {
++            return graph;
++        }
++        assert!(
++            Instant::now() < deadline,
++            "Rustty driver graph did not converge"
++        );
++        thread::sleep(Duration::from_millis(10));
++    }
++}
++fn connect_owner(endpoint: &Path, owner: &mut OwnedStdioChild) -> Connection {
++    let deadline = Instant::now() + Duration::from_secs(10);
++    loop {
++        if let Ok(connection) = Connection::local(endpoint, Arc::new(|| {})) {
++            return connection;
++        }
++        assert!(
++            owner.try_wait().unwrap().is_none(),
++            "Rustty driver owner exited during startup"
++        );
++        assert!(
++            Instant::now() < deadline,
++            "Rustty driver did not create its endpoint"
++        );
++        thread::sleep(Duration::from_millis(10));
++    }
++}
++
++#[test]
++fn windows_gui_tmux_dispatch_reports_version_and_missing_bridge_never_starts_owner() {
++    let version = run(&["tmux", "-V"], &[]);
++    assert!(version.status.success(), "{version:?}");
++    assert!(version.stdout.starts_with(b"tmuxx "), "{version:?}");
++    let name = instance();
++    let endpoint = rustty::tmuxx::windows_endpoint(&name).unwrap();
++    let missing = run(&["tmux", "--instance", &name, "list-sessions"], &[]);
++    assert!(!missing.status.success());
++    assert!(
++        missing.stdout.is_empty(),
++        "diagnostics leaked onto stdout: {missing:?}"
++    );
++    assert!(!missing.stderr.is_empty());
++    let mut hello = serde_json::to_vec(&serde_json::json!({"version":1,"instance":name})).unwrap();
++    hello.push(b'\n');
++    let bridge = run(&["tmux", "--native-stdio"], &hello);
++    assert!(!bridge.status.success());
++    assert!(
++        bridge.stdout.is_empty(),
++        "diagnostics leaked onto bridge stdout: {bridge:?}"
++    );
++    assert!(!bridge.stderr.is_empty());
++    assert!(Connection::local(&endpoint, Arc::new(|| {})).is_err());
++}
++
++#[test]
++fn windows_gui_tmux_driver_owns_one_retained_process_across_local_and_stdio_views() {
++    // This must run with the same pinned package as the standalone/GUI tests.
++    let resources = PathBuf::from(
++        std::env::var_os("TMUXX_CONPTY_RESOURCES")
++            .expect("TMUXX_CONPTY_RESOURCES must identify the hash-verified packaged runtime"),
++    );
++    assert!(resources.join("conpty/conpty.dll").is_file());
++    // PATH can resolve a Python launcher which owns a second interpreter PID.
++    // Use the conformance runner's native interpreter for an exact pane PID oracle.
++    let python = std::env::var("TMUXX_REMOTE_PYTHON")
++        .expect("TMUXX_REMOTE_PYTHON must identify the absolute native Python interpreter");
++    assert!(Path::new(&python).is_absolute());
++    let endpoint = rustty::tmuxx::windows_endpoint(&instance()).unwrap();
++    let mut owner = spawn(&[
++        "tmux".into(),
++        "-D".into(),
++        "--native-endpoint".into(),
++        endpoint.as_os_str().to_owned(),
++    ]);
++    let local = connect_owner(&endpoint, &mut owner);
++    wait_graph(&local, |_| true);
++    let name = "driver 空间 &^%";
++    local.command(["new-session", "-d", "-s", name, &python, "-u", "-c",
++        "import os,time; os.write(1,('DRIVER:'+str(os.getpid())+'\\r\\n').encode()); time.sleep(180)"]).unwrap();
++    let graph = wait_graph(&local, |graph| !graph.panes.is_empty());
++    assert_eq!(graph.sessions[0].name, name);
++    let pane = graph.panes[0].id;
++    let pid = graph.panes[0].pid.expect("native driver PID");
++    let pane_process = ObservedProcess::open(pid);
++    let view = Session::attach_tmuxx(&local, pane, Arc::new(|| {})).unwrap();
++    view.set_persistent(true).unwrap();
++    wait_graph(&local, |graph| graph.panes[0].persistent);
++    let mut bridge = spawn(&[
++        "tmux".into(),
++        "--native-stdio".into(),
++        "--native-endpoint".into(),
++        endpoint.as_os_str().to_owned(),
++    ]);
++    let remote = Connection::stream(
++        bridge.stdout.take().unwrap(),
++        bridge.stdin.take().unwrap(),
++        Arc::new(|| {}),
++    )
++    .unwrap();
++    let graph = wait_graph(&remote, |graph| !graph.panes.is_empty());
++    assert_eq!(graph.panes[0].pid, Some(pid));
++    assert_eq!(graph.sessions[0].name, name);
++    bridge.kill().unwrap();
++    bridge.wait().unwrap();
++    drop(remote);
++    assert!(
++        owner.try_wait().unwrap().is_none(),
++        "bridge termination killed the owner"
++    );
++    drop(view);
++    drop(local);
++    let reconnected = Connection::local(&endpoint, Arc::new(|| {})).unwrap();
++    let graph = wait_graph(&reconnected, |graph| !graph.panes.is_empty());
++    assert_eq!(graph.panes[0].pid, Some(pid));
++    let view = Session::attach_tmuxx(&reconnected, pane, Arc::new(|| {})).unwrap();
++    let deadline = Instant::now() + Duration::from_secs(10);
++    loop {
++        let text = view.terminal().unwrap().plain_text();
++        if text.contains(&format!("DRIVER:{pid}")) {
++            break;
++        }
++        assert!(
++            Instant::now() < deadline,
++            "retained driver output missing: {text}"
++        );
++        thread::sleep(Duration::from_millis(10));
++    }
++    reconnected.command(["kill-server"]).unwrap();
++    let deadline = Instant::now() + Duration::from_secs(10);
++    while owner.try_wait().unwrap().is_none() {
++        assert!(
++            Instant::now() < deadline,
++            "driver owner did not stop gracefully"
++        );
++        thread::sleep(Duration::from_millis(10));
++    }
++    owner.wait().unwrap();
++    pane_process.assert_exited();
++}
 diff --git a/crates/rustty-app/tests/windows_conpty.rs b/crates/rustty-app/tests/windows_conpty.rs
 index 4c5e59816..c0e51bfbd 100644
 --- a/crates/rustty-app/tests/windows_conpty.rs
@@ -3990,6 +4752,77 @@ index 1d97a40fc..586b0c419 100644
 +
 +[target.'cfg(windows)'.dev-dependencies]
 +windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+diff --git a/crates/rustty/src/config.rs b/crates/rustty/src/config.rs
+index 9a3d232dd..bb70fd375 100644
+--- a/crates/rustty/src/config.rs
++++ b/crates/rustty/src/config.rs
+@@ -27,6 +27,9 @@ pub use keybinding::{
+ const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+ const MAX_FILES: usize = 256;
+ 
++/// Fixed native SSH exec command unless the user explicitly configures another.
++pub const DEFAULT_TMUXX_SSH_COMMAND: &str = "tmuxx --native-stdio";
++
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct Rgb {
+     pub r: u8,
+@@ -333,6 +336,8 @@ pub struct Config {
+     pub link_url: bool,
+     pub command: Option<Command>,
+     pub initial_command: Option<Command>,
++    /// Trusted remote-shell command; pane/session/instance names are never appended.
++    pub tmuxx_ssh_command: String,
+     /// `None` means inherit; `home` is resolved to the user's home directory.
+     pub working_directory: Option<PathBuf>,
+     pub env: BTreeMap<String, String>,
+@@ -428,6 +433,7 @@ impl Default for Config {
+             link_url: true,
+             command: None,
+             initial_command: None,
++            tmuxx_ssh_command: DEFAULT_TMUXX_SSH_COMMAND.into(),
+             working_directory: None,
+             env: BTreeMap::new(),
+             theme: None,
+@@ -630,6 +636,12 @@ impl Config {
+             }
+             "command" => set!(command, Some(Command::parse(value)?)),
+             "initial-command" => set!(initial_command, Some(Command::parse(value)?)),
++            "tmuxx-ssh-command" => set!(tmuxx_ssh_command, {
++                if value.trim().is_empty() || value.contains('\0') {
++                    return Err("tmuxx-ssh-command must be a nonempty command without NUL");
++                }
++                value.to_owned()
++            }),
+             "working-directory" => set!(
+                 working_directory,
+                 match value {
+@@ -1226,7 +1238,11 @@ fn parse_entry(text: &str, path: &Path, line: usize, result: &mut LoadedConfig)
+         return None;
+     }
+     let value = value.trim();
+-    if (value.starts_with('"') && !value.ends_with('"')) || value == "\"" {
++    // The SSH override is already a complete command in the remote shell's
++    // syntax. Quotes there belong to that command, including a quoted Windows
++    // executable followed by arguments; do not apply config-string unquoting.
++    let remote_command = key == "tmuxx-ssh-command";
++    if !remote_command && ((value.starts_with('"') && !value.ends_with('"')) || value == "\"") {
+         push_diagnostic(result, path, line, Some(key), "unmatched quote");
+         return None;
+     }
+@@ -1234,7 +1250,12 @@ fn parse_entry(text: &str, path: &Path, line: usize, result: &mut LoadedConfig)
+         path: path.to_owned(),
+         line,
+         key: key.to_owned(),
+-        value: unquote(value).to_owned(),
++        value: if remote_command {
++            value
++        } else {
++            unquote(value)
++        }
++        .to_owned(),
+         quoted: value.starts_with('"'),
+     })
+ }
 diff --git a/crates/rustty/src/config/keybinding.rs b/crates/rustty/src/config/keybinding.rs
 index 82933229a..d763e3d7b 100644
 --- a/crates/rustty/src/config/keybinding.rs
@@ -4010,6 +4843,44 @@ index 82933229a..d763e3d7b 100644
              "themes" => Self::Themes,
              "reset" => Self::Reset,
              "next_tab" => Self::NextTab,
+diff --git a/crates/rustty/src/config/tests.rs b/crates/rustty/src/config/tests.rs
+index 4d4854772..fb1399bc5 100644
+--- a/crates/rustty/src/config/tests.rs
++++ b/crates/rustty/src/config/tests.rs
+@@ -1326,3 +1326,33 @@ fn command_exit_and_undo_settings_keep_ghostty_defaults_and_units() {
+     home.own("wait-after-command=perhaps\nabnormal-command-exit-runtime=-1\nundo-timeout=-2s\n");
+     assert_eq!(home.loader.load().diagnostics.len(), 3);
+ }
++
++#[test]
++fn tmuxx_ssh_command_preserves_explicit_shell_text_and_empty_resets_default() {
++    let home = TestHome::new();
++    assert_eq!(
++        home.loader.load().config.tmuxx_ssh_command,
++        DEFAULT_TMUXX_SSH_COMMAND
++    );
++    let command = r#"& 'C:\Program Files\空间 & tools\rustty.exe' tmux --native-stdio"#;
++    home.own(&format!("tmuxx-ssh-command={command}\n"));
++    let loaded = home.loader.load();
++    assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
++    assert_eq!(loaded.config.tmuxx_ssh_command, command);
++    let override_command = r#""C:\Program Files\Rustty\rustty.exe" tmux --native-stdio"#;
++    let loaded = home
++        .loader
++        .load_with_args(&[format!("--tmuxx-ssh-command={override_command}")]);
++    assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
++    assert_eq!(loaded.config.tmuxx_ssh_command, override_command);
++    home.own("tmuxx-ssh-command=\n");
++    assert_eq!(
++        home.loader.load().config.tmuxx_ssh_command,
++        DEFAULT_TMUXX_SSH_COMMAND
++    );
++    let loaded = home
++        .loader
++        .load_with_args(&["--tmuxx-ssh-command=bad\0command".into()]);
++    assert_eq!(loaded.diagnostics.len(), 1);
++    assert_eq!(loaded.config.tmuxx_ssh_command, DEFAULT_TMUXX_SSH_COMMAND);
++}
 diff --git a/crates/rustty/src/lib.rs b/crates/rustty/src/lib.rs
 index d07c97afb..d4497c5b3 100644
 --- a/crates/rustty/src/lib.rs
@@ -4022,7 +4893,7 @@ index d07c97afb..d4497c5b3 100644
 +#[cfg(feature = "sessions")]
 +pub mod tmuxx;
 diff --git a/crates/rustty/src/session.rs b/crates/rustty/src/session.rs
-index 8fc8f1aaa..da1a04a27 100644
+index 8fc8f1aaa..196fea784 100644
 --- a/crates/rustty/src/session.rs
 +++ b/crates/rustty/src/session.rs
 @@ -16,6 +16,39 @@ pub use shell::{ShellInfo, ShellKind, default_shell, resolve_shell};
@@ -4065,7 +4936,20 @@ index 8fc8f1aaa..da1a04a27 100644
  #[derive(Clone, Debug)]
  pub struct SessionOptions {
      pub cols: u16,
-@@ -83,15 +116,16 @@ pub struct Snapshot {
+@@ -47,6 +80,12 @@ impl Default for SessionOptions {
+ #[derive(Debug)]
+ pub enum SessionEvent {
+     Effect(Effect),
++    /// Retained native pane metadata. Restoring it must not replay shell-command
++    /// notifications or other one-shot host effects.
++    RestoredAgentStatus {
++        event: rustty_vt::agent::Event,
++        enclosing_command: bool,
++    },
+     Exited {
+         code: u32,
+         signal: Option<String>,
+@@ -83,15 +122,16 @@ pub struct Snapshot {
  
  pub struct Session {
      shell: ShellInfo,
@@ -4084,7 +4968,7 @@ index 8fc8f1aaa..da1a04a27 100644
  }
  
  fn error(error: impl std::fmt::Display) -> io::Error {
-@@ -308,13 +342,33 @@ impl Session {
+@@ -308,13 +348,37 @@ impl Session {
              })??;
  
          Ok(Self {
@@ -4105,8 +4989,12 @@ index 8fc8f1aaa..da1a04a27 100644
 +        pane: u64,
 +        wake: Arc<dyn Fn() + Send + Sync>,
 +    ) -> io::Result<Self> {
-+        let attached = connection.attach(pane, wake)?;
++        let attached = connection.attach(pane, wake.clone())?;
 +        let (input, _) = mpsc::channel();
++        // A retained pane may produce no more bytes after this view opens.
++        // Schedule its initial metadata drain without waiting for future output.
++        // Connection::attach has released the model lock before the callback.
++        wake();
 +        Ok(Self {
 +            shell: ShellInfo::new(vec!["tmuxx".into()], "attached server pane".into()),
 +            attached: Some(attached.input),
@@ -4119,7 +5007,7 @@ index 8fc8f1aaa..da1a04a27 100644
          })
      }
  
-@@ -329,6 +383,9 @@ impl Session {
+@@ -329,6 +393,9 @@ impl Session {
      }
  
      pub fn reset_terminal(&self) -> io::Result<()> {
@@ -4129,7 +5017,7 @@ index 8fc8f1aaa..da1a04a27 100644
          let mut terminal = self.terminal()?;
          terminal.reset_from_host();
          self.input
-@@ -336,8 +393,29 @@ impl Session {
+@@ -336,8 +403,29 @@ impl Session {
              .map_err(error)
      }
  
@@ -4159,7 +5047,7 @@ index 8fc8f1aaa..da1a04a27 100644
          if self.exited.load(Ordering::Acquire) {
              return Err(io::ErrorKind::BrokenPipe.into());
          }
-@@ -351,6 +429,13 @@ impl Session {
+@@ -351,6 +439,13 @@ impl Session {
      }
  
      pub fn resize(&self, cols: u16, rows: u16, width_px: u16, height_px: u16) -> io::Result<()> {
@@ -4173,7 +5061,7 @@ index 8fc8f1aaa..da1a04a27 100644
          let cols = cols.max(1);
          let rows = rows.max(1);
          let size = query::Size {
-@@ -402,6 +487,13 @@ impl Session {
+@@ -402,6 +497,13 @@ impl Session {
          focused: bool,
          scheme: query::ColorScheme,
      ) -> io::Result<()> {
@@ -4187,7 +5075,7 @@ index 8fc8f1aaa..da1a04a27 100644
          let mut terminal = self.terminal()?;
          let mut reply = Vec::new();
          if terminal.query_defaults.color_scheme != Some(scheme) {
-@@ -431,6 +523,44 @@ impl Session {
+@@ -431,6 +533,44 @@ impl Session {
          Ok(())
      }
  
@@ -4232,7 +5120,26 @@ index 8fc8f1aaa..da1a04a27 100644
      pub fn snapshot(&self) -> io::Result<Snapshot> {
          let terminal = self.terminal()?;
          Ok(Snapshot {
-@@ -456,12 +586,21 @@ impl Session {
+@@ -448,7 +588,17 @@ impl Session {
+     }
+ 
+     pub fn events(&self) -> impl Iterator<Item = SessionEvent> + '_ {
+-        self.events.try_iter()
++        // Retained metadata is read after queued effects and coalesces in a
++        // bounded per-view slot. A slow GUI cannot lose the only current report
++        // because its ordinary effect channel was temporarily full.
++        self.events.try_iter().chain(
++            std::iter::once_with(|| {
++                self.attached
++                    .as_ref()
++                    .and_then(crate::tmuxx::PaneInput::agent_event)
++            })
++            .flatten(),
++        )
+     }
+     pub fn has_exited(&self) -> bool {
+         self.exited.load(Ordering::Acquire)
+@@ -456,12 +606,21 @@ impl Session {
      /// Request asynchronous termination. The host can close all sessions, then
      /// give their `has_exited` flags a bounded drain period before process exit.
      pub fn close(&self) {
@@ -4258,10 +5165,10 @@ index 8fc8f1aaa..da1a04a27 100644
          let mut terminal = self.terminal()?;
 diff --git a/crates/rustty/src/tmuxx.rs b/crates/rustty/src/tmuxx.rs
 new file mode 100644
-index 000000000..ae7be9bc5
+index 000000000..45a582164
 --- /dev/null
 +++ b/crates/rustty/src/tmuxx.rs
-@@ -0,0 +1,2042 @@
+@@ -0,0 +1,2580 @@
 +//! Native tmuxx connections and independent Rustty pane views.
 +//!
 +//! The server owns PTYs and application replies. Views own selection, scroll,
@@ -4288,6 +5195,20 @@ index 000000000..ae7be9bc5
 +mod system;
 +
 +const RECORD_LIMIT: usize = 128 * 1024 * 1024;
++
++fn native_ssh_arguments(
++    host: &str,
++    config: Option<&Path>,
++    remote_command: &str,
++) -> Vec<std::ffi::OsString> {
++    let mut args = Vec::new();
++    if let Some(path) = config {
++        args.push("-F".into());
++        args.push(path.as_os_str().to_owned());
++    }
++    args.extend(["-T", "--", host, remote_command].map(Into::into));
++    args
++}
 +
 +#[cfg(windows)]
 +fn windows_ssh_executable() -> io::Result<PathBuf> {
@@ -4360,14 +5281,47 @@ index 000000000..ae7be9bc5
 +    panes: BTreeMap<u64, PaneState>,
 +    errors: Vec<String>,
 +    last_host_event: Option<u64>,
++    replies: BTreeMap<u64, mpsc::SyncSender<tmuxx_protocol::native::Response>>,
 +}
 +struct PaneState {
 +    host_state: Option<(bool, bool, bool)>,
 +    owners: Arc<AtomicUsize>,
 +    terminal: Terminal,
++    agent_status: tmuxx_terminal::AgentStatus,
 +    views: Vec<View>,
 +}
++#[derive(Default)]
++struct AgentView {
++    current: tmuxx_terminal::AgentStatus,
++    delivered: tmuxx_terminal::AgentStatus,
++    replaced: bool,
++}
++impl AgentView {
++    fn update(&mut self, current: &tmuxx_terminal::AgentStatus, replaced: bool) {
++        self.current = current.clone();
++        self.replaced |= replaced;
++    }
++    fn take_event(&mut self) -> Option<SessionEvent> {
++        let empty = tmuxx_terminal::AgentStatus::default();
++        let previous = if self.replaced {
++            &empty
++        } else {
++            &self.delivered
++        };
++        let event = self.current.event_since(previous).or_else(|| {
++            (self.replaced && self.delivered.snapshot.is_some())
++                .then_some(rustty_vt::agent::Event::End)
++        });
++        self.delivered = self.current.clone();
++        self.replaced = false;
++        event.map(|event| SessionEvent::RestoredAgentStatus {
++            event,
++            enclosing_command: self.current.enclosing_command,
++        })
++    }
++}
 +struct View {
++    agent: Arc<Mutex<AgentView>>,
 +    terminal: Weak<Mutex<Terminal>>,
 +    events: mpsc::SyncSender<SessionEvent>,
 +    exited: Weak<AtomicBool>,
@@ -4398,6 +5352,7 @@ index 000000000..ae7be9bc5
 +        host: String,
 +        instance: Option<String>,
 +        config: Option<PathBuf>,
++        remote_command: String,
 +    },
 +    SystemSsh {
 +        host: String,
@@ -4425,6 +5380,7 @@ index 000000000..ae7be9bc5
 +
 +#[derive(Clone)]
 +pub struct PaneInput {
++    agent: Arc<Mutex<AgentView>>,
 +    shared: Weak<Shared>,
 +    pane: u64,
 +    focused: Arc<AtomicBool>,
@@ -4436,6 +5392,12 @@ index 000000000..ae7be9bc5
 +    native: bool,
 +}
 +impl PaneInput {
++    pub(crate) fn agent_event(&self) -> Option<SessionEvent> {
++        if !self.native {
++            return None;
++        }
++        self.agent.lock().ok()?.take_event()
++    }
 +    pub fn release(&self) {
 +        if self.released.swap(true, Ordering::AcqRel) {
 +            return;
@@ -4778,6 +5740,14 @@ index 000000000..ae7be9bc5
 +        connection.command_bytes(argv)?;
 +        Ok(connection)
 +    }
++    /// Attach an existing local endpoint without starting an owner or a pane.
++    pub fn local(endpoint: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
++        #[cfg(unix)]
++        let source = Source::Unix(endpoint.to_owned());
++        #[cfg(windows)]
++        let source = Source::Windows(endpoint.to_owned());
++        Self::connect_source(source, wake, true, true)
++    }
 +    #[cfg(unix)]
 +    pub fn unix(endpoint: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
 +        Self::connect_source(Source::Unix(endpoint.to_owned()), wake, true, true)
@@ -4792,28 +5762,41 @@ index 000000000..ae7be9bc5
 +        )
 +    }
 +    pub fn ssh(host: &str, wake: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
-+        Self::connect_source(
-+            Source::Ssh {
-+                host: host.to_owned(),
-+                instance: None,
-+                config: std::env::var_os("RUSTTY_TMUXX_SSH_CONFIG").map(PathBuf::from),
-+            },
-+            wake,
-+            true,
-+            true,
-+        )
++        Self::native_ssh_command(host, None, crate::config::DEFAULT_TMUXX_SSH_COMMAND, wake)
 +    }
-+    /// Select a Windows owner through the first protocol record; the SSH exec command stays fixed.
++    /// Select an owner through the first protocol record; the exec command stays fixed.
 +    pub fn native_ssh_instance(
 +        host: &str,
 +        instance: &str,
 +        wake: Arc<dyn Fn() + Send + Sync>,
 +    ) -> io::Result<Self> {
++        Self::native_ssh_command(
++            host,
++            Some(instance),
++            crate::config::DEFAULT_TMUXX_SSH_COMMAND,
++            wake,
++        )
++    }
++    /// Use an explicit trusted remote-shell command. Selection remains in Hello;
++    /// no pane, session, path, or instance value is interpolated into this command.
++    pub fn native_ssh_command(
++        host: &str,
++        instance: Option<&str>,
++        remote_command: &str,
++        wake: Arc<dyn Fn() + Send + Sync>,
++    ) -> io::Result<Self> {
++        if remote_command.trim().is_empty() || remote_command.contains('\0') {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "native SSH command must be nonempty and contain no NUL",
++            ));
++        }
 +        Self::connect_source(
 +            Source::Ssh {
 +                host: host.to_owned(),
-+                instance: Some(instance.to_owned()),
++                instance: instance.map(str::to_owned),
 +                config: std::env::var_os("RUSTTY_TMUXX_SSH_CONFIG").map(PathBuf::from),
++                remote_command: remote_command.to_owned(),
 +            },
 +            wake,
 +            true,
@@ -4857,30 +5840,22 @@ index 000000000..ae7be9bc5
 +                host,
 +                instance,
 +                config,
++                remote_command,
 +            } => {
++                let args = native_ssh_arguments(host, config.as_deref(), remote_command);
 +                #[cfg(not(windows))]
 +                let mut child = {
 +                    let mut command = Command::new("ssh");
-+                    if let Some(path) = config {
-+                        command.arg("-F").arg(path);
-+                    }
 +                    command
-+                        .args(["-T", "--", host, "tmuxx", "--native-stdio"])
++                        .args(&args)
 +                        .stdin(Stdio::piped())
 +                        .stdout(Stdio::piped())
 +                        .stderr(Stdio::inherit())
 +                        .spawn()?
 +                };
 +                #[cfg(windows)]
-+                let mut child = {
-+                    let mut args = Vec::<std::ffi::OsString>::new();
-+                    if let Some(path) = config {
-+                        args.push("-F".into());
-+                        args.push(path.as_os_str().to_owned());
-+                    }
-+                    args.extend(["-T", "--", host, "tmuxx", "--native-stdio"].map(Into::into));
-+                    tmuxx_runtime::spawn_owned_stdio(&windows_ssh_executable()?, &args)?
-+                };
++                let mut child =
++                    { tmuxx_runtime::spawn_owned_stdio(&windows_ssh_executable()?, &args)? };
 +                match Self::stream_inner_selected(
 +                    child.stdout.take().unwrap(),
 +                    child.stdin.take().unwrap(),
@@ -5049,6 +6024,61 @@ index 000000000..ae7be9bc5
 +    pub fn command_bytes(&self, argv: Vec<Vec<u8>>) -> io::Result<u64> {
 +        send(&self.shared, argv)
 +    }
++    /// Await one acknowledged native command without replaying it on timeout.
++    /// Other GUI commands remain asynchronous; only registered replies are held.
++    pub fn command_bytes_reply(
++        &self,
++        argv: Vec<Vec<u8>>,
++        timeout: Duration,
++    ) -> io::Result<tmuxx_protocol::native::Response> {
++        if self.system.is_some() {
++            return Err(err("acknowledged commands require a native connection"));
++        }
++        let request_id = self.shared.next.fetch_add(1, Ordering::Relaxed);
++        let (sender, receiver) = mpsc::sync_channel(1);
++        {
++            let mut model = self.shared.model.lock().map_err(err)?;
++            if self.shared.closed.load(Ordering::Acquire) {
++                return Err(io::ErrorKind::BrokenPipe.into());
++            }
++            if model.replies.len() >= 16 {
++                return Err(io::Error::new(
++                    io::ErrorKind::WouldBlock,
++                    "too many awaited native commands",
++                ));
++            }
++            model.replies.insert(request_id, sender);
++        }
++        let sent = self.shared.requests.try_send(Request {
++            request_id,
++            argv,
++            stdin: None,
++            subscribe: self.shared.subscribe,
++            control: false,
++        });
++        if let Err(error) = sent {
++            self.shared
++                .model
++                .lock()
++                .map_err(err)?
++                .replies
++                .remove(&request_id);
++            return Err(err(error));
++        }
++        let response = receiver.recv_timeout(timeout);
++        self.shared
++            .model
++            .lock()
++            .map_err(err)?
++            .replies
++            .remove(&request_id);
++        response.map_err(|error| match error {
++            mpsc::RecvTimeoutError::Timeout => io::Error::new(io::ErrorKind::TimedOut,
++                "native command acknowledgement timed out; its outcome is unknown and it was not replayed"),
++            mpsc::RecvTimeoutError::Disconnected => io::Error::new(io::ErrorKind::BrokenPipe,
++                "native connection ended before command acknowledgement; its outcome is unknown"),
++        })
++    }
 +    pub fn persistence_survives_app(&self) -> bool {
 +        self.owner.is_none() && self.system.is_none()
 +    }
@@ -5109,11 +6139,16 @@ index 000000000..ae7be9bc5
 +        let terminal = Arc::new(Mutex::new(pane_state.terminal.clone()));
 +        let exited = Arc::new(AtomicBool::new(was_exited));
 +        let (events_tx, events) = mpsc::sync_channel(256);
++        let agent = Arc::new(Mutex::new(AgentView {
++            current: pane_state.agent_status.clone(),
++            ..Default::default()
++        }));
 +        let focused = Arc::new(AtomicBool::new(false));
 +        let visible = Arc::new(AtomicBool::new(false));
 +        let dark = Arc::new(AtomicBool::new(true));
 +        let pending = Arc::new(Mutex::new(Vec::new()));
 +        pane_state.views.push(View {
++            agent: agent.clone(),
 +            focused: focused.clone(),
 +            visible: visible.clone(),
 +            dark: dark.clone(),
@@ -5126,6 +6161,7 @@ index 000000000..ae7be9bc5
 +        Ok(Attached {
 +            terminal,
 +            input: PaneInput {
++                agent,
 +                shared: Arc::downgrade(&self.shared),
 +                pane,
 +                focused,
@@ -5176,8 +6212,12 @@ index 000000000..ae7be9bc5
 +fn fail(shared: &Shared, error: impl std::fmt::Display) {
 +    if let Ok(mut model) = shared.model.lock() {
 +        model.errors.push(error.to_string());
++        model.replies.clear();
 +        for pane in model.panes.values() {
 +            for view in &pane.views {
++                if let Ok(mut agent) = view.agent.lock() {
++                    agent.update(&tmuxx_terminal::AgentStatus::default(), true);
++                }
 +                if let Some(exited) = view.exited.upgrade() {
 +                    exited.store(true, Ordering::Release);
 +                }
@@ -5188,14 +6228,17 @@ index 000000000..ae7be9bc5
 +    }
 +    (shared.wake)();
 +}
-+fn restore(value: &serde_json::Value) -> io::Result<Terminal> {
++fn restore(value: &serde_json::Value) -> io::Result<(Terminal, tmuxx_terminal::AgentStatus)> {
 +    let snapshot: tmuxx_terminal::Snapshot = serde_json::from_value(value.clone()).map_err(err)?;
-+    snapshot
-+        .restore()
-+        .map(tmuxx_terminal::Terminal::into_backend)
++    let terminal = snapshot.restore()?;
++    let agent_status = terminal.agent_status().clone();
++    Ok((terminal.into_backend(), agent_status))
 +}
 +fn close_views(pane: &PaneState) {
 +    for view in &pane.views {
++        if let Ok(mut agent) = view.agent.lock() {
++            agent.update(&tmuxx_terminal::AgentStatus::default(), true);
++        }
 +        if let Some(exited) = view.exited.upgrade() {
 +            exited.store(true, Ordering::Release);
 +        }
@@ -5250,7 +6293,7 @@ index 000000000..ae7be9bc5
 +                model.panes.clear();
 +                model.last_host_event = None;
 +            }
-+            for (id, terminal) in restored {
++            for (id, (terminal, mut agent_status)) in restored {
 +                let remote = graph.panes.iter().find(|p| p.id == id).unwrap();
 +                let replaced = model
 +                    .graph
@@ -5261,8 +6304,15 @@ index 000000000..ae7be9bc5
 +                    host_state: None,
 +                    owners: Arc::new(AtomicUsize::new(0)),
 +                    terminal: terminal.clone(),
++                    agent_status: tmuxx_terminal::AgentStatus::default(),
 +                    views: Vec::new(),
 +                });
++                // The owner normally clears this at process exit. Do not keep a
++                // stale registration from an older peer's exited-pane snapshot.
++                if remote.status.is_some() {
++                    agent_status = tmuxx_terminal::AgentStatus::default();
++                }
++                pane.agent_status = agent_status;
 +                pane.terminal = terminal;
 +                pane.views.retain(|view| {
 +                    let Some(terminal) = view.terminal.upgrade() else {
@@ -5277,6 +6327,9 @@ index 000000000..ae7be9bc5
 +                            terminal.screen_mut().viewport_offset = 0;
 +                        }
 +                        replace_view(&mut terminal, &pane.terminal);
++                    }
++                    if let Ok(mut agent) = view.agent.lock() {
++                        agent.update(&pane.agent_status, replaced);
 +                    }
 +                    (view.wake)();
 +                    true
@@ -5306,13 +6359,18 @@ index 000000000..ae7be9bc5
 +            if let Some(pane) = model.panes.get_mut(&pane_id) {
 +                // Application replies belong to the owner. Host actions require
 +                // the native elected-recipient protocol, never replay effects.
-+                let _ = pane.terminal.feed(&data);
++                for effect in pane.terminal.feed(&data) {
++                    let _ = pane.agent_status.observe(&effect);
++                }
 +                pane.views.retain(|view| {
 +                    let Some(terminal) = view.terminal.upgrade() else {
 +                        return false;
 +                    };
 +                    if let Ok(mut terminal) = terminal.lock() {
-+                        feed_view(&mut terminal, &data, &view.events);
++                        feed_view(&mut terminal, &data, &view.events, true);
++                    }
++                    if let Ok(mut agent) = view.agent.lock() {
++                        agent.update(&pane.agent_status, false);
 +                    }
 +                    (view.wake)();
 +                    true
@@ -5377,13 +6435,16 @@ index 000000000..ae7be9bc5
 +            send(shared, Vec::new())?;
 +        }
 +        ServerMessage::Reply(reply) => {
-+            if let Some(error) = reply.error {
++            if let Some(waiter) = model.replies.remove(&reply.request_id) {
++                let _ = waiter.try_send(reply);
++            } else if let Some(error) = reply.error {
 +                model.errors.push(error);
 +                (shared.wake)();
 +            }
 +        }
 +        ServerMessage::Detached { .. } => {
 +            shared.closed.store(true, Ordering::Release);
++            model.replies.clear();
 +            for pane in model.panes.values() {
 +                close_views(pane);
 +            }
@@ -5435,8 +6496,16 @@ index 000000000..ae7be9bc5
 +        .map_err(err)
 +}
 +
-+fn feed_view(terminal: &mut Terminal, data: &[u8], events: &mpsc::SyncSender<SessionEvent>) {
++fn feed_view(
++    terminal: &mut Terminal,
++    data: &[u8],
++    events: &mpsc::SyncSender<SessionEvent>,
++    native: bool,
++) {
 +    for effect in terminal.feed(data) {
++        if native && matches!(effect, Effect::AgentStatus(_)) {
++            continue;
++        }
 +        if !matches!(
 +            effect,
 +            Effect::Write(_)
@@ -5448,6 +6517,50 @@ index 000000000..ae7be9bc5
 +            let _ = events.try_send(SessionEvent::Effect(effect));
 +        }
 +    }
++}
++
++fn validate_graph(graph: &Graph) -> io::Result<()> {
++    use std::collections::BTreeSet;
++    let unique = |ids: Vec<u64>| ids.iter().collect::<BTreeSet<_>>().len() == ids.len();
++    if graph.panes.len() > 10_000
++        || !unique(graph.panes.iter().map(|p| p.id).collect())
++        || !unique(graph.windows.iter().map(|w| w.id).collect())
++        || !unique(graph.sessions.iter().map(|s| s.id).collect())
++    {
++        return Err(err("invalid tmuxx object IDs"));
++    }
++    for window in &graph.windows {
++        let layout = Layout::parse(&window.layout).map_err(err)?;
++        layout.validate_tiled().map_err(err)?;
++        let ids = layout
++            .panes()
++            .iter()
++            .map(|p| p.id.map(u64::from))
++            .collect::<Option<BTreeSet<_>>>()
++            .ok_or_else(|| err("layout pane has no ID"))?;
++        if window.panes.iter().copied().collect::<BTreeSet<_>>() != ids
++            || !ids.contains(&window.active)
++            || window.panes.iter().any(|id| {
++                !graph
++                    .panes
++                    .iter()
++                    .any(|p| p.id == *id && p.window == window.id)
++            })
++        {
++            return Err(err("inconsistent tmuxx pane graph"));
++        }
++    }
++    for session in &graph.sessions {
++        if !session.windows.contains_key(&(session.active as u32))
++            || session
++                .windows
++                .values()
++                .any(|id| !graph.windows.iter().any(|w| w.id == *id))
++        {
++            return Err(err("inconsistent tmuxx session graph"));
++        }
++    }
++    Ok(())
 +}
 +
 +#[cfg(test)]
@@ -5548,7 +6661,7 @@ index 000000000..ae7be9bc5
 +        for cols in [8, 16, 8, 16] {
 +            terminal.resize(cols, 20);
 +            let snapshot = terminal.snapshot();
-+            let restored = restore(&serde_json::to_value(&snapshot).unwrap()).unwrap();
++            let (restored, _) = restore(&serde_json::to_value(&snapshot).unwrap()).unwrap();
 +            let ids = restored
 +                .primary_screen()
 +                .all_rows()
@@ -5884,6 +6997,323 @@ index 000000000..ae7be9bc5
 +        assert_eq!(second.events().count(), 0);
 +    }
 +
++    #[test]
++    fn native_ssh_command_keeps_trusted_shell_text_separate_from_protocol_selection() {
++        let command = r#"& 'C:\Program Files\空间 & tools\rustty.exe' tmux --native-stdio"#;
++        let source = Source::Ssh {
++            host: "desktop".into(),
++            instance: Some("instance 空间 & ^ % ; $(literal)".into()),
++            config: Some(PathBuf::from(r"C:\private space\ssh config")),
++            remote_command: command.into(),
++        };
++        let Source::Ssh {
++            host,
++            instance,
++            config,
++            remote_command,
++        } = source.clone()
++        else {
++            unreachable!()
++        };
++        let args = native_ssh_arguments(&host, config.as_deref(), &remote_command);
++        assert_eq!(
++            args,
++            [
++                "-F",
++                r"C:\private space\ssh config",
++                "-T",
++                "--",
++                "desktop",
++                command
++            ]
++            .map(std::ffi::OsString::from)
++        );
++        assert_eq!(
++            instance.as_deref(),
++            Some("instance 空间 & ^ % ; $(literal)")
++        );
++        assert_eq!(args.last().unwrap(), command);
++        for invalid in ["", "  ", "bad\0command"] {
++            assert_eq!(
++                Connection::native_ssh_command("desktop", None, invalid, Arc::new(|| {}))
++                    .err()
++                    .unwrap()
++                    .kind(),
++                io::ErrorKind::InvalidInput
++            );
++        }
++    }
++
++    fn agent_frame(json: &[u8]) -> Vec<u8> {
++        rustty_vt::agent::Event::from_json(json)
++            .unwrap()
++            .frame()
++            .unwrap()
++    }
++    fn agent_snapshot(
++        terminal: &mut tmuxx_terminal::Terminal,
++        sequence: u64,
++        pid: u32,
++        status: Option<i32>,
++    ) -> ServerMessage {
++        ServerMessage::Snapshot {
++            instance_id: "agent-owner".into(),
++            sequence,
++            state: serde_json::json!({
++                "sessions": [{"id":1,"name":"test","active":0,"windows":{"0":2}}],
++                "windows": [{"id":2,"name":"shell","active":7,"cols":80,"rows":24,"panes":[7],"layout":Layout::pane(7,80,24).to_legacy().unwrap()}],
++                "panes": [{"id":7,"window":2,"cols":80,"rows":24,"pid":pid,"status":status,"terminal":terminal.snapshot()}],
++            }),
++        }
++    }
++    fn agent_events(session: &Session) -> Vec<(rustty_vt::agent::Event, bool)> {
++        session
++            .events()
++            .map(|event| match event {
++                SessionEvent::RestoredAgentStatus {
++                    event,
++                    enclosing_command,
++                } => (event, enclosing_command),
++                other => panic!("unexpected replayed effect: {other:?}"),
++            })
++            .collect()
++    }
++
++    #[test]
++    fn retained_agent_snapshot_seeds_views_once_without_replaying_host_effects() {
++        use rustty_vt::agent::{Event, State};
++        let (connection, _requests) = Connection::base(Arc::new(|| {}), true);
++        let mut owner = tmuxx_terminal::Terminal::new(80, 24, 2000);
++        owner.feed(b"\x1b]133;C\x07");
++        owner.feed(&agent_frame(
++            br#"{"op":"begin","state":"working","thread_id":"remote"}"#,
++        ));
++        owner.feed(b"\x07\x1b]52;c;aGVsbG8=\x07\x1b[6n");
++        apply(&connection.shared, agent_snapshot(&mut owner, 1, 123, None)).unwrap();
++        let wakes = Arc::new(AtomicUsize::new(0));
++        let wake = {
++            let wakes = wakes.clone();
++            Arc::new(move || {
++                wakes.fetch_add(1, Ordering::SeqCst);
++            })
++        };
++        let first = Session::attach_tmuxx(&connection, 7, wake.clone()).unwrap();
++        let second = Session::attach_tmuxx(&connection, 7, wake).unwrap();
++        assert_eq!(
++            wakes.load(Ordering::SeqCst),
++            2,
++            "quiet retained views must wake without more output"
++        );
++        for session in [&first, &second] {
++            let events = agent_events(session);
++            assert_eq!(events.len(), 1);
++            assert!(
++                matches!(&events[0], (Event::Begin(report), true) if report.state == State::Working)
++            );
++        }
++        apply(&connection.shared, agent_snapshot(&mut owner, 2, 123, None)).unwrap();
++        assert!(agent_events(&first).is_empty());
++        assert!(agent_events(&second).is_empty());
++        owner.feed(&agent_frame(
++            br#"{"op":"update","state":"done","thread_id":"remote","turn_id":"one"}"#,
++        ));
++        apply(&connection.shared, agent_snapshot(&mut owner, 3, 123, None)).unwrap();
++        for session in [&first, &second] {
++            assert!(
++                matches!(&agent_events(session)[..], [(Event::Update(report), true)] if report.state == State::Done)
++            );
++        }
++        // The shell ended while detached. Restore End without replaying its
++        // command notification or repeating bell/clipboard/query effects.
++        owner.feed(b"\x1b]133;D;0\x07");
++        apply(&connection.shared, agent_snapshot(&mut owner, 4, 123, None)).unwrap();
++        assert_eq!(agent_events(&first), [(Event::End, false)]);
++        assert_eq!(agent_events(&second), [(Event::End, false)]);
++    }
++
++    #[test]
++    fn retained_agent_observes_fragmented_output_without_views_and_respawn_resets_generation() {
++        use rustty_vt::agent::{Event, State};
++        let (connection, _requests) = Connection::base(Arc::new(|| {}), true);
++        let mut owner = tmuxx_terminal::Terminal::new(80, 24, 2000);
++        apply(&connection.shared, agent_snapshot(&mut owner, 1, 123, None)).unwrap();
++        let frame = agent_frame(br#"{"op":"begin","state":"working"}"#);
++        let mut sequence = 1;
++        for byte in frame {
++            sequence += 1;
++            apply(
++                &connection.shared,
++                ServerMessage::PaneOutput {
++                    sequence,
++                    pane_id: 7,
++                    data: vec![byte],
++                },
++            )
++            .unwrap();
++        }
++        let session = Session::attach_tmuxx(&connection, 7, Arc::new(|| {})).unwrap();
++        assert!(
++            matches!(&agent_events(&session)[..], [(Event::Begin(report), false)] if report.state == State::Working)
++        );
++        assert_eq!(
++            connection.shared.model.lock().unwrap().panes[&7]
++                .agent_status
++                .generation,
++            1
++        );
++        owner.feed(&agent_frame(br#"{"op":"begin","state":"working"}"#));
++        sequence += 1;
++        apply(
++            &connection.shared,
++            agent_snapshot(&mut owner, sequence, 124, None),
++        )
++        .unwrap();
++        // A replacement process has a distinct registration even if both its
++        // generation and report match those of the preceding process.
++        assert!(matches!(
++            &agent_events(&session)[..],
++            [(Event::Begin(_), false)]
++        ));
++        sequence += 1;
++        apply(
++            &connection.shared,
++            agent_snapshot(&mut owner, sequence, 124, Some(0)),
++        )
++        .unwrap();
++        assert_eq!(agent_events(&session), [(Event::End, false)]);
++        assert!(session.has_exited());
++        assert!(
++            connection.shared.model.lock().unwrap().panes[&7]
++                .agent_status
++                .snapshot
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn slow_native_view_retains_latest_agent_report_when_effect_queue_is_full() {
++        use rustty_vt::agent::{Event, State};
++        let (connection, _requests) = Connection::base(Arc::new(|| {}), true);
++        let mut owner = tmuxx_terminal::Terminal::new(80, 24, 2000);
++        apply(&connection.shared, agent_snapshot(&mut owner, 1, 123, None)).unwrap();
++        let view = Session::attach_tmuxx(&connection, 7, Arc::new(|| {})).unwrap();
++        let mut data = Vec::new();
++        for index in 0..300 {
++            data.extend(format!("\x1b]2;title {index}\x07").as_bytes());
++        }
++        data.extend(agent_frame(br#"{"op":"begin","state":"idle"}"#));
++        data.extend(agent_frame(br#"{"op":"update","state":"working"}"#));
++        apply(
++            &connection.shared,
++            ServerMessage::PaneOutput {
++                sequence: 2,
++                pane_id: 7,
++                data,
++            },
++        )
++        .unwrap();
++        let events = view.events().collect::<Vec<_>>();
++        assert_eq!(
++            events
++                .iter()
++                .filter(|event| matches!(event, SessionEvent::Effect(Effect::Title(_))))
++                .count(),
++            256
++        );
++        assert_eq!(events.iter().filter(|event| matches!(event,
++            SessionEvent::RestoredAgentStatus { event: Event::Begin(report), .. } if report.state == State::Working
++        )).count(), 1);
++        assert!(view.events().next().is_none());
++    }
++
++    #[test]
++    fn invalid_retained_agent_snapshot_keeps_the_published_view_and_report() {
++        let (connection, _requests) = Connection::base(Arc::new(|| {}), true);
++        let mut owner = tmuxx_terminal::Terminal::new(80, 24, 2000);
++        owner.feed(b"before");
++        owner.feed(&agent_frame(br#"{"op":"begin","state":"working"}"#));
++        apply(&connection.shared, agent_snapshot(&mut owner, 1, 123, None)).unwrap();
++        let view = Session::attach_tmuxx(&connection, 7, Arc::new(|| {})).unwrap();
++        agent_events(&view);
++        let before = view.terminal().unwrap().plain_text();
++        let old_report = connection.shared.model.lock().unwrap().panes[&7]
++            .agent_status
++            .clone();
++        owner.feed(b"after");
++        let mut invalid = agent_snapshot(&mut owner, 2, 123, None);
++        let ServerMessage::Snapshot { state, .. } = &mut invalid else {
++            unreachable!()
++        };
++        state["panes"][0]["terminal"]["agent_status"]["snapshot"]["label"] = "x".repeat(129).into();
++        assert!(apply(&connection.shared, invalid).is_err());
++        assert_eq!(view.terminal().unwrap().plain_text(), before);
++        assert_eq!(
++            connection.shared.model.lock().unwrap().panes[&7].agent_status,
++            old_report
++        );
++        assert!(agent_events(&view).is_empty());
++        assert_eq!(connection.shared.model.lock().unwrap().sequence, 1);
++    }
++
++    #[test]
++    fn retained_agent_native_reattachment_keeps_the_process_and_exit_clears_the_report() {
++        use rustty_vt::agent::Event;
++        let frame = agent_frame(br#"{"op":"begin","state":"working","thread_id":"remote"}"#);
++        let frame = frame
++            .iter()
++            .map(|byte| format!("{byte:02x}"))
++            .collect::<String>();
++        let owner = test_owner(&format!(
++            "import os,tty; tty.setraw(0); os.write(1,bytes.fromhex('{frame}')+b'READY\\r\\n'); os.read(0,1)"
++        ));
++        let graph = wait(&owner, |graph| !graph.panes.is_empty());
++        let pane = graph.panes[0].id;
++        let pid = graph.panes[0].pid.expect("native pane PID");
++        let first = Session::attach_tmuxx(&owner, pane, Arc::new(|| {})).unwrap();
++        wait_text(&owner, &first, "READY");
++        owner
++            .command(["set-option", "-w", "remain-on-exit", "on"])
++            .unwrap();
++        first.set_persistent(true).unwrap();
++        wait(&owner, |graph| graph.panes[0].persistent);
++        drop(first);
++        let remote = Connection::local(owner.native_endpoint().unwrap(), Arc::new(|| {})).unwrap();
++        let graph = wait(&remote, |graph| graph.panes.iter().any(|p| p.id == pane));
++        assert_eq!(graph.panes[0].pid, Some(pid));
++        let second = Session::attach_tmuxx(&remote, pane, Arc::new(|| {})).unwrap();
++        assert!(
++            matches!(&agent_events(&second)[..], [(Event::Begin(report), false)] if report.thread_id.as_deref() == Some("remote"))
++        );
++        second.write(b"x").unwrap();
++        wait(&remote, |graph| {
++            graph
++                .panes
++                .iter()
++                .any(|p| p.id == pane && p.status.is_some())
++        });
++        let deadline = Instant::now() + Duration::from_secs(5);
++        loop {
++            let events = second.events().collect::<Vec<_>>();
++            if events.iter().any(|event| {
++                matches!(
++                    event,
++                    SessionEvent::RestoredAgentStatus {
++                        event: Event::End,
++                        ..
++                    }
++                )
++            }) {
++                break;
++            }
++            assert!(
++                Instant::now() < deadline,
++                "process exit retained the agent report"
++            );
++            thread::sleep(Duration::from_millis(5));
++        }
++        assert!(second.has_exited());
++    }
++
 +    fn test_endpoint() -> PathBuf {
 +        static NEXT: AtomicU64 = AtomicU64::new(0);
 +        let name = format!(
@@ -5933,6 +7363,65 @@ index 000000000..ae7be9bc5
 +        )
 +        .unwrap()
 +    }
++
++    #[test]
++    fn timed_out_native_mutation_completes_once_and_keeps_reply_routing_separate() {
++        let endpoint = test_endpoint();
++        let _owner = tmuxx_runtime::start(tmuxx_runtime::Options::new(&endpoint)).unwrap();
++        let client = Connection::local(&endpoint, Arc::new(|| {})).unwrap();
++        let admin = Connection::local(&endpoint, Arc::new(|| {})).unwrap();
++        let args = |values: &[&str]| {
++            values
++                .iter()
++                .map(|value| value.as_bytes().to_vec())
++                .collect()
++        };
++        let reply = |connection: &Connection, values: &[&str]| {
++            let response = connection
++                .command_bytes_reply(args(values), Duration::from_secs(5))
++                .unwrap();
++            assert!(response.error.is_none(), "{:?}", response.error);
++            response.output
++        };
++        let error = client
++            .command_bytes_reply(
++                args(&[
++                    "wait-for",
++                    "ack-release",
++                    ";",
++                    "set-option",
++                    "-ga",
++                    "@ack-mutations",
++                    "x",
++                ]),
++                Duration::from_millis(20),
++            )
++            .unwrap_err();
++        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
++        assert!(error.to_string().contains("outcome is unknown"));
++        assert!(error.to_string().contains("not replayed"));
++        reply(&admin, &["wait-for", "-S", "ack-release"]);
++        // This acknowledgement follows the delayed mutation on the same FIFO.
++        // A replay would append a second x; a dropped mutation leaves no value.
++        assert_eq!(
++            reply(&client, &["show-options", "-gv", "@ack-mutations"]),
++            b"x\n"
++        );
++        assert!(client.errors().is_empty());
++        client.command(["invalid-async-command"]).unwrap();
++        assert_eq!(
++            reply(&client, &["show-options", "-gv", "@ack-mutations"]),
++            b"x\n"
++        );
++        assert_eq!(client.errors(), ["unknown command: invalid-async-command"]);
++        reply(&client, &["set-option", "-ga", "@ack-mutations", "y"]);
++        assert_eq!(
++            reply(&client, &["show-options", "-gv", "@ack-mutations"]),
++            b"xy\n"
++        );
++        assert!(client.errors().is_empty());
++    }
++
 +    fn wait_text(connection: &Connection, session: &Session, marker: &str) -> String {
 +        let deadline = Instant::now() + Duration::from_secs(5);
 +        loop {
@@ -6260,61 +7749,17 @@ index 000000000..ae7be9bc5
 +        assert!(tmuxx_runtime::windows::connect(&endpoint).is_err());
 +    }
 +}
-+
-+fn validate_graph(graph: &Graph) -> io::Result<()> {
-+    use std::collections::BTreeSet;
-+    let unique = |ids: Vec<u64>| ids.iter().collect::<BTreeSet<_>>().len() == ids.len();
-+    if graph.panes.len() > 10_000
-+        || !unique(graph.panes.iter().map(|p| p.id).collect())
-+        || !unique(graph.windows.iter().map(|w| w.id).collect())
-+        || !unique(graph.sessions.iter().map(|s| s.id).collect())
-+    {
-+        return Err(err("invalid tmuxx object IDs"));
-+    }
-+    for window in &graph.windows {
-+        let layout = Layout::parse(&window.layout).map_err(err)?;
-+        layout.validate_tiled().map_err(err)?;
-+        let ids = layout
-+            .panes()
-+            .iter()
-+            .map(|p| p.id.map(u64::from))
-+            .collect::<Option<BTreeSet<_>>>()
-+            .ok_or_else(|| err("layout pane has no ID"))?;
-+        if window.panes.iter().copied().collect::<BTreeSet<_>>() != ids
-+            || !ids.contains(&window.active)
-+            || window.panes.iter().any(|id| {
-+                !graph
-+                    .panes
-+                    .iter()
-+                    .any(|p| p.id == *id && p.window == window.id)
-+            })
-+        {
-+            return Err(err("inconsistent tmuxx pane graph"));
-+        }
-+    }
-+    for session in &graph.sessions {
-+        if !session.windows.contains_key(&(session.active as u32))
-+            || session
-+                .windows
-+                .values()
-+                .any(|id| !graph.windows.iter().any(|w| w.id == *id))
-+        {
-+            return Err(err("inconsistent tmuxx session graph"));
-+        }
-+    }
-+    Ok(())
-+}
 diff --git a/crates/rustty/src/tmuxx/system.rs b/crates/rustty/src/tmuxx/system.rs
 new file mode 100644
-index 000000000..1d45163b0
+index 000000000..672897490
 --- /dev/null
 +++ b/crates/rustty/src/tmuxx/system.rs
-@@ -0,0 +1,1292 @@
+@@ -0,0 +1,1293 @@
 +//! Stock tmux connections: one control stream per remote session.
 +//! Visible capture is best effort; the native transport has stronger snapshots.
 +use super::*;
-+use std::time::Instant;
 +use std::sync::atomic::AtomicUsize;
++use std::time::Instant;
 +use tmuxx_client::State;
 +use tmuxx_client::system::{SystemClient, SystemEvent};
 +
@@ -7138,6 +8583,7 @@ index 000000000..1d45163b0
 +    let pane = model.panes.entry(pane_id).or_insert_with(|| PaneState {
 +        host_state: None,
 +        terminal: terminal.clone(),
++        agent_status: tmuxx_terminal::AgentStatus::default(),
 +        views: Vec::new(),
 +        owners: Arc::new(AtomicUsize::new(0)),
 +    });
@@ -7165,7 +8611,7 @@ index 000000000..1d45163b0
 +                return false;
 +            };
 +            if let Ok(mut terminal) = terminal.lock() {
-+                feed_view(&mut terminal, data, &view.events);
++                feed_view(&mut terminal, data, &view.events, false);
 +            }
 +            (view.wake)();
 +            true

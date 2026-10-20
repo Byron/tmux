@@ -289,6 +289,17 @@ stdio service. The bridge does not spawn a ConPTY, a second Rustty, or another
 server. A missing instance yields an explicit error. Explicit standalone server
 startup is a separate operation.
 
+Rustty's `tmux` subcommand invokes the shared `tmuxx-cli` driver before GUI
+registration or PTY initialization and preserves native OS arguments. Its
+`--tmuxx=persistent` mode explicitly connects to or starts an independent local
+owner using that driver. Startup failure kills/reaps only the child it started;
+successful startup transfers lifetime to the daemon, which survives GUI exit.
+Ordinary local/SSH attachments never enter this launcher. If two initial GUIs
+observe an empty graph, each waits for its exact `new-session` acknowledgement;
+only the exact duplicate-name response permits reuse of the winning session.
+Bounded acknowledgement timeouts report an unknown outcome and never replay
+the mutation. GUI startup then requires confirmation from the published graph.
+
 Discovery records contain endpoint and server incarnation, not credentials.
 Pipe ACLs and peer identity authorize access; names alone do not. Permit the
 same Windows account's SSH login to reach its desktop instance across logon
@@ -323,6 +334,14 @@ commands. Windows OpenSSH may invoke `cmd.exe` or PowerShell; instance names are
 never interpolated into either shell. Stdin/stdout remain binary-safe and stderr
 separate. Named pipes use an explicit ordered input-EOF record because Windows
 has no duplex-pipe half-close. The bridge never uses a PTY or terminal parser.
+
+Rustty can explicitly override that fixed command with `tmuxx-ssh-command`, for
+example a quoted path followed by `tmux --native-stdio` for its bundled driver.
+This is trusted remote-shell configuration, passed as one complete SSH exec
+argument with its quotes preserved. Instance selection stays in the native
+hello. Reconnection and separate per-window size clients retain the same command
+and private SSH configuration; neither pane commands nor instance names are
+interpolated into remote-shell text.
 
 Rustty and standalone tmuxx share the vendored `portable-pty` implementation and
 one explicit process-wide ConPTY initialization contract. The pinned archive and
@@ -412,6 +431,16 @@ notifications may target several views only under an explicit delivery policy.
 Each Rustty enforces its existing clipboard/host-effect policy. Restoring a
 snapshot must never replay host actions. Test two subscribers and reconnection
 for duplicated replies, clipboard operations, or stale notifications.
+
+Retained AgentStatus is snapshot state, distinct from one-shot host effects.
+The adapter validates a complete terminal snapshot before publishing either its
+terminal or agent report and observes later reports even without a native view.
+Each view reconciles the latest report and its enclosing-command context through
+a bounded retained slot, so a full ordinary event queue cannot permanently lose
+the current status. Native presentation/acknowledgement remains view-local;
+restoration does not synthesize command boundaries or host effects. Process
+replacement, exit, disconnect and new server incarnations clear stale reports,
+and a replacement PID re-registers a report even when its contents match.
 
 ### Allowed concurrency improvements
 

@@ -8,7 +8,7 @@ pass requires fresh results for every required shared and native assertion.
 | Existing obligation | Executable suites | Limits of the evidence |
 | --- | --- | --- |
 | `windows.named-pipe-acl-desktop-ssh` | `windows-runtime`, `windows-cli`, `windows-desktop-ssh` | Requires actual distinct-account denial, local-only pipe denial, same-account desktop/SSH logons and live shared pane/graph identity. |
-| `windows.bridge-no-duplicate-server` | `windows-cli`, `windows-desktop-ssh`, `windows-desktop` | Missing/replaced instances, cmd/PowerShell exec forms, bridge termination, shared/duplicate links and standalone GUI restart must all pass. |
+| `windows.bridge-no-duplicate-server` | `windows-cli`, `windows-rustty-tmux-driver`, `rustty-native-ssh-command-config`, `rustty-native-adapter`, `windows-desktop-ssh`, `windows-desktop` | Missing/replaced instances, cmd/PowerShell exec forms, the trusted Rustty driver command, bridge termination, shared/duplicate links, persistent desktop startup and standalone GUI restart must all pass. |
 | `windows.conpty-runtime-packaging` | `windows-runtime`, `windows-cli`, `windows-desktop`, `windows-conpty-synchronized-output` | Both actual shipped bundles, pinned hashes, resource negatives, spawn-time ownership and the custom ConPTY harness must pass. |
 | `windows.input-resize-descendant-lifetime` | `windows-runtime`, `windows-cli`, `rustty-native-adapter`, `rustty-native-workspace`, `windows-desktop`, `windows-desktop-input`, `windows-desktop-ime`, `windows-desktop-clipboard` | Actual HWND keyboard/mouse/resize/paste, real Japanese TSF preedit/commit, exactly-once native OSC52 effects/replies, app/standalone descendants and GUI restart must all pass. |
 
@@ -49,6 +49,8 @@ $env:TMUXX_WINDOWS_SSH_KEY = 'C:/private-fixture/identity'
 $env:TMUXX_WINDOWS_SSH_KNOWN_HOSTS = 'C:/private-fixture/known_hosts'
 $env:TMUXX_WINDOWS_SSH_VIEWER_KEY = 'C:/private-viewer-fixture/identity'
 $env:TMUXX_WINDOWS_SSH_VIEWER_BRIDGE = 'C:/private-viewer-fixture/tmuxx.exe'
+$env:TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_KEY = 'C:/private-rustty-viewer-fixture/identity'
+$env:TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_BRIDGE = 'C:/private-rustty-viewer-fixture/Rustty 雪 &^ % !; (bridge)/rustty.exe'
 $env:TMUXX_WINDOWS_SSH_DENIAL_DIRECTORY = 'C:/private-fixture/denial'
 ```
 
@@ -68,6 +70,24 @@ OpenSSH, retain the original pane PIDs, and render external shared/duplicate tab
 and splits. Graceful and abrupt viewer exits must leave the desktop owner alive.
 The abrupt case checks local SSH child handles before closing the fixture job,
 so fixture cleanup cannot substitute for product process ownership.
+
+The trusted-command case uses a separate restricted credential and the actual
+Rustty executable at `TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_BRIDGE`. Its fixed dispatcher
+must compare `SSH_ORIGINAL_COMMAND` with the configured PowerShell exec string
+before executing that command with binary stdio inherited. It must reject a
+different command. Per-launch receipts bind the accepted command to the actual
+child process; a forced bridge that ignores the requested SSH command does not
+qualify this case. The GUI passes `--tmuxx-ssh-command` separately from
+`--tmuxx-instance`; native views and resize connections retain the same owner and
+pane identities. Graceful and abrupt exits check local SSH helpers and remote
+driver processes before fixture cleanup.
+
+`windows-rustty-tmux-driver` runs the packaged application's CLI dispatch and
+retained-process tests. `windows-desktop` separately exercises actual
+`--tmuxx=persistent` HWND views, GUI restart and explicit missing-instance
+attachment. Driver-only tests do not establish desktop rendering. Runtime and
+Rustty adapter assertions also retain AgentStatus while views are absent,
+install snapshots atomically, and prevent replay of host effects on reattachment.
 
 The native input and host-clipboard fixtures require an empty clipboard before mutation. They use
 only known fixture text and check clipboard sequence/owner before cleanup.
@@ -153,7 +173,7 @@ retention case kills the last bridge, checks a byte-exact detached terminal repl
 without any live viewer, then verifies retained PID, snapshot and shared links
 through a fresh bridge. Every death assertion precedes outer fixture cleanup.
 
-The eight `runtime-native-views` tests execute natively on Windows. Their raw
+The nine `runtime-native-views` tests execute natively on Windows. Their raw
 applications use the Windows console API. Cell geometry reads ConPTY rows and
 columns through `GetConsoleScreenBufferInfo`; CSI14t/CSI16t replies verify real
 terminal pixel and cell dimensions, including new panes and both respawn paths.

@@ -91,6 +91,15 @@ def checked(result):
 def identity(pid=None):
     process = K.GetCurrentProcess() if pid is None else K.OpenProcess(0x1000, False, pid)
     checked(process)
+    try:
+        return identity_from_handle(process, os.getpid() if pid is None else pid)
+    finally:
+        if pid is not None:
+            K.CloseHandle(process)
+
+
+def identity_from_handle(process, pid):
+    """Read the primary token of this retained process, without reopening its PID."""
     token = w.HANDLE()
     try:
         checked(A.OpenProcessToken(process, 8, ctypes.byref(token)))
@@ -109,14 +118,13 @@ def identity(pid=None):
         checked(A.GetTokenInformation(token, 10, statistics, len(statistics), ctypes.byref(length)))
         authentication_id = int.from_bytes(statistics.raw[8:16], "little")
         session = w.DWORD()
-        checked(K.ProcessIdToSessionId(os.getpid() if pid is None else pid, ctypes.byref(session)))
+        checked(A.GetTokenInformation(token, 12, ctypes.byref(session), ctypes.sizeof(session),
+                                      ctypes.byref(length)))  # TokenSessionId
         return {"account_sid": account_sid, "logon_id": authentication_id, "session_id": session.value,
-                "pid": os.getpid() if pid is None else pid}
+                "pid": pid}
     finally:
         if token:
             K.CloseHandle(token)
-        if pid is not None:
-            K.CloseHandle(process)
 
 
 def raw_pipe_probe(path):
@@ -127,8 +135,16 @@ def raw_pipe_probe(path):
     return {"connected": True, "winerror": 0}
 
 
-def processes_for_image(path):
-    """Read-only cleanup audit for the unique private bridge executable."""
+def process_exited(handle):
+    state = K.WaitForSingleObject(handle, 0)
+    if state == 0xFFFFFFFF:
+        raise ctypes.WinError(ctypes.get_last_error())
+    assert state in (0, 258), ("unexpected process wait result", state)
+    return state == 0
+
+
+def identities_for_image(path):
+    """Match image and token while retaining one process handle through both reads."""
     count = 1024
     while True:
         pids, used = (w.DWORD * count)(), w.DWORD()
@@ -139,7 +155,7 @@ def processes_for_image(path):
         assert count <= 65536, "process inventory exceeded bounded fixture limit"
     found = []
     for pid in pids[:used.value // ctypes.sizeof(w.DWORD)]:
-        handle = K.OpenProcess(0x1000, False, pid)
+        handle = K.OpenProcess(0x00101000, False, pid)  # QUERY_LIMITED_INFORMATION | SYNCHRONIZE
         if not handle:
             continue  # Protected/system processes cannot be this user's fixture.
         try:
@@ -149,13 +165,30 @@ def processes_for_image(path):
                 try:
                     # Windows image queries may return a device/extended path
                     # for the same file. Compare file identity, not spelling.
-                    if Path(value.value).samefile(path):
-                        found.append(pid)
+                    matched = Path(value.value).samefile(path)
                 except (FileNotFoundError, PermissionError):
-                    pass
+                    continue
+                if not matched or process_exited(handle):
+                    continue
+                try:
+                    item = identity_from_handle(handle, pid)
+                except OSError:
+                    # Exit can dispose of the primary token between the image
+                    # and token reads. Suppress only a confirmed process exit;
+                    # denied token access to a live matched image is a failure.
+                    if process_exited(handle):
+                        continue
+                    raise
+                if not process_exited(handle):
+                    found.append(item)
         finally:
             K.CloseHandle(handle)
     return found
+
+
+def processes_for_image(path):
+    """Read-only cleanup audit for the unique private bridge executable."""
+    return [item["pid"] for item in identities_for_image(path)]
 
 
 def peek(file):
@@ -285,8 +318,8 @@ def ps_quote(value):
     return "'" + value.replace("'", "''") + "'"
 
 
-def options(args):
-    return [args.ssh, "-i", str(args.key), "-oBatchMode=yes", "-oIdentitiesOnly=yes",
+def options(args, key=None):
+    return [args.ssh, "-i", str(key or args.key), "-oBatchMode=yes", "-oIdentitiesOnly=yes",
             "-oStrictHostKeyChecking=yes", "-oUserKnownHostsFile=" + str(args.known_hosts),
             "-oConnectTimeout=5", "-T", args.host]
 
@@ -304,6 +337,52 @@ def remote_images(args, path):
     # medium-integrity desktop token. Inspect them in a real authenticated SSH
     # logon, rather than treating local OpenProcess denial as process absence.
     return run_ssh_json(args, "--process-image " + ps_quote(str(path)))
+
+
+def rustty_bridge_command(path):
+    # One complete trusted command; instance selection remains binary protocol
+    # data and never becomes part of the remote shell command.
+    return ps_source("& " + ps_quote(str(path)) + " tmux --native-stdio; exit $LASTEXITCODE")
+
+
+def dispatch_receipts(directory, previous, command, bridge, *, accepted):
+    """Require fresh dispatcher evidence bound to the exact command and image."""
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    receipts = []
+    for path in sorted(set(directory.glob("*.json")) - previous):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        assert value["expected_command_sha256"] == digest, value
+        assert Path(value["bridge_path"]).samefile(bridge), value
+        if value["accepted"] is accepted:
+            if accepted:
+                assert value["original_command_sha256"] == digest, value
+                assert type(value["child_pid"]) is int and value["child_pid"] > 0, value
+            else:
+                assert value["original_command_sha256"] != digest and value["child_pid"] is None, value
+            receipts.append({"path": str(path), **value})
+        else:
+            raise AssertionError("unexpected dispatcher disposition: " + repr(value))
+    assert receipts, "no fresh matching forced-command dispatcher receipt"
+    return receipts
+
+
+def trusted_bridge_evidence(args, previous, command, desktop, *, connections=2):
+    directory = args.rustty_viewer_key.parent / "dispatch-receipts"
+    deadline = time.monotonic() + TIMEOUT
+    while len(bridges := remote_images(args, args.rustty_bridge)) != connections:
+        assert time.monotonic() < deadline, ("expected primary plus one resize bridge per native session", bridges)
+        time.sleep(.05)
+    receipts = dispatch_receipts(directory, previous, command, args.rustty_bridge, accepted=True)
+    assert bridges, "actual native SSH viewer did not launch the configured Rustty bridge"
+    assert all(item["account_sid"] == desktop["account_sid"]
+               and item["logon_id"] != desktop["logon_id"]
+               and item["session_id"] != desktop["session_id"] for item in bridges), bridges
+    trees = {item["child_pid"]: run_ssh_json(args, "--descendants " + str(item["child_pid"]))
+             for item in receipts}
+    assert all(any(bridge["pid"] in {row["pid"] for row in tree} for tree in trees.values())
+               for bridge in bridges), (bridges, trees)
+    return {"receipts": receipts, "bridge_identities": bridges, "command_descendants": trees,
+            "bridge_sha256": hashlib.sha256(args.rustty_bridge.read_bytes()).hexdigest()}
 
 
 def atomic_json(path, value):
@@ -378,7 +457,7 @@ def denied_probe(args, report, endpoint, incarnation):
 
 class NativeSshViewer:
     """A second real Rustty process, with only its SSH children in a fixture job."""
-    def __init__(self, args, instance, suffix=""):
+    def __init__(self, args, instance, suffix="", *, key=None, command=None):
         from runner import WindowsSuiteJob
         self.directory = args.observer.parent / ("ssh-native-viewer" + suffix)
         self.directory.mkdir()
@@ -392,10 +471,10 @@ class NativeSshViewer:
         config.write_text("Host *\n  BatchMode yes\n  IdentitiesOnly yes\n"
                           "  StrictHostKeyChecking yes\n  ConnectTimeout 5\n"
                           "  RequestTTY no\n  ClearAllForwardings yes\n"
-                          "  IdentityFile " + config_path(args.viewer_key) + "\n"
+                          "  IdentityFile " + config_path(key or args.viewer_key) + "\n"
                           "  UserKnownHostsFile " + config_path(args.known_hosts) + "\n", encoding="utf-8")
         env = os.environ.copy()
-        for name in ("TMUXX_ENDPOINT", "TMUXX_CONPTY_RESOURCES", "RUSTTY_SMOKE_SECONDS"):
+        for name in ("TMUXX_ENDPOINT", "TMUXX_CONPTY_RESOURCES", "RUSTTY_RESOURCES_DIR", "RUSTTY_SMOKE_SECONDS"):
             env.pop(name, None)
         env.update(RUSTTY_TMUXX_SSH_CONFIG=str(config), RUSTTY_TMUXX_SMOKE_DIR=str(self.directory),
                    RUSTTY_TMUXX_SMOKE_HOLD_FILE=str(self.hold), RUSTTY_TMUXX_SMOKE_VISIBLE="1",
@@ -403,6 +482,8 @@ class NativeSshViewer:
         env["PATH"] = str(Path(args.ssh).parent) + os.pathsep + env["PATH"]
         self.argv = [str(args.gui), "--tmuxx=ssh:" + args.host, "--tmuxx-instance=" + instance,
                      "--renderer=software", "--config-default-files=false", "--stream-deck=false"]
+        if command is not None:
+            self.argv.append("--tmuxx-ssh-command=" + command)
         self.job, self.worker, self.result = WindowsSuiteJob(), None, None
         self.log = (self.directory / "viewer.log").open("wb")
         try:
@@ -416,6 +497,8 @@ class NativeSshViewer:
             ready = self.directory / "ready.json"
             self.ready = wait_json(ready, self.worker, seconds=30)
             assert not self.ready["hidden"] and self.ready["view_graph_consistent"] and not self.ready["errors"], self.ready
+            from windows_native_views import assert_rendered_workspaces
+            assert_rendered_workspaces(self.ready)
         except BaseException:
             self.close(verify=False)
             raise
@@ -451,6 +534,8 @@ class NativeSshViewer:
                 self.result = json.loads((self.directory / "result.json").read_text(encoding="utf-8"))
                 assert self.result["view_graph_consistent"] and not self.result["errors"], self.result
                 assert self.result["rendered_hosts"] and self.result["ui_labels_supported"], self.result
+                from windows_native_views import assert_rendered_workspaces
+                assert_rendered_workspaces(self.result)
                 for host in self.result["rendered_hosts"]:
                     assert (self.directory / ("window-" + host + ".png")).is_file()
             return self.result
@@ -469,9 +554,10 @@ def desktop_observer(args):
     hold = directory / "hold"
     hold.write_text("hold", encoding="ascii")
     env = os.environ.copy()
-    for name in ("TMUXX_ENDPOINT", "TMUXX_CONPTY_RESOURCES", "RUSTTY_TMUXX_SMOKE_ATTACH_ONLY"):
+    for name in ("TMUXX_ENDPOINT", "TMUXX_CONPTY_RESOURCES", "RUSTTY_RESOURCES_DIR", "RUSTTY_TMUXX_SMOKE_ATTACH_ONLY"):
         env.pop(name, None)
-    env.update(RUSTTY_TMUXX_SMOKE_DIR=str(directory), RUSTTY_TMUXX_SMOKE_HOLD_FILE=str(hold), RUSTTY_TMUXX_SMOKE_VISIBLE="1")
+    env.update(RUSTTY_TMUXX_SMOKE_DIR=str(directory), RUSTTY_TMUXX_SMOKE_HOLD_FILE=str(hold),
+               RUSTTY_TMUXX_SMOKE_VISIBLE="1", RUSTTY_SMOKE_SECONDS="200")
     label = "ssh-" + uuid.uuid4().hex
     argv = [str(args.gui), "--tmuxx=embedded", "--tmuxx-instance=" + label,
             "--renderer=software", "--config-default-files=false", "--stream-deck=false"]
@@ -486,7 +572,9 @@ def desktop_observer(args):
             job.assign(worker)
             worker.stdin.write(b"\x01")
             worker.stdin.close()
-            deadline = time.monotonic() + 100
+            # Default and trusted-command viewers each exercise graceful and
+            # abrupt shutdown while this desktop-owned graph stays alive.
+            deadline = time.monotonic() + 180
             ready_path = directory / "ready.json"
             ready = wait_json(ready_path, worker, seconds=max(0.0, deadline - time.monotonic()))
             assert not ready["hidden"] and ready["view_graph_consistent"] and not ready["errors"], ready
@@ -547,7 +635,7 @@ def exercise(args, report):
     assert desktop["logon_id"] != remote["logon_id"], "same token is not cross-logon evidence"
     assert desktop["session_id"] != remote["session_id"], "same session is not desktop-to-SSH evidence"
     assert observer["observer_identity"]["logon_id"] == desktop["logon_id"]
-    connections, created_panes, viewer = [], [], None
+    connections, created_panes, viewer, trusted_viewer = [], [], None, None
     bridge_directory = args.observer.parent / "bridge 雪 &^ % !;"
     bridge_directory.mkdir()
     bridge_executable = bridge_directory / "tmuxx.exe"
@@ -556,10 +644,18 @@ def exercise(args, report):
     bridge = ps_source("& " + ps_quote(str(bridge_executable)) + " --native-stdio; exit $LASTEXITCODE")
     try:
         assert args.gui and args.viewer_key and args.viewer_bridge, "native SSH view needs --gui, --viewer-key and --viewer-bridge"
+        assert args.rustty_viewer_key and args.rustty_bridge, "trusted Rustty view needs --rustty-viewer-key and --rustty-bridge"
         assert not remote_images(args, args.viewer_bridge), "previous forced-command viewer bridge is still running"
         args.viewer_bridge.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args.tmuxx, args.viewer_bridge)
         assert hashlib.sha256(args.viewer_bridge.read_bytes()).hexdigest() == report["candidate_sha256"]
+        assert not remote_images(args, args.rustty_bridge), "previous trusted-command Rustty bridge is still running"
+        args.rustty_bridge.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.gui, args.rustty_bridge)
+        assert hashlib.sha256(args.rustty_bridge.read_bytes()).hexdigest() == report["gui_sha256"]
+        trusted_command = rustty_bridge_command(args.rustty_bridge)
+        receipts_directory = args.rustty_viewer_key.parent / "dispatch-receipts"
+        previous_receipts = set(receipts_directory.glob("*.json"))
         report["unauthorized_probe"] = denied_probe(args, report, endpoint, incarnation)
         report["tests"].append("windows_ssh::unauthorized_account_is_denied")
         local_probe = run_ssh_json(args, "--probe-pipe " + ps_quote(endpoint))
@@ -591,6 +687,14 @@ def exercise(args, report):
         report["ssh_viewer"] = {"argv": viewer.argv, "directory": str(viewer.directory), "ready": viewer.ready,
                                 "bridge_identities": bridge_identities,
                                 "bridge_sha256": hashlib.sha256(args.viewer_bridge.read_bytes()).hexdigest()}
+        trusted_viewer = NativeSshViewer(args, instance, "-trusted", key=args.rustty_viewer_key,
+                                        command=trusted_command)
+        assert trusted_viewer.ready["instance"] == incarnation and trusted_viewer.ready["endpoint"] is None
+        assert sorted(trusted_viewer.ready["pane_processes"].values()) == baseline_pids
+        report["trusted_rustty_viewer"] = {
+            "argv": trusted_viewer.argv, "directory": str(trusted_viewer.directory), "ready": trusted_viewer.ready,
+            **trusted_bridge_evidence(args, previous_receipts, trusted_command, desktop),
+        }
         sid = ssh.request("list-sessions", "-F", "#{session_id}").splitlines()[0].decode("ascii")
         name = "SSH tab 雪 & %NAME% ! ^ ;"
         application = args.observer.parent / "pane 雪 &^ % !;.py"
@@ -638,6 +742,34 @@ def exercise(args, report):
         assert sorted(observer["live_pids"]) == sorted(baseline_pids + created_panes)
         assert ssh.request(*GRAPH).decode() == graph
         report["tests"].append("windows_ssh::second_rustty_native_viewer_reconciles_without_replacement")
+        # This configured bridge viewer has stayed attached throughout the same
+        # external graph mutations as the default-command viewer.
+        trusted_evidence = trusted_bridge_evidence(args, previous_receipts, trusted_command, desktop, connections=3)
+        before_denial = set(receipts_directory.glob("*.json"))
+        denied_command = trusted_command + " deliberately-rejected"
+        rejected = subprocess.run(options(args, args.rustty_viewer_key) + [denied_command],
+                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                                  creationflags=subprocess.CREATE_NO_WINDOW)
+        assert rejected.returncode != 0, "forced dispatcher accepted a different remote command"
+        denied_receipts = dispatch_receipts(receipts_directory, before_denial, trusted_command,
+                                           args.rustty_bridge, accepted=False)
+        assert all(item["original_command_sha256"] == hashlib.sha256(denied_command.encode("utf-8")).hexdigest()
+                   for item in denied_receipts), denied_receipts
+        assert sorted(item["pid"] for item in remote_images(args, args.rustty_bridge)) == sorted(
+            item["pid"] for item in trusted_evidence["bridge_identities"])
+        assert ssh.request(*GRAPH).decode() == graph
+        assert int(ssh.request("display-message", "-p", "#{pid}").strip()) == observer["owner_pid"]
+        atomic_json(trusted_viewer.directory / "expected.json", {"sessions": 2, "windows": 2, "panes": 4, "links": 6})
+        trusted_result = trusted_viewer.close()
+        assert trusted_result["instance"] == incarnation and trusted_result["endpoint"] is None
+        assert sorted(trusted_result["pane_processes"].values()) == sorted(baseline_pids + created_panes)
+        assert trusted_result["windows"] == 2 and len(trusted_result["rendered_hosts"]) == 2
+        assert sum(len(session["windows"]) for session in trusted_result["server_sessions"]) == 6
+        assert len(trusted_result["view_panes"]) == 12
+        report["trusted_rustty_viewer"].update(trusted_evidence, result=trusted_result,
+                                              denied_command_receipts=denied_receipts,
+                                              denied_command_returncode=rejected.returncode)
+        report["tests"].append("windows_ssh::trusted_rustty_command_preserves_shared_native_views")
         viewer = NativeSshViewer(args, instance, "-abrupt")
         assert viewer.ready["instance"] == incarnation, viewer.ready
         assert sorted(viewer.ready["pane_processes"].values()) == sorted(baseline_pids + created_panes), viewer.ready
@@ -654,6 +786,25 @@ def exercise(args, report):
         assert ssh.request(*GRAPH).decode() == graph
         viewer.close(verify=False)
         report["tests"].append("windows_ssh::abrupt_ssh_viewer_reclaims_helpers_and_preserves_owner")
+        previous_receipts = set(receipts_directory.glob("*.json"))
+        trusted_viewer = NativeSshViewer(args, instance, "-trusted-abrupt", key=args.rustty_viewer_key,
+                                        command=trusted_command)
+        assert trusted_viewer.ready["instance"] == incarnation
+        assert sorted(trusted_viewer.ready["pane_processes"].values()) == sorted(baseline_pids + created_panes)
+        trusted_evidence = trusted_bridge_evidence(args, previous_receipts, trusted_command, desktop, connections=3)
+        abrupt = trusted_viewer.abrupt()
+        deadline = time.monotonic() + 5
+        while (remaining := remote_images(args, args.rustty_bridge)) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not remaining, "configured Rustty bridge survived abrupt SSH GUI death: " + repr(remaining)
+        abrupt.update(trusted_evidence, remote_bridges_remaining=remaining)
+        report["trusted_rustty_viewer_abrupt"] = abrupt
+        killed = time.time()
+        observer = wait_observer(args, lambda item: item.get("sampled_at", 0) > killed and item.get("graph") == graph)
+        assert sorted(observer["live_pids"]) == sorted(baseline_pids + created_panes)
+        assert ssh.request(*GRAPH).decode() == graph
+        trusted_viewer.close(verify=False)
+        report["tests"].append("windows_ssh::trusted_rustty_command_abrupt_cleanup_preserves_owner")
         for peer in connections:
             peer.close()
         connections = []
@@ -683,9 +834,11 @@ def exercise(args, report):
         report["owner_alive_before_release"] = True
     finally:
         report["created_pane_pids"] = created_panes
-        if viewer:
+        for active_viewer in (trusted_viewer, viewer):
+            if not active_viewer:
+                continue
             try:
-                viewer.close(verify=False)
+                active_viewer.close(verify=False)
             except Exception as error:
                 report["failures"].append("SSH viewer cleanup: " + repr(error))
         for peer in reversed(connections):
@@ -694,7 +847,8 @@ def exercise(args, report):
             except Exception as error:
                 report["failures"].append("SSH connection cleanup: " + repr(error))
         for field, path in [("bridge_processes_remaining", bridge_executable),
-                            ("ssh_viewer_bridges_remaining", args.viewer_bridge)]:
+                            ("ssh_viewer_bridges_remaining", args.viewer_bridge),
+                            ("trusted_rustty_bridges_remaining", args.rustty_bridge)]:
             if path is None:
                 continue
             try:
@@ -731,6 +885,7 @@ def main():
     parser.add_argument("--identity", action="store_true")
     parser.add_argument("--probe-pipe")
     parser.add_argument("--process-image", type=Path)
+    parser.add_argument("--descendants", type=int)
     parser.add_argument("--desktop-observer", action="store_true")
     parser.add_argument("--deny-helper", type=Path)
     parser.add_argument("--denial-directory", type=Path)
@@ -740,6 +895,8 @@ def main():
     parser.add_argument("--key", type=Path)
     parser.add_argument("--viewer-key", type=Path, help="private loopback-only forced-command bridge credential")
     parser.add_argument("--viewer-bridge", type=Path, help="exact forced-command executable path reserved for this fixture")
+    parser.add_argument("--rustty-viewer-key", type=Path, help="private loopback-only trusted Rustty dispatcher credential")
+    parser.add_argument("--rustty-bridge", type=Path, help="exact Rustty executable path reserved for the trusted dispatcher")
     parser.add_argument("--known-hosts", type=Path)
     parser.add_argument("--host", help="explicit desktop-account@SSH-host for the collector")
     parser.add_argument("--ssh", default=str(Path(os.environ["SystemRoot"]) / "System32/OpenSSH/ssh.exe"))
@@ -752,7 +909,10 @@ def main():
         print(json.dumps(raw_pipe_probe(args.probe_pipe)))
         return 0
     if args.process_image:
-        print(json.dumps([identity(pid) for pid in processes_for_image(args.process_image)]))
+        print(json.dumps(identities_for_image(args.process_image)))
+        return 0
+    if args.descendants:
+        print(json.dumps(descendants(args.descendants)))
         return 0
     if args.deny_helper:
         return denial_helper(args.deny_helper)

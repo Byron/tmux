@@ -1,3 +1,37 @@
+# Native application dispatch and owner startup are separate exact obligations.
+[[suites]]
+id = "windows-rustty-concurrent-launcher"
+kind = "rustty-cargo"
+platforms = ["win32"]
+profiles = ["windows"]
+args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--lib", "tmuxx_launcher::tests::concurrent_empty_owner_bootstrap_and_reuse_keep_one_session_and_process", "--", "--exact"]
+timeout = 180
+env = {}
+
+[[suites.assertions]]
+id = "windows.rustty-concurrent-persistent-bootstrap"
+tests = ["tmuxx_launcher::tests::concurrent_empty_owner_bootstrap_and_reuse_keep_one_session_and_process"]
+description = "Concurrent native persistent startup against an empty owner creates exactly one session, pane and process. Subsequent connect_or_start reuses that owner, and bounded shutdown proves the original process exits. Descendant ownership has separate required suites."
+
+[[suites]]
+id = "windows-rustty-tmux-driver"
+kind = "rustty-cargo"
+platforms = ["win32"]
+profiles = ["windows"]
+args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--test", "tmuxx_driver", "--", "--test-threads=1"]
+timeout = 180
+env = {}
+
+[[suites.assertions]]
+id = "windows.rustty-tmux-dispatch-no-implicit-owner"
+tests = ["windows_gui_tmux_dispatch_reports_version_and_missing_bridge_never_starts_owner"]
+description = "The actual Windows Rustty executable dispatches its tmux driver, reports the engine version, and rejects a missing bridge instance without starting an owner or replacement application."
+
+[[suites.assertions]]
+id = "windows.rustty-driver-retained-process-and-views"
+tests = ["windows_gui_tmux_driver_owns_one_retained_process_across_local_and_stdio_views"]
+description = "The Windows Rustty driver owns one actual retained ConPTY process shared by local and binary stdio views. Exact process and output identity, retention and driver shutdown are checked under bounded fixture Job ownership; native desktop rendering remains a separate required assertion."
+
 # This custom Rustty harness is not libtest. Its exact completion record follows
 # eight actual bundled-ConPTY redraws; ignored/non-Windows invocations earn none.
 # It is one terminal assertion, not proof of packaging or desktop qualification.
@@ -105,6 +139,11 @@ tests = ["windows_native_views::standalone_retained_gui_restart", "windows_nativ
 description = "The packaged GUI attaches to an explicit standalone owner and restarts after both graceful exit and abrupt GUI death with the same retained pane processes, graph identity and output."
 
 [[suites.assertions]]
+id = "windows.desktop-persistent-owner-and-missing-attachment"
+tests = ["windows_native_views::persistent_gui_starts_shared_owner_and_retains_restart", "windows_native_views::missing_attachment_never_starts_owner"]
+description = "Actual --tmuxx=persistent desktop views start one shared daemon owner and reconnect after GUI restart to the same retained processes. Explicit attachment to a missing instance fails without starting any owner, GUI replacement or pane."
+
+[[suites.assertions]]
 id = "windows.shipped-gui-and-owner-resource-negatives"
 tests = ["windows_native_views::packaged_missing_incompatible_resources"]
 description = "Both shipped executables reject missing and same-length corrupt ConPTY resources, while their intact pinned bundles execute native panes."
@@ -117,7 +156,7 @@ platforms = ["win32"]
 profiles = ["windows"]
 args = []
 env = {}
-timeout = 180
+timeout = 300
 
 [[suites.assertions]]
 id = "windows.real-unauthorized-and-network-denial"
@@ -133,6 +172,11 @@ description = "Desktop and real no-PTY OpenSSH logons share the same account SID
 id = "windows.real-rustty-ssh-view-and-helper-lifetime"
 tests = ["windows_ssh::second_rustty_native_viewer_reconciles_without_replacement", "windows_ssh::abrupt_ssh_viewer_reclaims_helpers_and_preserves_owner"]
 description = "A second actual Windows Rustty runs its native SSH adapter and per-window size clients through real OpenSSH into the existing desktop owner. Its native HWNDs render shared/duplicate links and new sessions/splits with the original pane PIDs. Graceful and abrupt viewer exit reclaim local SSH helpers and remote bridges while the desktop owner and jobs remain alive; abrupt cleanup is checked before fixture Job Objects close."
+
+[[suites.assertions]]
+id = "windows.real-rustty-command-ssh-view-and-helper-lifetime"
+tests = ["windows_ssh::trusted_rustty_command_preserves_shared_native_views", "windows_ssh::trusted_rustty_command_abrupt_cleanup_preserves_owner"]
+description = "A real native GUI sends its trusted --tmuxx-ssh-command through OpenSSH to a hash-verified Rustty tmux driver at a Unicode/metacharacter path, with instance selection carried separately in Hello. The restricted dispatcher validates the actual SSH command and denies altered commands; shared native views, resize and graceful/abrupt helper cleanup preserve the desktop owner and original live pane processes."
 
 [[suites.assertions]]
 id = "windows.real-ssh-bridge-shells-and-disconnect"

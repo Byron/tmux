@@ -142,12 +142,12 @@ ids = ["windows.named-pipe-acl-desktop-ssh", "windows.bridge-no-duplicate-server
 
 [[coverage]]
 obligation = "windows.named-pipe-acl-desktop-ssh"
-assertions = ["windows.pipe-fragmentation-identity-and-bounds", "windows.real-unauthorized-and-network-denial", "windows.real-desktop-local-pipe-ssh-shared-graph", "windows.real-rustty-ssh-view-and-helper-lifetime", "windows.live-protocol-fragments-eof-and-incarnations"]
+assertions = ["windows.pipe-fragmentation-identity-and-bounds", "windows.real-unauthorized-and-network-denial", "windows.real-desktop-local-pipe-ssh-shared-graph", "windows.real-rustty-ssh-view-and-helper-lifetime", "windows.live-protocol-fragments-eof-and-incarnations", "windows.real-rustty-command-ssh-view-and-helper-lifetime"]
 rationale = "Require real account-token and local-only pipe checks, actual distinct-account denial, same-account desktop/OpenSSH access across logon sessions, shared live graph/PIDs, and stale/replacement identity behavior. Discovery names alone earn no authentication evidence."
 
 [[coverage]]
 obligation = "windows.bridge-no-duplicate-server"
-assertions = ["windows.live-native-bridge-shared-panes", "windows.live-protocol-fragments-eof-and-incarnations", "windows.real-ssh-bridge-shells-and-disconnect", "windows.real-desktop-local-pipe-ssh-shared-graph", "windows.real-rustty-ssh-view-and-helper-lifetime", "windows.desktop-external-shared-duplicate-links", "windows.desktop-standalone-retained-restart"]
+assertions = ["windows.live-native-bridge-shared-panes", "windows.live-protocol-fragments-eof-and-incarnations", "windows.real-ssh-bridge-shells-and-disconnect", "windows.real-desktop-local-pipe-ssh-shared-graph", "windows.real-rustty-ssh-view-and-helper-lifetime", "windows.desktop-external-shared-duplicate-links", "windows.desktop-standalone-retained-restart", "windows.rustty-tmux-dispatch-no-implicit-owner", "windows.rustty-driver-retained-process-and-views", "rustty.native-ssh-command-protocol-selection", "rustty.native-ssh-command-config-preservation", "windows.desktop-persistent-owner-and-missing-attachment", "windows.real-rustty-command-ssh-view-and-helper-lifetime", "windows.rustty-concurrent-persistent-bootstrap"]
 rationale = "Local binary stdio and real cmd/PowerShell OpenSSH bridges must select an existing desktop/standalone owner, preserve pane identity and shared/duplicate links, reject missing or replaced instances, and leave jobs alive across bridge/GUI restarts."
 
 [[coverage]]
@@ -157,7 +157,7 @@ rationale = "Require the shared initializer's exact pinned resource hashes, both
 
 [[coverage]]
 obligation = "windows.input-resize-descendant-lifetime"
-assertions = ["windows.native-hwnd-keyboard-mouse-resize", "windows.native-clipboard-paste-and-fixture-cleanup", "windows.real-ime-preedit-commit-and-restoration", "windows.native-osc52-host-effect-and-query-once", "windows.atomic-spawn-job-ownership", "windows.desktop-app-owner-cleanup", "windows.desktop-standalone-retained-restart", "windows.conpty-synchronized-output-cursor-order", "windows.real-rustty-ssh-view-and-helper-lifetime"]
+assertions = ["windows.native-hwnd-keyboard-mouse-resize", "windows.native-clipboard-paste-and-fixture-cleanup", "windows.real-ime-preedit-commit-and-restoration", "windows.native-osc52-host-effect-and-query-once", "windows.atomic-spawn-job-ownership", "windows.desktop-app-owner-cleanup", "windows.desktop-standalone-retained-restart", "windows.conpty-synchronized-output-cursor-order", "windows.real-rustty-ssh-view-and-helper-lifetime", "windows.rustty-driver-retained-process-and-views", "windows.desktop-persistent-owner-and-missing-attachment", "windows.real-rustty-command-ssh-view-and-helper-lifetime", "windows.rustty-concurrent-persistent-bootstrap"]
 rationale = "Require real native HWND keyboard/mouse/resize and bracketed paste, actual TSF preedit/commit into the original pane, elected native clipboard write/read with exactly-once pane replies and reconnect behavior, bundled ConPTY cursor ordering, atomic spawn-time ownership, both graceful and abrupt app-owner descendant cleanup with an unrelated survivor, and retained standalone GUI restart plus SSH-viewer lifetime. An IME capability probe, backend encoder, compile, or fixture cleanup alone cannot satisfy these complete executable members."
 
 [[assertions]]
@@ -335,7 +335,7 @@ rationale = "Actual Rustty attaches multiple Session views to one shared pane th
 
 [[coverage]]
 obligation = "native.rustty-render-search-adapter"
-assertions = ["rustty.shared-native-backend-and-independent-views", "rustty.restored-native-search-and-shell-selection", "rustty.native-session-window-and-pane-mapping", "rustty.floating-composition-and-hit-testing", "rustty.modal-key-and-outside-click-owner-routing", "rustty.sixel-owner-creation-order", "rustty.hidden-native-metal-frame"]
+assertions = ["rustty.shared-native-backend-and-independent-views", "rustty.restored-native-search-and-shell-selection", "rustty.native-session-window-and-pane-mapping", "rustty.floating-composition-and-hit-testing", "rustty.modal-key-and-outside-click-owner-routing", "rustty.sixel-owner-creation-order", "rustty.hidden-native-metal-frame", "rustty.retained-agent-state-and-native-view-replay"]
 rationale = "The fingerprinted sibling checkout executes the actual Session restore/search/selection path, workspace mapping, renderer placement ordering and desktop hit/modal routing. A freshly built hidden desktop emits a verified native Metal frame with tiled/floating panes. These assertions verify integration of the retained backend; they do not replace the separate terminal-data/image parity obligations."
 
 [[coverage]]
@@ -376,7 +376,7 @@ rationale = "Every-byte/two-chunk fixtures cover UTF8, CSI, OSC/OSC8/OSC133, leg
 
 [[coverage]]
 obligation = "native.atomic-snapshot-and-update-cut"
-assertions = ["protocol.snapshot-atomicity-offsets-and-truncation", "native.atomic-live-snapshot-update-cut", "runtime.native-snapshot-stream-and-recoverable-cap", "runtime.snapshot-large-message-and-image-restore", "native.retained-agent-status-without-views"]
+assertions = ["protocol.snapshot-atomicity-offsets-and-truncation", "native.atomic-live-snapshot-update-cut", "runtime.native-snapshot-stream-and-recoverable-cap", "runtime.snapshot-large-message-and-image-restore", "native.retained-agent-status-without-views", "rustty.retained-agent-state-and-native-view-replay"]
 rationale = "Native records install only at a validated end. Real socket updates produced while an image snapshot is partially read follow its old cut once; rejected/oversized/truncated snapshots preserve the live owner and permit bounded retry."
 
 [[coverage]]
@@ -386,7 +386,7 @@ rationale = "Independent native views share the same process/window graph; cell 
 
 [[coverage]]
 obligation = "native.reconnect-backlog-overflow"
-assertions = ["native.blocked-view-overflow-and-reconnect", "native.backlog-byte-cap", "runtime.native-snapshot-stream-and-recoverable-cap"]
+assertions = ["native.blocked-view-overflow-and-reconnect", "native.backlog-byte-cap", "runtime.native-snapshot-stream-and-recoverable-cap", "rustty.native-mutation-timeout-no-replay"]
 rationale = "Real blocked native sockets exceed the record cap without losing any healthy-view bytes, the independent byte cap disconnects only the slow client, and reconnect/oversized-snapshot recovery retain the same live PTY PID."
 
 [[coverage]]
@@ -428,7 +428,7 @@ rationale = "Actual owner drop and SIGKILL remove acceptance and terminate ackno
 
 [[coverage]]
 obligation = "lifetime.remote-loss-keeps-local-job"
-assertions = ["rustty.native-input-focus-host-effects-and-process-replacement", "native.blocked-view-overflow-and-reconnect", "runtime.pty-input-after-client-reconnect", "native.retained-agent-status-without-views"]
+assertions = ["rustty.native-input-focus-host-effects-and-process-replacement", "native.blocked-view-overflow-and-reconnect", "runtime.pty-input-after-client-reconnect", "native.retained-agent-status-without-views", "rustty.retained-agent-state-and-native-view-replay"]
 rationale = "Actual Rustty embedded/local and Unix-connected remote Session views share a PTY; dropping the remote connection emits the final focus transition while the same local child accepts another key and emits END. Separately, blocked-view transport loss and socket reconnect keep healthy views and the same process. SSH is a byte transport over this owner-loss path, not a second process owner."
 
 # Further exact all-of proposals; image/native-view additions have targeted verification in progress.

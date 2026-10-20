@@ -1139,7 +1139,9 @@ def run_suite(suite, reference, candidate=None, candidate_identity=None, gui_ide
                 else:
                     required = {"TMUXX_WINDOWS_SSH_KEY": "--key", "TMUXX_WINDOWS_SSH_KNOWN_HOSTS": "--known-hosts",
                                 "TMUXX_WINDOWS_SSH_HOST": "--host", "TMUXX_WINDOWS_SSH_VIEWER_KEY": "--viewer-key",
-                                "TMUXX_WINDOWS_SSH_VIEWER_BRIDGE": "--viewer-bridge"}
+                                "TMUXX_WINDOWS_SSH_VIEWER_BRIDGE": "--viewer-bridge",
+                                "TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_KEY": "--rustty-viewer-key",
+                                "TMUXX_WINDOWS_SSH_RUSTTY_VIEWER_BRIDGE": "--rustty-bridge"}
                     for name in required:
                         if not env.get(name):
                             raise ValueError(f"Windows cross-logon desktop prerequisite missing: {name}")

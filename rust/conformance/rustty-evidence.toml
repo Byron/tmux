@@ -53,6 +53,35 @@ id = "rustty.native-detach-closes-views"
 tests = ["tmuxx::tests::native_detach_closes_views_without_signalling_the_gui_parent"]
 description = "Both native detach variants close every attached view and mark the transport closed without reporting a GUI error or signalling the GUI parent."
 
+[[suites.assertions]]
+id = "rustty.retained-agent-state-and-native-view-replay"
+tests = ["tmuxx::tests::retained_agent_snapshot_seeds_views_once_without_replaying_host_effects", "tmuxx::tests::retained_agent_observes_fragmented_output_without_views_and_respawn_resets_generation", "tmuxx::tests::invalid_retained_agent_snapshot_keeps_the_published_view_and_report", "tmuxx::tests::slow_native_view_retains_latest_agent_report_when_effect_queue_is_full", "tmuxx::tests::retained_agent_native_reattachment_keeps_the_process_and_exit_clears_the_report"]
+description = "Actual Rustty restores retained agent reports once, continues observing fragmented output without views, retains the latest report through full effect queues, rejects invalid snapshots atomically, resets generations on respawn, and reconnects to the same real process without replaying host effects."
+
+[[suites.assertions]]
+id = "rustty.native-ssh-command-protocol-selection"
+tests = ["tmuxx::tests::native_ssh_command_keeps_trusted_shell_text_separate_from_protocol_selection"]
+description = "An explicit trusted SSH shell command remains one remote exec argument while instance selection stays in the binary native protocol; cloning the connection for resizing and reconnect preserves the command."
+
+[[suites.assertions]]
+id = "rustty.native-mutation-timeout-no-replay"
+tests = ["tmuxx::tests::timed_out_native_mutation_completes_once_and_keeps_reply_routing_separate"]
+description = "A real owner executes a queued mutation exactly once after its acknowledgement times out. Releasing the stalled command preserves FIFO observation, separates unrelated asynchronous errors from routed replies, and lets a later mutation continue without replaying the ambiguous request."
+
+[[suites]]
+id = "rustty-native-ssh-command-config"
+platforms = ["darwin", "linux", "win32"]
+kind = "rustty-cargo"
+profiles = ["native-views", "system-client"]
+args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty", "--features", "sessions", "--lib", "config::tests::tmuxx_ssh_command_preserves_explicit_shell_text_and_empty_resets_default", "--", "--exact"]
+timeout = 600
+env = {}
+
+[[suites.assertions]]
+id = "rustty.native-ssh-command-config-preservation"
+tests = ["config::tests::tmuxx_ssh_command_preserves_explicit_shell_text_and_empty_resets_default"]
+description = "The actual Rustty config parser preserves explicit trusted SSH shell text exactly, and an empty override restores the fixed default bridge command."
+
 [[suites]]
 id = "rustty-native-workspace"
 platforms = ["darwin", "linux", "win32"]

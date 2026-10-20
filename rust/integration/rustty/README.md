@@ -6,7 +6,13 @@ and every original/result file SHA-256. The patch changes Rust sources,
 Cargo metadata, Windows packaging and the Rustty README; no Zig production sources.
 
 The backend supports app-owned tmuxx, existing native Unix endpoints, native
-stdio over SSH, Windows per-user named pipes, and system C tmux over SSH. Native server graph changes reconcile
+stdio over SSH, Windows per-user named pipes, and system C tmux over SSH. The
+`rustty tmux` driver dispatches the shared tmuxx CLI before GUI/PTY initialization,
+preserving OS arguments. `--tmuxx=persistent` explicitly connects to or starts an
+independent owner through that driver; all attachment modes require an existing
+owner. Concurrent initial GUI connections consume the exact session-creation
+reply and reuse the winning session without replaying ambiguous commands.
+Native server graph changes reconcile
 into windows/tabs/split views, including duplicate links within one session.
 Pane views have independent selection and scroll;
 input and structural commands go back to the owner. One size client per native
@@ -17,6 +23,20 @@ Native typed key/IME and paste input is encoded by the owner for each synchroniz
 pane; mouse and protocol reports remain target-only. Focus, visibility and theme
 aggregate across views/connections. Pane exit/respawn updates live view status and
 clears stale selection when the process is replaced.
+
+Agent status is retained alongside terminal state and reconciled into each native
+view, including views opened after the report. Its latest value remains available
+when an ordinary event queue is full. Respawn, exit and a new incarnation clear
+stale reports. Restoring a report preserves its enclosing-command context without
+fabricating command boundaries or replaying clipboard/notification/query effects.
+The view owns presentation and acknowledgement of the retained report.
+
+`tmuxx-ssh-command` (or `--tmuxx-ssh-command=COMMAND`) selects a trusted fixed remote
+command, defaulting to `tmuxx --native-stdio`. It can invoke a shipped executable
+with `rustty tmux --native-stdio`. Configuration preserves cmd.exe/PowerShell
+quoting verbatim. The complete command is passed as one SSH exec argument, while
+instance selection remains in the protocol hello; reconnect and per-window size
+connections preserve both the command and the private SSH configuration.
 
 Rustty aliases its workspace `rustty-vt` dependency to tmuxx's vendored VT;
 native snapshot restore and output replay therefore use the owner's terminal
@@ -43,7 +63,7 @@ include parser continuation, screens/history, rendition and graphics uploads.
 
 ## Verification
 
-The 2026-10-20 full macOS collection passed all 12 external Rustty suites and
+The historical 2026-10-20 full macOS collection passed all 12 external Rustty suites and
 their 28 named tests, including both C versions. All six scoped profile gates,
 including native views, passed. `verification.json` records the report identity
 and qualification; fresh evidence is required after either checkout changes.
@@ -52,7 +72,7 @@ checkout, using Rust 1.95.0:
 
 - `cargo +1.95.0 check --locked --offline -p rustty-app`.
 - `cargo +1.95.0 test --locked --offline -p rustty --features sessions --lib tmuxx::tests:: -- --test-threads=1`:
-  11 tests: embedded/Unix shared panes and independent selection; focused host
+  18 current tests: embedded/local shared panes and independent selection; focused host
   action election/no snapshot replay/clipboard event-ID replies; exit17/respawn
   with a new PID and selection reset; synchronized per-pane Up/paste encodings
   without mouse/reply broadcast; focus aggregation across views/connections,
@@ -61,7 +81,12 @@ checkout, using Rust 1.95.0:
   new server incarnation invalidating stale views and event identity; restored
   native history search and exact OSC133 output selection in independent views;
   wide cells, independent viewports, synchronized output and stationary cursor
-  changes; detach closing views without signalling the GUI parent.
+  changes; detach closing views without signalling the GUI parent; retained agent
+  status across late views, fragmentation, respawn and reattachment; malformed
+  snapshot preservation; slow-view status reconciliation; and trusted SSH command
+  separation from protocol selection; timed-out mutations completing once while
+  asynchronous replies remain separate. New tests require fresh platform evidence;
+  the historical macOS result predates them.
 - `cargo +1.95.0 test --locked --offline -p rustty-app --lib tmuxx_workspace::tests:: -- --test-threads=1`:
   six tests covering linked-window identities and indexed targets, atomic
   malformed graph refusal, floating/modal/zoom membership and content offsets.
@@ -100,7 +125,7 @@ profile evidence. The smoke exercises native composition and backend
 attachment; it does not certify every UI gesture. Stock C capture reconstruction
 remains best effort and live app-owned PTY migration remains unimplemented.
 
-`rust/conformance/rustty-evidence.toml` and `version-evidence.toml` define 12
+`rust/conformance/rustty-evidence.toml` and `version-evidence.toml` define the
 external suites, including separate current-C and C3.7c SSH runs.
 The runner validates the actual sibling checkout against `manifest.json`, then
 runs its applicable exact named tests and real isolated SSH tests. A freshly
@@ -164,12 +189,24 @@ From the actual Windows Rustty checkout:
 ```powershell
 ./crates/rustty-app/build.ps1 -Offline
 $env:TMUXX_CONPTY_RESOURCES = (Resolve-Path target/debug/Rustty/resources).Path
-cargo +1.95.0 test --locked --offline -p rustty --features sessions --lib tmuxx::tests:: -- --test-threads=1
-cargo +1.95.0 test --locked --offline -p rustty-app --lib tmuxx_workspace::tests:: -- --test-threads=1
-cargo +1.95.0 test --locked --offline -p rustty-app --test windows_conpty -- --ignored
+$env:RUSTTY_RESOURCES_DIR = $env:TMUXX_CONPTY_RESOURCES
+$env:TMUXX_REMOTE_PYTHON = (python -c "import sys; print(sys.executable)").Trim()
+cargo +1.95.0 test --locked --offline -p rustty --features sessions --lib tmuxx::tests:: --target x86_64-pc-windows-msvc -- --test-threads=1
+cargo +1.95.0 test --locked --offline -p rustty --features sessions --lib config::tests:: --target x86_64-pc-windows-msvc -- --test-threads=1
+cargo +1.95.0 test --locked --offline -p rustty-app --lib tmuxx_workspace::tests:: --target x86_64-pc-windows-msvc -- --test-threads=1
+cargo +1.95.0 test --locked --offline -p rustty-app --lib tmuxx_launcher::tests:: --target x86_64-pc-windows-msvc -- --test-threads=1
+cargo +1.95.0 test --locked --offline -p rustty-app --test tmuxx_driver --target x86_64-pc-windows-msvc -- --test-threads=1
+cargo +1.95.0 test --locked --offline -p rustty-app --test windows_conpty --target x86_64-pc-windows-msvc -- --ignored
 ```
 
-All 11 selected backend tests run on Windows. The custom `windows_conpty` harness
+All 18 selected backend tests run on Windows. The 44 config tests include exact
+remote-command quote preservation. The launcher test synchronizes two initial
+clients against an empty real owner and verifies one session/pane/PID, existing
+owner reuse, and process cleanup. The two Windows driver tests exercise the GUI
+executable's early CLI dispatch, explicit missing-owner error, and one retained
+process across local and stdio views. Use an actual Python interpreter path,
+not a launcher shim, when asserting that the reported pane PID is the process PID.
+The custom `windows_conpty` harness
 emits `TMUXX_WINDOWS_CONPTY_RESULT` only after eight verified redraws, including
 the bundled-runtime identity; ordinary libtest output cannot prove its result.
 Build the standalone package with `rust/windows/build.ps1`, supplying the same

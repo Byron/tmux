@@ -266,6 +266,8 @@ jobs:
             --suite buffer-native-clipboard-targets --suite native-color-report-restore `
             --suite terminal-history-native-allocation --suite windows-control-pipe-eof `
             --suite rustty-native-adapter --suite rustty-native-workspace `
+             --suite rustty-native-ssh-command-config --suite windows-rustty-tmux-driver `
+             --suite windows-rustty-concurrent-launcher `
             --suite rustty-system-discovery-recovery `
             --report rust/conformance/artifacts/windows-ci.json
           exit $LASTEXITCODE

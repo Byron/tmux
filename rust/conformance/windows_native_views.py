@@ -53,6 +53,7 @@ class Fixture:
     def __init__(self, gui: Path, candidate: Path, directory: Path):
         self.gui, self.candidate, self.directory = gui, candidate, directory
         self.processes: list[subprocess.Popen] = []
+        self.jobs = []
         self.logs = []
         self.panes: dict[int, int] = {}
         self.checks: list[str] = []
@@ -63,7 +64,7 @@ class Fixture:
         self.k32.WaitForSingleObject.restype = wintypes.DWORD
         self.k32.CloseHandle.argtypes = [wintypes.HANDLE]
         self.env = os.environ.copy()
-        for name in ["TMUXX_ENDPOINT", "TMUXX_CONPTY_RESOURCES", "RUSTTY_TMUXX_SMOKE_DIR",
+        for name in ["TMUXX_ENDPOINT", "TMUXX_CONPTY_RESOURCES", "RUSTTY_RESOURCES_DIR", "RUSTTY_TMUXX_SMOKE_DIR",
                      "RUSTTY_TMUXX_SMOKE_HOLD_FILE", "RUSTTY_TMUXX_SMOKE_ATTACH_ONLY",
                      "RUSTTY_TMUXX_SMOKE_FLOATING", "RUSTTY_SMOKE_DIR", "RUSTTY_SMOKE_SECONDS"]:
             self.env.pop(name, None)
@@ -75,6 +76,23 @@ class Fixture:
                                    env=env or self.env, creationflags=subprocess.CREATE_NO_WINDOW)
         self.processes.append(process)
         return process
+
+    def start_guarded(self, argv: list[str], name: str, env: dict) -> subprocess.Popen:
+        """Keep even an early detached daemon inside the fixture's cleanup job."""
+        from runner import WindowsSuiteJob
+        job = WindowsSuiteJob()
+        self.jobs.append(job)
+        log = (self.directory / f"{name}.log").open("wb")
+        self.logs.append(log)
+        worker = subprocess.Popen([sys.executable, str(Path(__file__).with_name("runner.py")),
+                                   "--suite-child", *argv], stdin=subprocess.PIPE,
+                                  stdout=log, stderr=log, env=env,
+                                  creationflags=subprocess.CREATE_NO_WINDOW)
+        self.processes.append(worker)
+        job.assign(worker)
+        worker.stdin.write(b"\x01")
+        worker.stdin.close()
+        return worker
 
     def command(self, instance: str, *args: str) -> str:
         completed = subprocess.run([str(self.candidate), "-L", instance, *args],
@@ -102,7 +120,8 @@ class Fixture:
             time.sleep(0.05)
         raise AssertionError(f"test-owned pane processes remain: {[pid for pid in pids if self.alive(pid)]}")
 
-    def view(self, name: str, instance: str, embedded: bool, hold: bool = False, extra_args=()):
+    def view(self, name: str, instance: str, embedded: bool, hold: bool = False, extra_args=(),
+             *, mode: str | None = None, attach_only: bool | None = None, guarded: bool = False):
         directory = self.directory / name
         directory.mkdir()
         env = self.env | {"RUSTTY_TMUXX_SMOKE_DIR": str(directory), "RUSTTY_TMUXX_SMOKE_VISIBLE": "1"}
@@ -110,12 +129,13 @@ class Fixture:
             marker = directory / "hold"
             marker.write_text("hold", encoding="utf-8")
             env["RUSTTY_TMUXX_SMOKE_HOLD_FILE"] = str(marker)
-        if not embedded:
+        if (attach_only if attach_only is not None else not embedded):
             env["RUSTTY_TMUXX_SMOKE_ATTACH_ONLY"] = "1"
-        mode = "embedded" if embedded else f"pipe:{instance}"
-        gui = self.start([str(self.gui), f"--tmuxx={mode}", f"--tmuxx-instance={instance}",
-                          "--renderer=software", "--config-default-files=false", "--stream-deck=false", *extra_args],
-                         name, env)
+        mode = mode or ("embedded" if embedded else f"pipe:{instance}")
+        launch = self.start_guarded if guarded else self.start
+        gui = launch([str(self.gui), f"--tmuxx={mode}", f"--tmuxx-instance={instance}",
+                      "--renderer=software", "--config-default-files=false", "--stream-deck=false", *extra_args],
+                     name, env)
         state = wait_json(directory / ("ready.json" if hold else "result.json"), gui)
         assert not state["errors"], state["errors"]
         assert not state["hidden"], "native window was not visible"
@@ -195,6 +215,128 @@ class Fixture:
         assert owner.wait(timeout=10) == 0
         self.assert_dead(first["pane_processes"].values())
         self.checks.append("windows_native_views::standalone_retained_abrupt_gui_restart")
+
+    def persistent_restart(self) -> None:
+        from windows_ssh import Connection
+        instance = "persistent 雪 &^ " + uuid.uuid4().hex
+        gui, directory, first = self.view("persistent-first", instance, False, True,
+                                          mode="persistent", attach_only=False, guarded=True)
+        owner = int(self.command(instance, "display-message", "-p", "#{pid}").strip())
+        assert owner != first["process_id"], "persistent mode reused the GUI as its owner"
+        self.remember({"pane_processes": {"owner": owner}})
+        assert self.alive(owner)
+        marker = directory / "emit agent 雪 &^.txt"
+        frame = "\x1b]777;rustty-agent;1;eyJvcCI6ImJlZ2luIiwic3RhdGUiOiJuZWVkc19pbnB1dCIsInRocmVhZF9pZCI6InJlbW90ZSJ9\x07"
+        script = (
+            "import ctypes,msvcrt,os,pathlib,sys,time\n"
+            "k=ctypes.WinDLL('kernel32',use_last_error=True)\n"
+            "k.GetStdHandle.restype=ctypes.c_void_p\n"
+            "k.SetConsoleMode.argtypes=[ctypes.c_void_p,ctypes.c_ulong]\n"
+            "assert k.SetConsoleOutputCP(65001) and k.SetConsoleMode(k.GetStdHandle(-11),0xD)\n"
+            "msvcrt.setmode(1,os.O_BINARY)\n"
+            "print('PERSISTENT_PID='+str(os.getpid()),flush=True)\n"
+            "deadline=time.monotonic()+90\n"
+            "while not pathlib.Path(sys.argv[1]).exists():\n"
+            " assert time.monotonic()<deadline; time.sleep(.02)\n"
+            "os.write(1,sys.argv[2].encode('utf-8')+b'PERSISTENT_AGENT_READY\\r\\n')\n"
+            "time.sleep(90)\n"
+        )
+        session = "$" + str(first["server_sessions"][0]["id"])
+        added = self.command(instance, "new-window", "-d", "-P", "-F", "#{window_id}|#{pane_id}",
+                             "-t", session, "-n", "Persistent 雪 &^", sys.executable, "-u", "-c",
+                             script, str(marker), frame).strip().split("|")
+        window, pane = added
+        self.command(instance, "link-window", "-s", window, "-t", session + ":9")
+        for retained in self.command(instance, "list-panes", "-a", "-F", "#{pane_id}").splitlines():
+            self.command(instance, "tmuxx-retain-pane", "-t", retained, "on")
+        graph = self.command(instance, "list-windows", "-a", "-F", "#{session_id}|#{window_index}|#{window_id}")
+        (directory / "expected.json").write_text(json.dumps({"sessions": 1, "windows": 2, "panes": 3, "links": 3}), encoding="utf-8")
+        (directory / "hold").unlink()
+        before_restart = wait_json(directory / "result.json", gui)
+        self.remember(before_restart)
+        assert_rendered_workspaces(before_restart)
+        assert not before_restart["errors"] and before_restart["view_graph_consistent"]
+        assert first["pane_processes"].items() <= before_restart["pane_processes"].items()
+        assert gui.wait(timeout=20) == 0
+        original = before_restart["pane_processes"]
+        assert self.alive(owner) and all(self.alive(pid) for pid in original.values())
+        # The status arrives with no GUI attached, so a live-only event path
+        # cannot supply it when the next actual native view is created.
+        marker.write_text("emit", encoding="ascii")
+        deadline = time.monotonic() + 8
+        while "PERSISTENT_AGENT_READY" not in self.command(instance, "capture-pane", "-p", "-t", pane):
+            assert time.monotonic() < deadline, "retained application did not emit its status"
+            time.sleep(.02)
+        connection = Connection.local(first["endpoint"])
+        try:
+            connection.handshake(instance, first["instance"])
+            _, snapshot = connection.request("display-message", "-p", "", subscribe=True)
+            terminal = next(item["terminal"] for item in snapshot["panes"] if item["id"] == int(pane[1:]))
+            status = terminal["agent_status"]
+            assert status["generation"] == 1 and status["snapshot"]["thread_id"] == "remote", status
+        finally:
+            connection.close()
+        gui, _, second = self.view("persistent-second", instance, False,
+                                    mode="persistent", guarded=True)
+        assert gui.wait(timeout=20) == 0
+        assert second["pane_processes"] == original and second["instance"] == first["instance"]
+        assert self.command(instance, "list-windows", "-a", "-F", "#{session_id}|#{window_index}|#{window_id}") == graph
+        assert int(self.command(instance, "display-message", "-p", "#{pid}")) == owner
+        assert "PERSISTENT_AGENT_READY" in second["pane_texts"][pane[1:]]
+        restored = second["pane_agents"][pane[1:]]
+        comparison = {"owner_pid": owner, "pane_id": pane, "server_status": status,
+                      "native_views": restored, "report_generation": second["report_generation"]}
+        (directory / "status-view-comparison.json").write_text(json.dumps(comparison, indent=2), encoding="utf-8")
+        assert len(restored) == 2, "duplicate links did not retain distinct native views"
+        assert all(item["snapshot"] is not None and item["snapshot"]["thread_id"] == "remote"
+                   and item["snapshot"]["state"] == "needs_input" and item["generation"] > 0
+                   for item in restored), ("native views lost the owner's retained agent status", comparison)
+        assert self.alive(owner) and all(self.alive(pid) for pid in original.values())
+        gui, _, held = self.view("persistent-abrupt", instance, False, True,
+                                 mode="persistent", guarded=True)
+        assert held["pane_processes"] == original and held["instance"] == first["instance"]
+        self.k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        handle = self.k32.OpenProcess(0x00100001, False, held["process_id"])
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            assert self.k32.TerminateProcess(handle, 91)
+            assert self.k32.WaitForSingleObject(handle, 5000) == 0
+        finally:
+            self.k32.CloseHandle(handle)
+        gui.wait(timeout=10)
+        assert self.alive(owner) and all(self.alive(pid) for pid in original.values())
+        gui, _, final = self.view("persistent-after-abrupt", instance, False,
+                                  mode="persistent", guarded=True)
+        assert gui.wait(timeout=20) == 0
+        assert final["pane_processes"] == original and final["instance"] == first["instance"]
+        restored = final["pane_agents"][pane[1:]]
+        assert len(restored) == 2 and all(item["snapshot"] is not None
+                                       and item["snapshot"]["thread_id"] == "remote"
+                                       and item["snapshot"]["state"] == "needs_input"
+                                       and item["generation"] > 0 for item in restored), (
+                                           "native views lost agent status after abrupt restart", status, restored)
+        assert int(self.command(instance, "display-message", "-p", "#{pid}")) == owner
+        assert self.command(instance, "list-windows", "-a", "-F", "#{session_id}|#{window_index}|#{window_id}") == graph
+        self.command(instance, "kill-server")
+        self.assert_dead([owner, *original.values()])
+        (directory / "persistent-result.json").write_text(json.dumps({
+            "owner_pid": owner, "first_gui_pid": first["process_id"], "pane_processes": original,
+            "instance": first["instance"], "graph": graph, "retained_agent_status": status,
+            "graceful_restart": second, "abrupt_restart": final,
+            "fixture_jobs_open_during_lifetime_assertions": True, "owned_handles_signaled": True,
+        }, indent=2), encoding="utf-8")
+        self.checks.append("windows_native_views::persistent_gui_starts_shared_owner_and_retains_restart")
+        missing = self.directory / "persistent-missing"
+        missing.mkdir()
+        rejected = self.start_guarded([str(self.gui), "--tmuxx=pipe:" + instance,
+                                      "--config-default-files=false", "--stream-deck=false"],
+                                     "persistent-missing", self.env | {"RUSTTY_SMOKE_DIR": str(missing)})
+        assert rejected.wait(timeout=15) != 0, "attachment silently started another owner"
+        absent = subprocess.run([str(self.candidate), "-L", instance, "list-sessions"],
+                                env=self.env, capture_output=True, timeout=5)
+        assert absent.returncode != 0, "missing-instance attachment created a server"
+        self.checks.append("windows_native_views::missing_attachment_never_starts_owner")
 
     def abrupt_app_owner(self, abrupt: bool = True) -> None:
         mode = "abrupt" if abrupt else "graceful"
@@ -282,6 +424,8 @@ class Fixture:
                 child.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+        for job in reversed(self.jobs):
+            job.close()
         deadline = time.monotonic() + 5
         while any(self.alive(pid) for pid in self.panes) and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -312,6 +456,7 @@ def main() -> int:
         fixture.abrupt_app_owner()
         fixture.abrupt_app_owner(False)
         fixture.standalone_restart()
+        fixture.persistent_restart()
         fixture.negative_resources()
     except (Exception, KeyboardInterrupt) as error:
         report["failures"].append(f"{type(error).__name__}: {error}")
