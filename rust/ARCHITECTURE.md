@@ -11,9 +11,11 @@ The inspected references are tmux `22f34d3fa984e03719b0a1b2ac4677aaf61cd53d`
 `cb67824a77fc00bd20e811cce40012893f79b999` in the neighboring
 `ghostty-org/ghostty` checkout. C interoperability and differential tests run
 against this tmux baseline and installed tmux 3.7c as separate executables;
-the exact named assertions determine coverage. Unix execution is implemented;
-Linux and Windows execution are user-deferred; implementation and executable
-qualification continue on macOS. Deferred platforms retain their requirements
+the exact named assertions determine coverage. Linux server execution is active;
+its GNU target, reference builds and independent evidence are documented in
+[LINUX.md](LINUX.md). Windows implementation/execution remains deferred. Historical
+macOS results do not qualify Linux; desktop obligations still require a supported
+macOS/Windows client host. Deferred platforms retain their requirements
 and are never counted as passing. This contract includes the requested
 app-owned server, smaller crates, and narrower compatibility scope.
 
@@ -221,7 +223,31 @@ deliberately create a different OS session are outside this ownership boundary.
 The helper closes inherited descriptors and uses preallocated storage for at most
 16,384 owned sessions and 131,072 process IDs. A crash between spawning a child
 and registering it can escape this cleanup; atomic ownership during spawn needs
-a pre-exec spawn broker. Linux and Windows need their own platform mechanisms.
+a pre-exec spawn broker. Windows still needs its own ownership mechanism.
+
+On Linux, a spawn broker monitors the owner's process pidfd and ownership channel
+and is the parent of every PTY leader. A forked worker retaining a copy of the
+channel cannot extend the original owner's lifetime.
+The broker records ownership before exec and acknowledges a spawn only after
+exec succeeds, closing the spawn/registration crash gap. Exit observation uses
+`waitid(WNOWAIT)`; an exited leader remains reserved until the last pane/reaper
+lease is released, preventing its session number from being recycled. Cleanup
+scans the registered sessions through `/proc`, stops their members, and signals
+exact processes through pidfds. Foreground/background groups and reparented
+descendants remain covered after leader exit; deliberately independent `setsid`
+sessions retain the documented exclusion. A subreaper collects adopted zombies.
+Transport failure closes the ownership channel and cleans children even when
+their spawn reply was lost. Independent owners are separate brokers.
+
+The Linux broker uses a raw fork-like syscall and only preallocated storage and
+syscall wrappers before exec; it runs no inherited allocator locks or atfork
+callbacks. It requires pidfd support including `waitid(P_PIDFD)` (Linux 5.4+), `TIOCGPTPEER`, and accessible
+`/proc` for the same PID namespace. Missing prerequisites fail explicitly.
+Limits are 16,384 owned sessions, 2 MiB of spawn strings and 65,536 strings per
+spawn. These are implementation limits, not tested support for every kernel since
+5.4. Bounded cleanup cannot force an uninterruptible kernel task to finish before
+its pending SIGKILL takes effect. No cgroup delegation or root privilege is
+required for normal hosting.
 
 ## 4. Windows app-owned server and shared views
 
@@ -677,14 +703,14 @@ The executable reference matrix uses pinned upstream `next-3.9`
 behavior and C 3.7c for older-server/client pairing and SSH interoperability.
 Both references must have exact passing evidence before the supported-version
 requirement closes. Unix IPC is checked separately per schema/ABI. Rustty
-desktop targets macOS and Windows; Linux is a system-tmux host and a deferred
-standalone tmuxx target, not a claim that Rustty already has a Linux GUI.
+desktop targets macOS and Windows. Linux hosts system tmux, standalone tmuxx and
+embedded tmuxx runtimes. Linux GUI implementation is outside this task.
 
 | Frequency | Current CI or future requirement |
 |---|---|
-| Every PR/push | macOS Rust checks, metadata/inventory review, C/C calibration, current-C and 3.7c comparisons, exact suites/differences and all six scoped profile gates |
+| Every PR/push | macOS and GNU/Linux Rust checks, metadata/inventory review, C/C calibration, current-C and 3.7c comparisons, exact suites/differences and all six scoped profile gates; desktop-dependent Linux gates remain blocked without client-host evidence |
 | Every rebase | New reference build; old-reference/new-reference/Rust comparison; all affected profiles and difference fixtures; complete discovered-test classification |
-| Future nightly/platform jobs | Differential fuzzing, reference sanitizers, sustained concurrent input/output/resize, SSH reconnect, graphics/width variants, and Linux/Windows execution including ConPTY |
+| Future nightly/platform jobs | Differential fuzzing, reference sanitizers, sustained concurrent input/output/resize, SSH reconnect, graphics/width variants, additional Linux ABIs and Windows execution including ConPTY |
 | Profile release | Every required assertion on supported platforms/versions, relevant client/server pairings, lifecycle/security/upgrade checks and measured resource budgets |
 
 Report counts by profile: required, passing, intentional differences, excluded,
@@ -696,8 +722,9 @@ Set budgets after measuring the baseline rather than inventing them here.
 The upstream `.github/workflows/regress.yml` runs manually/nightly and is gated
 to `tmux/tmux`. The additive `.github/workflows/tmuxx-conformance.yml` runs for
 relevant PRs/pushes and manual dispatch on this branch and its forks. It collects
-macOS evidence and gates all six scoped profiles; Linux and Windows remain
-deferred and are not counted as passing.
+macOS and GNU/Linux evidence and gates all six scoped profiles. Linux suite
+selection uses equivalent Linux ownership proofs and records desktop-only suites
+as blocked; it never treats absent tests as passing. Windows remains deferred.
 
 ## 11. Maintaining the regularly rebased branch
 
@@ -790,7 +817,9 @@ terminal/image behavior and native bootstrap/lifetime contracts have executable
 proofs or explicit tested differences in that profile. This does not claim that
 every upstream regression script passed unchanged.
 
-Linux execution and Windows ownership/ConPTY implementation and execution remain
-deferred. Stock tmux's state-export limits remain distinct from tmuxx's atomic
+Fresh Linux results, executable identities and remaining client-host prerequisites
+belong to `conformance/artifacts/linux-c-rust.json` and its six profile gates;
+see [Linux reproduction](LINUX.md). Windows ownership/ConPTY implementation and
+execution remain deferred. Stock tmux's state-export limits remain distinct from tmuxx's atomic
 native checkpoints. Ordinary tty presentation and live PTY migration remain
 outside the product contract; persistence requires a surviving process owner.

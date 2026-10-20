@@ -92,15 +92,19 @@ checkout, using Rust 1.95.0:
   clippy is not claimed clean.
 
 The socket/PTY and SSH tests need ordinary OS process/socket permissions. Linux
-and Windows execution remain deferred. The smoke exercises native composition and backend
+server execution is active; see [Linux reproduction](../../LINUX.md) and its
+fresh evidence reports. Portable Rustty adapter/workspace tests can run on the
+Linux host, while renderer and desktop tests require a supported macOS/Windows
+client. Windows hosting execution remains deferred. The smoke exercises native composition and backend
 attachment; it does not certify every UI gesture. Stock C capture reconstruction
 remains best effort and live app-owned PTY migration remains unimplemented.
 
 `rust/conformance/rustty-evidence.toml` and `version-evidence.toml` define 12
 external suites, including separate current-C and C3.7c SSH runs.
 The runner validates the actual sibling checkout against `manifest.json`, then
-runs its exact named tests, real isolated SSH tests, and a freshly built hidden
-desktop smoke. All sibling crate sources, Cargo manifests/lockfile, checkout
+runs its applicable exact named tests and real isolated SSH tests. A freshly
+built hidden desktop smoke runs on its supported platform; Linux records that
+requirement as blocked until actual client-host evidence is available. All sibling crate sources, Cargo manifests/lockfile, checkout
 revision and the integration patch enter the fingerprint. Missing checkouts,
 changed files, ignored/filtered tests and source changes during execution fail
 the proof. `TMUXX_RUSTTY_ROOT` can point to another identically integrated checkout.
