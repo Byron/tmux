@@ -6,8 +6,8 @@ status = "active"
 reason = "macOS implementation and executable conformance continue."
 
 [platform_execution.linux]
-status = "deferred"
-reason = "Linux execution is explicitly deferred by the user; requirements remain and this is not a Linux pass."
+status = "active"
+reason = "Linux server execution is authorized. Exact GNU/Linux host evidence and a platform-specific owner watchdog are required; supported Rustty desktop client obligations remain required."
 
 [platform_execution.win32]
 status = "deferred"
@@ -390,13 +390,15 @@ rationale = "A live endpoint cannot be replaced, incompatible native hello versi
 
 [[coverage]]
 obligation = "runtime.child-descendant-cleanup"
-assertions = ["runtime.graceful-owner-drop", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary", "lifetime.abrupt-owner-pty-hangup", "lifetime.macos-acknowledged-pty-owner-death"]
-rationale = "Graceful shutdown reclaims jobs and all acknowledged PTY-session groups after leader exit; macOS owner SIGKILL watchdog handles ignored-SIGHUP foreground/background groups. Exact C/native fixtures retain the independently daemonized setsid ownership boundary. Abrupt death between spawn and watchdog registration is explicitly outside the accepted acknowledged-process contract."
+assertions = ["runtime.graceful-owner-drop", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary", "lifetime.abrupt-owner-pty-hangup"]
+platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"] }
+rationale = "Graceful shutdown reclaims jobs and all acknowledged PTY-session groups after leader exit; the selected platform owner SIGKILL watchdog handles ignored-SIGHUP foreground/background groups; Linux and macOS must execute their own exact watchdog assertion. Exact C/native fixtures retain the independently daemonized setsid ownership boundary. The macOS spawn/registration gap remains outside its acknowledged-process contract; the Linux broker owns children before exec and has separate failed-registration/lost-reply evidence."
 
 [[coverage]]
 obligation = "lifetime.owner-process-exit"
-assertions = ["runtime.graceful-owner-drop", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary", "lifetime.abrupt-owner-pty-hangup", "lifetime.macos-acknowledged-pty-owner-death"]
-rationale = "Actual owner drop and SIGKILL remove acceptance and terminate acknowledged ordinary PTY/session jobs, including ignored-SIGHUP descendants after leader exit; a separately owned server remains alive. Deliberate setsid escape and the unacknowledged spawn/registration crash window remain explicit boundaries, not claimed cleanup."
+assertions = ["runtime.graceful-owner-drop", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary", "lifetime.abrupt-owner-pty-hangup"]
+platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"] }
+rationale = "Actual owner drop and SIGKILL remove acceptance and terminate acknowledged ordinary PTY/session jobs, including ignored-SIGHUP descendants after leader exit; a separately owned server remains alive. Deliberate setsid escape remains an explicit boundary. The macOS unacknowledged spawn/registration window remains unclaimed; Linux broker ownership begins before exec."
 
 [[coverage]]
 obligation = "lifetime.remote-loss-keeps-local-job"
@@ -436,7 +438,8 @@ rationale = "Actual native Session snapshots/updates preserve whole wide cells, 
 
 [[coverage]]
 obligation = "scope:process-lifecycle:1"
-assertions = ["runtime.failed-spawn-rollback", "process.empty-and-window-respawn", "process.c-empty-respawn-and-pipe", "control.c-process-exit-and-output-lifetimes", "process.c-live-stdin-and-cancellation", "process.c-stdin-shutdown-and-pane-wait", "command.background-branches-after-disconnect", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary", "lifetime.macos-acknowledged-pty-owner-death"]
+assertions = ["runtime.failed-spawn-rollback", "process.empty-and-window-respawn", "process.c-empty-respawn-and-pipe", "control.c-process-exit-and-output-lifetimes", "process.c-live-stdin-and-cancellation", "process.c-stdin-shutdown-and-pane-wait", "command.background-branches-after-disconnect", "runtime.job-descendant-owner-shutdown", "runtime.pty-session-descendant-cleanup", "runtime.c-pty-ownership-boundary"]
+platform_assertions = { darwin = ["lifetime.macos-acknowledged-pty-owner-death"], linux = ["lifetime.linux-acknowledged-pty-owner-death"] }
 rationale = "Real C/Rust process fixtures cover failed/empty spawn, respawn identity and environment, status versus signals, final output draining, stdin cancellation and pane-wait completion; disconnected callbacks cannot revive cancelled work. Graceful and abrupt acknowledged-process cleanup uses the separately tested PTY-session boundary, preserving independent setsid sessions."
 
 [[coverage]]

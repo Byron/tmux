@@ -76,11 +76,6 @@ tests = ["abrupt_owner_death_closes_pty_and_foreground_descendants_without_harmi
 description = "SIGKILL of the real owner process closes its PTY and foreground leader/descendant; a separately owned server keeps its original live PID. Strong ignored-SIGHUP/session cleanup has separate watchdog evidence."
 
 [[suites.assertions]]
-id = "lifetime.macos-acknowledged-pty-owner-death"
-tests = ["killed_owner_watchdog_cleans_hup_ignoring_session_jobs_and_preserves_independent_sessions"]
-description = "macOS helper kills acknowledged same-session foreground/background jobs ignoring SIGHUP after owner SIGKILL, whether the leader is alive or exited; deliberate setsid escape and independent owner survive, and helper retains no listener. Does not certify a crash between spawn and registration."
-
-[[suites.assertions]]
 id = "lifetime.killed-client-retention-links-detached-query"
 tests = ["killed_client_relaunch_retains_selected_linked_pane_and_detached_queries_run_once"]
 description = "SIGKILL of a real native-stdio client removes its ephemeral pane, retains the acknowledged pane and shared winlinks, services application output and exactly one terminal query without clients, then a new process reconnects with the same retained PID/output."
@@ -92,6 +87,7 @@ description = "Killing and restarting the owner at the same native endpoint reus
 
 [[suites]]
 id = "rustty-desktop-hit-testing"
+platforms = ["darwin", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--bin", "rustty", "floating_composition_clips_without_moving_origin_and_hit_testing_uses_stack_order", "--", "--test-threads=1"]
@@ -105,6 +101,7 @@ description = "Actual Rustty desktop clips floating panes without moving their o
 
 [[suites]]
 id = "rustty-desktop-modal-policy"
+platforms = ["darwin", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--bin", "rustty", "modal_key_and_outside_click_policies_reach_the_owner", "--", "--test-threads=1"]
@@ -118,6 +115,7 @@ description = "Actual Rustty desktop forwards modal keys/outside clicks through 
 
 [[suites]]
 id = "rustty-sixel-renderer"
+platforms = ["darwin", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-render", "--lib", "tmux_sixel_overlap_renders_in_owner_creation_order", "--", "--test-threads=1"]
@@ -131,6 +129,7 @@ description = "Actual native renderer draws overlapping retained SIXEL placement
 
 [[suites]]
 id = "rustty-hidden-native-frame"
+platforms = ["darwin"]
 kind = "rustty-desktop-smoke"
 profiles = ["native-views"]
 args = []
@@ -155,6 +154,7 @@ description = "54 exact C child observations: disabled/normal/drag/all tracking,
 
 [[suites]]
 id = "rustty-desktop-output-pacing"
+platforms = ["darwin", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--bin", "rustty", "synchronized_output_releases_on_end_and_restarts_the_bounded_timeout", "--", "--test-threads=1"]
@@ -168,6 +168,7 @@ description = "The actual desktop holds DEC2026 batches until end or a bounded t
 
 [[suites]]
 id = "rustty-desktop-output-damage"
+platforms = ["darwin", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--bin", "rustty", "output_metadata_distinguishes_titles_and_pointer_shapes_from_terminal_changes", "--", "--test-threads=1"]
@@ -181,6 +182,7 @@ description = "The actual desktop render key detects stationary cursor visibilit
 
 [[suites]]
 id = "rustty-desktop-pane-cache"
+platforms = ["darwin", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-app", "--bin", "rustty", "prepared_panes_", "--", "--test-threads=1"]
@@ -194,6 +196,7 @@ description = "Actual prepared desktop panes invalidate for scrolling, selection
 
 [[suites]]
 id = "rustty-render-viewport-selection"
+platforms = ["darwin", "win32"]
 kind = "rustty-cargo"
 profiles = ["native-views"]
 args = ["+1.95.0", "test", "--locked", "--offline", "-p", "rustty-render", "--lib", "viewport_snapshots_preserve_selection_paint_while_scrolling", "--", "--test-threads=1"]
@@ -204,3 +207,29 @@ env = {}
 id = "rustty.renderer-viewport-snapshot-selection"
 tests = ["prepare::tests::viewport_snapshots_preserve_selection_paint_while_scrolling"]
 description = "The actual native renderer paints identical rectangular/linear/reversed selections from owner screens and viewport snapshots at every tested scroll offset."
+
+[[suites]]
+id = "cli-macos-owner-watchdog"
+platforms = ["darwin"]
+profiles = ["app-owned", "standalone", "native-views", "unix-ipc"]
+args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "lifetime", "killed_owner_watchdog_cleans_hup_ignoring_session_jobs_and_preserves_independent_sessions", "--", "--exact", "--test-threads=1"]
+env = {}
+
+[[suites.assertions]]
+id = "lifetime.macos-acknowledged-pty-owner-death"
+platforms = ["darwin"]
+tests = ["killed_owner_watchdog_cleans_hup_ignoring_session_jobs_and_preserves_independent_sessions"]
+description = "The macos watchdog kills acknowledged same-session foreground/background jobs ignoring SIGHUP after owner SIGKILL, with live and exited session leaders. Deliberate setsid escape and independent owners survive; the helper retains no listener. Unacknowledged spawn/registration crash remains outside this assertion."
+
+[[suites]]
+id = "cli-linux-owner-watchdog"
+platforms = ["linux"]
+profiles = ["app-owned", "standalone", "native-views", "unix-ipc"]
+args = ["test", "--locked", "--offline", "-p", "tmuxx-cli", "--test", "lifetime", "killed_owner_watchdog_cleans_hup_ignoring_session_jobs_and_preserves_independent_sessions", "--", "--exact", "--test-threads=1"]
+env = {}
+
+[[suites.assertions]]
+id = "lifetime.linux-acknowledged-pty-owner-death"
+platforms = ["linux"]
+tests = ["killed_owner_watchdog_cleans_hup_ignoring_session_jobs_and_preserves_independent_sessions"]
+description = "The Linux spawn broker owns children before exec and kills same-session foreground/background jobs ignoring SIGHUP after owner SIGKILL, with live and exited session leaders. Deliberate setsid escape and independent owners survive; the helper retains no listener."

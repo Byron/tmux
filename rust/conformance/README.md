@@ -167,10 +167,36 @@ After rebasing:
 4. Run each claimed profile gate. Required pending/missing/deferred assertions,
    stale source/implementation/binaries, and unreviewed changes all block release.
 
-Linux and Windows execution are user-deferred; macOS evidence certifies neither.
-The manifest records each platform execution status, reports preserve that matrix,
-and gates reject evidence collected for a deferred platform. Required source
-responsibilities remain unchanged. CI currently executes macOS only.
+Linux server execution is active; Windows execution remains user-deferred.
+Historical macOS evidence certifies neither platform. Suites declare execution
+`platforms` where needed, and `--suite all` records required desktop suites that
+cannot execute locally as **blocked**, with no passing observation. The report
+retains every corresponding obligation and collection exits unsuccessfully when
+selected required suites are blocked. Explicitly requesting an inapplicable
+platform-specific suite is an error. A Linux watchdog result is required on Linux;
+the corresponding macOS assertion is marked not-applicable there, and vice versa.
+The reviewed `platform_assertions` mappings add each platform's exact watchdog
+to the unchanged common ALL-of cleanup proofs. Missing or inapplicable mappings
+fail inventory validation. This exception does not apply to desktop obligations.
+
+The gate reconstructs the inventory for the report's platform and recomputes
+every required exact suite from its transcript, return status, execution platform
+and selected reference identity. Copied macOS test observations cannot pass a
+Linux desktop requirement. A supported Rustty macOS/Windows client must actually
+connect to the tested Linux server to qualify those integration obligations.
+Current local desktop tests and the Metal smoke create local owners; their reports
+cannot be imported as cross-host evidence. Until a cross-host executable fixture
+records both host identities, the same source identities, Linux server executable
+and supported desktop executable hashes, and verifies graph reconciliation,
+rendering, input, independent search/selection and reconnect, affected Linux
+profiles remain blocked. This preserves actual desktop requirements while allowing
+the independent Linux server suites to complete.
+
+Reports include the collector's distribution, kernel, architecture, libc,
+Rust 1.95.0 host target, Python and OpenSSH versions. These identify the tested
+GNU/Linux host; they do not certify other architectures or musl. The CI Linux job
+uses Ubuntu 24.04 x86_64 GNU, separately from macOS. Both jobs execute all applicable
+suites and run every profile gate, retaining passing and failing artifacts.
 Ordinary terminal presentation is the product exclusion; it does not exclude
 application terminal state, queries, captures, images, shared input or lifetime.
 
@@ -191,11 +217,16 @@ tests need temporary sockets and PTYs. The difference ledger is not an allowlist
 for arbitrary mismatches or a normalization layer.
 
 The [CI workflow](../../.github/workflows/tmuxx-conformance.yml) builds separate C
-head/3.7c oracles, checks Rust on macOS and gates all six scoped profiles. It
+head/3.7c oracles, checks Rust on macOS and GNU/Linux and gates all six scoped profiles. It
 uploads exact evidence even on failure. Missing required assertions, stale
 fingerprints or unreviewed upstream changes block those gates; passing smoke or
-a subset of named suites is insufficient. Linux and Windows execution remain
-deferred.
+a subset of named suites is insufficient. The current C worktree is pinned to
+`22f34d3fa984e03719b0a1b2ac4677aaf61cd53d` and enables utf8proc and images.
+C 3.7c spells the image decoder option `--enable-sixel`, so its build uses
+`--enable-utf8proc --enable-sixel` and verifies the resulting configuration.
+`--enable-images` is unrecognized by that older configure script. Reference
+paths, revisions, versions, binary hashes and effective configure options are
+retained; the distribution's installed tmux is never replaced.
 
 Current and older C behavior sometimes differ. The [version observations](compatibility-versions.md)
 record those differences and their exact tests; older-version CI selects only

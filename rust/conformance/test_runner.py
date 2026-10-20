@@ -81,11 +81,11 @@ class InventoryTests(unittest.TestCase):
             entries.append({"id": "control.supported-version-matrix", "profiles": ["system-client"], "requirement": "required", "status": "pending", "proof": [name + ".exact" for name in selected]})
             config = {"profiles": {"system-client": {"platforms": ["darwin"]}}, "reference_revision": "baseline"}
             report = {"candidate_kind": "rust", "checkout_revision": "checkout", "reference_revision": "baseline",
-                "manifest_sha256": runner.digest(runner.MANIFEST), "implementation_fingerprint": "sources", "platform": "darwin",
+                "manifest_sha256": runner.digest(runner.MANIFEST), "implementation_fingerprint": "sources", "platform": "darwin", "host": {"platform": "darwin"},
                 **identities, "entries": [{**entry, "observation_results": {"suite:" + entry["suites"][0]: "pass"}} for entry in entries if "suites" in entry] + [{**entries[-1], "status": "pass"}],
                 "suites": {name: {"reference": identities["reference" if name == "current" else "older_reference"],
-                    "status": 0, "stdout_base64": runner.b64(b"test pairings ... ok\n")} for name in selected}}
-            with patch.object(runner, "suites", return_value=selected), patch.object(runner, "inventory", side_effect=lambda _: copy.deepcopy(entries)), \
+                    "status": 0, "platform": "darwin", "stdout_base64": runner.b64(b"test pairings ... ok\n")} for name in selected}}
+            with patch.object(runner, "suites", return_value=selected), patch.object(runner, "inventory", side_effect=lambda *_: copy.deepcopy(entries)), \
                  patch.object(runner, "source_revision", return_value="checkout"), patch.object(runner, "implementation_fingerprint", return_value="sources"), \
                  patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
                 self.assertEqual(runner.blockers(report, "system-client", config), [])
@@ -285,7 +285,7 @@ class InventoryTests(unittest.TestCase):
                       "platform": "darwin", "reference": identity, "candidate": identity, "entries": runner.inventory()}
             self.assertTrue(any("pending" in message for message in runner.blockers(report, "command-control")))
             report["platform"] = "linux"
-            self.assertTrue(any("user-deferred" in message for message in runner.blockers(report, "command-control")))
+            self.assertFalse(any("user-deferred" in message for message in runner.blockers(report, "command-control")))
             report["platform"] = "darwin"
             report["candidate_kind"] = "c"
             self.assertTrue(any("C/C" in message for message in runner.blockers(report, "command-control")))
@@ -313,6 +313,119 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertIn("config-c-reference", matches[0]["suites"])
         self.assertTrue(all(entry["status"] == "pending" for entry in entries if entry["id"].startswith("scope:")))
+
+
+class PlatformEvidenceTests(unittest.TestCase):
+    def test_linux_selection_keeps_desktop_obligations_blocked(self):
+        runnable, blocked = runner.select_suites(["all"], "linux")
+        self.assertIn("cli-linux-owner-watchdog", runnable)
+        self.assertIn("unix-ipc-linux-abi", runnable)
+        self.assertNotIn("cli-macos-owner-watchdog", runnable)
+        self.assertNotIn("cli-macos-owner-watchdog", blocked)
+        self.assertIn("rustty-hidden-native-frame", blocked)
+        self.assertIn("rustty-desktop-pane-cache", blocked)
+        self.assertIn("rustty-sixel-renderer", blocked)
+        self.assertIn("rustty-render-viewport-selection", blocked)
+        self.assertTrue(all(item["status"] == "blocked" and not item["completed_tests"] for item in blocked.values()))
+        entries = {entry["id"]: entry for entry in runner.inventory(host_platform="linux")}
+        self.assertEqual(entries["rustty.hidden-native-metal-frame"]["status"], "pending")
+        self.assertEqual(entries["lifetime.macos-acknowledged-pty-owner-death"]["status"], "not-applicable")
+        self.assertIn("rustty.hidden-native-metal-frame", entries["native.rustty-render-search-adapter"]["proof"])
+        with self.assertRaisesRegex(ValueError, "does not apply"):
+            runner.select_suites(["cli-macos-owner-watchdog"], "linux")
+
+    def test_platform_watchdogs_preserve_all_common_proof_members(self):
+        by_platform = {target: {entry["id"]: entry for entry in runner.inventory(host_platform=target)}
+                       for target in ("darwin", "linux")}
+        obligations = ["runtime.child-descendant-cleanup", "lifetime.owner-process-exit", "scope:process-lifecycle:1"]
+        for obligation in obligations:
+            with self.subTest(obligation=obligation):
+                mac = set(by_platform["darwin"][obligation]["proof"])
+                linux = set(by_platform["linux"][obligation]["proof"])
+                self.assertEqual(mac - linux, {"lifetime.macos-acknowledged-pty-owner-death"})
+                self.assertEqual(linux - mac, {"lifetime.linux-acknowledged-pty-owner-death"})
+                self.assertGreater(len(mac & linux), 3)
+        self.assertEqual(by_platform["darwin"]["ipc.linux-ancillary-queues-eof-and-cloexec"]["status"], "not-applicable")
+
+    def test_platform_proof_missing_empty_duplicate_or_wrong_target_fails_review(self):
+        config = runner.manifest()
+        original = next(item for item in config["coverage"] if item["obligation"] == "runtime.child-descendant-cleanup")
+        for replacement in [
+            {"darwin": ["lifetime.macos-acknowledged-pty-owner-death"]},
+            {"darwin": [], "linux": ["lifetime.linux-acknowledged-pty-owner-death"]},
+            {"darwin": ["runtime.graceful-owner-drop"], "linux": ["lifetime.linux-acknowledged-pty-owner-death"]},
+            {"darwin": ["lifetime.linux-acknowledged-pty-owner-death"], "linux": ["lifetime.linux-acknowledged-pty-owner-death"]},
+            {"darwin": ["missing"], "linux": ["lifetime.linux-acknowledged-pty-owner-death"]},
+        ]:
+            with self.subTest(proof=replacement):
+                modified = copy.deepcopy(config)
+                next(item for item in modified["coverage"] if item["obligation"] == original["obligation"])["platform_assertions"] = replacement
+                with self.assertRaises(ValueError):
+                    runner.inventory(modified, "linux")
+
+    def test_macos_test_transcript_cannot_certify_a_linux_desktop_requirement(self):
+        suite = {"id": "desktop", "platforms": ["darwin"], "profiles": ["native-views"], "args": [],
+                 "assertions": [{"id": "desktop.exact", "tests": ["frame"]}]}
+        entry = {"id": "desktop.exact", "profiles": ["native-views"], "requirement": "required", "status": "pending", "suites": ["desktop"]}
+        config = {"profiles": {"native-views": {"platforms": ["linux", "darwin"]}}, "reference_revision": "baseline"}
+        with tempfile.NamedTemporaryFile() as executable:
+            executable.write(b"test identity")
+            executable.flush()
+            identity = {"path": executable.name, "sha256": runner.digest(executable.name)}
+            report = {"platform": "linux", "candidate_kind": "rust", "checkout_revision": "head", "reference_revision": "baseline",
+                      "manifest_sha256": runner.digest(runner.MANIFEST), "implementation_fingerprint": "sources",
+                      "reference": identity, "candidate": identity,
+                      "entries": [{**entry, "status": "pass", "observation_results": {"suite:desktop": "pass"}}],
+                      "suites": {"desktop": {"platform": "darwin", "status": 0, "reference": identity,
+                                             "stdout_base64": runner.b64(b"test frame ... ok\n")}}}
+            with patch.object(runner, "suites", return_value={"desktop": suite}), \
+                 patch.object(runner, "inventory", side_effect=lambda *_: [copy.deepcopy(entry)]), \
+                 patch.object(runner, "source_revision", return_value="head"), \
+                 patch.object(runner, "implementation_fingerprint", return_value="sources"), \
+                 patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                for forged_platform in ("darwin", "linux"):
+                    report["suites"]["desktop"]["platform"] = forged_platform
+                    problems = runner.blockers(report, "native-views", config)
+                    self.assertIn("desktop.exact: pending", problems)
+                    self.assertTrue(any("supported client execution" in item for item in problems))
+
+    def test_unsupported_suite_cannot_run_directly(self):
+        suite = {"id": "desktop", "platforms": ["darwin"], "args": [],
+                 "assertions": [{"id": "desktop.exact", "tests": ["frame"]}]}
+        with patch.object(runner.sys, "platform", "linux"), patch.object(runner, "run_suite_process") as run:
+            observations, details = runner.run_suite(suite, "/reference")
+        run.assert_not_called()
+        self.assertEqual(observations[0]["status"], "failure")
+        self.assertIn("requires execution", details["error"])
+
+    def test_linux_gate_requires_specific_gnu_host_identity(self):
+        config = {"profiles": {"unix-ipc": {"platforms": ["linux"]}}, "reference_revision": "baseline"}
+        host = {"platform": "linux", "architecture": "aarch64", "kernel": "test-kernel",
+                "distribution": {"ID": "ubuntu"}, "libc": ["glibc", "2.43"],
+                "rust_host_target": "aarch64-unknown-linux-gnu", "cargo_build_target": None}
+        with tempfile.NamedTemporaryFile() as executable:
+            executable.write(b"test identity")
+            executable.flush()
+            identity = {"path": executable.name, "sha256": runner.digest(executable.name)}
+            report = {"platform": "linux", "host": host, "candidate_kind": "rust", "checkout_revision": "head",
+                      "reference_revision": "baseline", "manifest_sha256": runner.digest(runner.MANIFEST),
+                      "implementation_fingerprint": "sources", "reference": identity, "candidate": identity, "entries": []}
+            with patch.object(runner, "suites", return_value={}), patch.object(runner, "inventory", return_value=[]), \
+                 patch.object(runner, "source_revision", return_value="head"), \
+                 patch.object(runner, "implementation_fingerprint", return_value="sources"), \
+                 patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                self.assertEqual(runner.blockers(report, "unix-ipc", config), [])
+                for changes, error in [
+                    ({"platform": "darwin"}, "host-platform identity"),
+                    ({"architecture": ""}, "distribution, kernel and architecture"),
+                    ({"distribution": {}}, "distribution, kernel and architecture"),
+                    ({"libc": ["musl", "1.2"]}, "GNU target and glibc"),
+                    ({"rust_host_target": None}, "GNU target and glibc"),
+                    ({"cargo_build_target": "x86_64-unknown-linux-gnu"}, "cross-compiled"),
+                ]:
+                    with self.subTest(changes=changes):
+                        modified = {**report, "host": {**host, **changes}}
+                        self.assertTrue(any(error in problem for problem in runner.blockers(modified, "unix-ipc", config)))
 
 
 class SuiteCleanupTests(unittest.TestCase):

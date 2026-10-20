@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 import subprocess
@@ -28,6 +29,7 @@ ROOT = HERE.parent.parent
 MANIFEST = HERE / "manifest.toml"
 SCOPE = HERE / "scope.json"
 RUSTTY_INTEGRATION = ROOT / "rust/integration/rustty"
+UNIX_PLATFORMS = ("darwin", "linux")
 
 
 def digest(path):
@@ -99,15 +101,63 @@ def suites():
                 raise ValueError(f"duplicate evidence suite: {identifier}")
             if not suite["assertions"] or any(not assertion["tests"] for assertion in suite["assertions"]):
                 raise ValueError(f"suite {identifier} needs exact named tests for every assertion")
+            allowed = suite.get("platforms", list(UNIX_PLATFORMS))
+            if not allowed or len(allowed) != len(set(allowed)) or set(allowed) - {"darwin", "linux", "win32"}:
+                raise ValueError(f"suite {identifier} has invalid execution platforms")
             found[identifier] = {**suite, "source": str(path.relative_to(ROOT))}
     return found
+
+
+def suite_platforms(suite):
+    return suite.get("platforms", list(UNIX_PLATFORMS))
+
+
+def select_suites(requested, host_platform):
+    """Keep unavailable executable obligations visible without running zero tests."""
+    available = suites()
+    selected = available if "all" in requested else {name: available[name] for name in requested}
+    runnable, blocked = {}, {}
+    for name, suite in selected.items():
+        if host_platform in suite_platforms(suite):
+            runnable[name] = suite
+        elif any(host_platform in assertion.get("platforms", [host_platform]) for assertion in suite["assertions"]):
+            blocked[name] = {"status": "blocked", "platform": host_platform,
+                             "execution_platforms": suite_platforms(suite), "completed_tests": {},
+                             "reason": "Required client execution is unavailable on this host; supported desktop/client evidence remains required."}
+        elif "all" not in requested:
+            raise ValueError(f"suite {name} does not apply to {host_platform}")
+    return runnable, blocked
+
+
+def host_identity():
+    def version(command):
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=5)
+            return {"argv": command, "status": result.returncode,
+                    "output": (result.stdout + result.stderr).decode("utf-8", "replace").strip()}
+        except (OSError, subprocess.SubprocessError) as error:
+            return {"argv": command, "error": str(error)}
+    rust = version(["rustc", "+1.95.0", "-vV"])
+    target = re.search(r"^host: (.+)$", rust.get("output", ""), re.MULTILINE)
+    distribution = {}
+    if sys.platform == "linux":
+        try:
+            distribution = platform.freedesktop_os_release()
+        except OSError:
+            pass
+    return {"platform": sys.platform, "architecture": platform.machine(), "kernel": platform.release(),
+            "distribution": distribution, "libc": list(platform.libc_ver()),
+            "rust": rust, "rust_host_target": target.group(1) if target else None,
+            "cargo_build_target": os.environ.get("CARGO_BUILD_TARGET"),
+            "python": {"executable": sys.executable, "version": sys.version},
+            "openssh_client": version(["ssh", "-V"]), "openssh_server": version(["/usr/sbin/sshd", "-V"])}
 
 
 def source_revision():
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
 
-def inventory(config=None):
+def inventory(config=None, host_platform=None):
     if generate_command_metadata.OUTPUT.read_text() != generate_command_metadata.generate():
         raise ValueError("C command metadata changed; regenerate and review metadata.rs and parity coverage")
     if generate_format_metadata.OUTPUT.read_text() != generate_format_metadata.generate():
@@ -115,6 +165,7 @@ def inventory(config=None):
     if generate_option_metadata.OUTPUT.read_text() != generate_option_metadata.generate():
         raise ValueError("C option metadata changed; regenerate and review options_metadata.rs and parity coverage")
     config = config or manifest()
+    host_platform = host_platform or sys.platform
     entries = []
     for assertion in config["assertions"]:
         entries.append({**assertion, "requirement": "required", "status": "pending"})
@@ -132,14 +183,21 @@ def inventory(config=None):
             identifier = assertion["id"]
             if identifier.startswith(("scope:", "review:", "outside:")):
                 raise ValueError("narrow suite evidence cannot certify a scope group or classification")
+            applicability = assertion.get("platforms")
+            if applicability is not None and (not applicability or set(applicability) - set(suite_platforms(suite))):
+                raise ValueError(f"assertion {identifier} has invalid applicability platforms")
             if identifier in by_id:
                 entry = by_id[identifier]
+                if entry.get("platforms") != applicability:
+                    raise ValueError(f"assertion {identifier} has inconsistent applicability platforms")
                 entry["profiles"] = sorted(set(entry["profiles"]) | set(suite["profiles"]))
                 entry.setdefault("description", assertion["description"])
                 entry.setdefault("suites", []).append(suite["id"])
             else:
                 entry = {"id": identifier, "profiles": suite["profiles"], "requirement": "required", "status": "pending",
                          "description": assertion["description"], "suites": [suite["id"]]}
+                if applicability is not None:
+                    entry["platforms"] = applicability
                 by_id[identifier] = entry
                 entries.append(entry)
     for exclusion in config["exclusions"]:
@@ -155,21 +213,37 @@ def inventory(config=None):
     for coverage in config.get("coverage", []):
         identifier = coverage["obligation"]
         proof = coverage.get("assertions", [])
+        platform_proofs = coverage.get("platform_assertions", {})
         if identifier not in obligations or identifier in covered:
             raise ValueError(f"unknown or duplicate coverage obligation: {identifier}")
         if by_id[identifier].get("suites") or by_id[identifier].get("scenario"):
             raise ValueError(f"coverage {identifier} already has direct evidence; split exact assertions before adding a proof")
         if not proof or len(proof) != len(set(proof)) or not coverage.get("rationale", "").strip():
             raise ValueError(f"coverage {identifier} needs distinct exact assertions and a review rationale")
-        for source in proof:
+        applicable = {target for profile in by_id[identifier]["profiles"] for target in config["profiles"][profile]["platforms"]}
+        if platform_proofs and set(platform_proofs) != applicable:
+            raise ValueError(f"coverage {identifier} needs an exact proof mapping for every applicable platform")
+        for target, additions in platform_proofs.items():
+            if not additions or len(proof + additions) != len(set(proof + additions)):
+                raise ValueError(f"coverage {identifier} has empty or duplicate {target} proof members")
+            for source in additions:
+                if target not in by_id.get(source, {}).get("platforms", [target]):
+                    raise ValueError(f"coverage {identifier} uses an inapplicable {target} proof: {source}")
+        all_sources = proof + [source for additions in platform_proofs.values() for source in additions]
+        for source in all_sources:
             entry = by_id.get(source, {})
             if source == identifier or source.startswith(("scope:", "review:", "outside:")) or not (entry.get("suites") or entry.get("scenario")):
                 raise ValueError(f"coverage {identifier} has no exact executable proof: {source}")
-        by_id[identifier]["proof"] = proof
+        by_id[identifier]["proof"] = proof + platform_proofs.get(host_platform, [])
+        if platform_proofs:
+            by_id[identifier]["platform_proofs"] = platform_proofs
         by_id[identifier]["coverage_review"] = coverage["rationale"]
         covered.add(identifier)
     if any(source in covered for identifier in covered for source in by_id[identifier]["proof"]):
         raise ValueError("coverage proofs must be executable assertions, not other derived obligations")
+    for entry in entries:
+        if host_platform not in entry.get("platforms", [host_platform]):
+            entry["status"] = "not-applicable"
     return entries
 
 
@@ -242,7 +316,7 @@ def apply_observations(entries, observations):
             raise ValueError(f"undeclared assertion: {identifier}")
         if identifier.startswith(("review:", "scope:")) or "proof" in by_id[identifier]:
             raise ValueError("classification requires scope review, not test evidence")
-        if by_id[identifier]["requirement"] != "required":
+        if by_id[identifier]["requirement"] != "required" or by_id[identifier]["status"] == "not-applicable":
             raise ValueError(f"cannot turn an exclusion into a passing assertion: {identifier}")
         results = by_id[identifier].setdefault("observation_results", {})
         source = observation["scenario"]
@@ -258,7 +332,7 @@ def derive_statuses(entries):
     by_id = {entry["id"]: entry for entry in entries}
     passing = {"pass", "intentional-difference"}
     for entry in entries:
-        if entry["requirement"] != "required" or entry["status"] == "deferred" or "proof" in entry:
+        if entry["requirement"] != "required" or entry["status"] in ("deferred", "not-applicable") or "proof" in entry:
             continue
         results = entry.get("observation_results", {})
         required = {"suite:" + suite for suite in entry.get("suites", [])}
@@ -631,6 +705,8 @@ def run_suite(suite, reference):
     env.update({key: str(reference) if value == "$reference" else value for key, value in suite.get("env", {}).items()})
     env["CARGO_TERM_COLOR"] = "never"
     try:
+        if sys.platform not in suite_platforms(suite):
+            raise ValueError(f"suite {suite['id']} requires execution on {suite_platforms(suite)}, not {sys.platform}")
         external = None
         if suite.get("kind") in ("rustty-cargo", "rustty-system-ssh", "rustty-desktop-smoke"):
             external = rustty_identity()
@@ -659,6 +735,7 @@ def run_suite(suite, reference):
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         observations, _ = suite_observations(suite, -1, "")
         details = {"argv": command, "status": -1, "error": str(error)}
+    details["platform"] = sys.platform
     return observations, details
 
 
@@ -674,8 +751,10 @@ def smoke(args):
     references = {"current": reference, "older": older}
     observations = []
     details = {}
-    suite_details = {}
-    selected = suites() if "all" in (args.suite or []) else {name: suites()[name] for name in args.suite or []}
+    selected, suite_details = select_suites(args.suite or [], sys.platform)
+    blocked_suites = list(suite_details)
+    for name in blocked_suites:
+        print(f"suite {name}: blocked ({suite_details[name]['reason']})", flush=True)
     if selected and args.candidate_kind != "rust":
         raise ValueError("Rust executable suites cannot be attached to C/C evidence")
     selected_references = {name: suite_reference(suite, references) for name, suite in selected.items()}
@@ -706,15 +785,15 @@ def smoke(args):
         if not passed:
             print(f"  reference: {left.get('error', left.get('observations'))}")
             print(f"  candidate: {right.get('error', right.get('observations'))}")
-    entries = apply_observations(inventory(config), observations)
+    entries = apply_observations(inventory(config, sys.platform), observations)
     changed = fingerprint != implementation_fingerprint()
     references_changed = any(identity and (not Path(identity["path"]).is_file() or digest(identity["path"]) != identity["sha256"]) for identity in references.values())
     report = {"schema_version": 2, "kind": "exact-assertion-evidence", "candidate_kind": args.candidate_kind,
               "checkout_revision": source_revision(), "reference_revision": config["reference_revision"], "manifest_sha256": digest(MANIFEST),
-              "implementation_fingerprint": fingerprint, "source_changed_during_run": changed, "platform": sys.platform, "platform_execution": config["platform_execution"],
+              "implementation_fingerprint": fingerprint, "source_changed_during_run": changed, "platform": sys.platform, "host": host_identity(), "platform_execution": config["platform_execution"],
               "reference": reference, "older_reference": older, "references_changed_during_run": references_changed,
               "candidate": candidate, "summary": counts(entries),
-              "entries": entries, "scenarios": details, "suites": suite_details, "profile_release_ready": False}
+              "entries": entries, "scenarios": details, "suites": suite_details, "blocked_suites": blocked_suites, "profile_release_ready": False}
     destination = Path(args.report)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, indent=2) + "\n")
@@ -724,7 +803,7 @@ def smoke(args):
         print("Source changed during evidence collection; rerun before using this report.")
     if references_changed:
         print("C reference changed during evidence collection; rerun before using this report.")
-    return 0 if observations and not changed and not references_changed and all(item["status"] == "pass" for item in observations) else 1
+    return 0 if observations and not blocked_suites and not changed and not references_changed and all(item["status"] == "pass" for item in observations) else 1
 
 
 def blockers(report, profile, config=None):
@@ -759,19 +838,39 @@ def blockers(report, profile, config=None):
         problems.append(f"{report.get('platform')} execution is user-deferred, not certified")
     if report.get("platform") not in config["profiles"][profile]["platforms"]:
         problems.append(f"report platform does not certify {profile}")
-    current_entries = inventory(config)
+    host = report.get("host", {})
+    if host.get("platform") != report.get("platform"):
+        problems.append("report lacks matching host-platform identity")
+    if report.get("platform") == "linux":
+        if not host.get("architecture") or not host.get("kernel") or not host.get("distribution", {}).get("ID"):
+            problems.append("GNU/Linux evidence requires distribution, kernel and architecture identity")
+        if (host.get("libc") or [None])[0] != "glibc" or not (host.get("rust_host_target") or "").endswith("-linux-gnu"):
+            problems.append("this Linux qualification requires an identified GNU target and glibc host")
+        if host.get("cargo_build_target") not in (None, host.get("rust_host_target")):
+            problems.append("cross-compiled test targets require separate executable qualification")
+    current_entries = inventory(config, report.get("platform"))
     evidence = {entry["id"]: entry for entry in report.get("entries", [])}
     for entry in current_entries:
         entry["observation_results"] = dict(evidence.get(entry["id"], {}).get("observation_results", {}))
-    required = {entry["id"] for entry in current_entries if profile in entry["profiles"] or "classification" in entry["profiles"]}
+    required = {entry["id"] for entry in current_entries if entry["status"] != "not-applicable" and
+                (profile in entry["profiles"] or "classification" in entry["profiles"])}
     required.update(source for entry in current_entries if entry["id"] in required for source in entry.get("proof", []))
     by_id = {entry["id"]: entry for entry in current_entries}
     references = {"current": report.get("reference"), "older": report.get("older_reference")}
     for suite in suites().values():
-        if not (suite.get("reference") or suite.get("reference_version")) or not any(assertion["id"] in required for assertion in suite["assertions"]):
+        if not any(assertion["id"] in required for assertion in suite["assertions"]):
             continue
         details = report.get("suites", {}).get(suite["id"], {})
+        if report.get("platform") not in suite_platforms(suite):
+            problems.append(f"{suite['id']}: requires supported client execution on {', '.join(suite_platforms(suite))}; "
+                            "a local or historical desktop result does not qualify this server host")
+            # In particular, copied macOS observations must not pass Linux gates.
+            for assertion in suite["assertions"]:
+                by_id[assertion["id"]]["observation_results"].pop("suite:" + suite["id"], None)
+            continue
         try:
+            if details.get("platform") != report.get("platform"):
+                raise ValueError(f"{suite['id']} lacks matching execution-platform evidence")
             expected = suite_reference(suite, references)
             if details.get("reference") != expected:
                 raise ValueError(f"{suite['id']} lacks matching executable reference evidence")
@@ -788,6 +887,8 @@ def blockers(report, profile, config=None):
     for entry in current_entries:
         identifier = entry["id"]
         if profile not in entry["profiles"] and "classification" not in entry["profiles"]:
+            continue
+        if entry["status"] == "not-applicable":
             continue
         if entry["requirement"] == "required" and entry["status"] not in ("pass", "intentional-difference"):
             problems.append(f"{identifier}: {entry['status'] if identifier in evidence else 'missing evidence'}")
