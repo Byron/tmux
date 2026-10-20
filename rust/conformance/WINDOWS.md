@@ -24,6 +24,21 @@ Unicode graph/path bytes are tested separately from installed
 font coverage; the native view fixture verifies CJK tab glyph support and retains
 rendered screenshots. Missing glyphs are not a full rendering pass.
 
+The runtime ConPTY startup regressions call the production `openpty` and
+`spawn_command` directly without creating a runtime pane or reaper. The pane's
+first test phase verifies its innermost kill-on-close Job contains only its own
+PID, then creates foreground and background descendants. Abrupt owner death
+must signal held pane, descendant and OpenConsole handles while the outer
+fixture Job remains open and an unrelated process stays alive. A separate test
+repeats complete invalid-PE `CreateProcessW` startup/close cycles, checks stable
+post-cleanup handle counts and held host exits, and successfully opens another
+pane. The owner's preexisting console remains alive until owner exit. Both the
+ConPTY and stdio launchers suppress blocking Windows startup dialogs only on the
+spawning thread, capture the native error before restoring that thread's policy,
+and leave process-wide policy unchanged. Failure and success regressions verify
+the caller's error modes. These bounded private tests remain exact names under
+`windows.atomic-spawn-job-ownership`.
+
 ## Collection
 
 Build both bundles after committing finished sources. Set

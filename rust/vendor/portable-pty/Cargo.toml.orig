@@ -32,6 +32,7 @@ winapi = { version = "0.3", features = [
     "winuser",
     "consoleapi",
     "handleapi",
+    "errhandlingapi",
     "fileapi",
     "namedpipeapi",
     "synchapi",

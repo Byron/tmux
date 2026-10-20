@@ -361,6 +361,11 @@ names reflect the pane's root process image, while terminal titles remain
 application-controlled. Live root-process cwd is read using the retained process
 handle; a dead or unreadable root yields no invented metadata or reused-PID data.
 
+ConPTY and stdio process creation suppress Windows startup-error dialogs on the
+calling thread, preserve the native launch error, and restore that thread's
+prior policy. A malformed executable therefore returns an error without blocking
+the owner or changing the embedding application's process-wide error policy.
+
 ### Session/window mapping
 
 Tmux has sessions, logical windows, and panes; a tmux window is not an OS window.

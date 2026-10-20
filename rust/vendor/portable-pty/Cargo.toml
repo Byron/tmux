@@ -111,6 +111,7 @@ features = [
     "winuser",
     "consoleapi",
     "handleapi",
+    "errhandlingapi",
     "fileapi",
     "namedpipeapi",
     "synchapi",

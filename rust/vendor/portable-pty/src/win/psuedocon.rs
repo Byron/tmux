@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::winerror::{HRESULT, S_OK};
+use winapi::um::errhandlingapi::{GetThreadErrorMode, SetThreadErrorMode};
 use winapi::um::handleapi::*;
 use winapi::um::jobapi2::{
     CreateJobObjectW, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
@@ -24,7 +25,8 @@ use winapi::um::libloaderapi::{
 };
 use winapi::um::processthreadsapi::*;
 use winapi::um::winbase::{
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, SEM_FAILCRITICALERRORS,
+    SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::{
@@ -40,6 +42,29 @@ pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
 #[allow(dead_code)]
 pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
+
+// Invalid executables must report a native startup error instead of opening a
+// modal system dialog. Alter only the spawning thread, preserving the GUI's
+// process-wide policy and the caller's thread policy on every return path.
+struct SpawnErrorMode(DWORD);
+
+impl SpawnErrorMode {
+    fn enter() -> std::io::Result<Self> {
+        let previous = unsafe { GetThreadErrorMode() };
+        let mode =
+            previous | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
+        if unsafe { SetThreadErrorMode(mode, ptr::null_mut()) } == 0 {
+            return Err(IoError::last_os_error());
+        }
+        Ok(Self(previous))
+    }
+}
+
+impl Drop for SpawnErrorMode {
+    fn drop(&mut self) {
+        unsafe { SetThreadErrorMode(self.0, ptr::null_mut()) };
+    }
+}
 
 shared_library!(ConPtyFuncs,
     pub fn CreatePseudoConsole(
@@ -287,24 +312,28 @@ impl PsuedoCon {
         let cwd = cmd.current_directory();
 
         let mut environment = cmd.environment_block()?;
-        let res = unsafe {
-            CreateProcessW(
-                exe.as_mut_slice().as_mut_ptr(),
-                cmdline.as_mut_slice().as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                environment.as_mut_slice().as_mut_ptr() as *mut _,
-                cwd.as_ref()
-                    .map(|c| c.as_slice().as_ptr())
-                    .unwrap_or(ptr::null()),
-                &mut si.StartupInfo,
-                &mut pi,
-            )
+        let error = {
+            let _error_mode = SpawnErrorMode::enter()?;
+            let res = unsafe {
+                CreateProcessW(
+                    exe.as_mut_slice().as_mut_ptr(),
+                    cmdline.as_mut_slice().as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                    environment.as_mut_slice().as_mut_ptr() as *mut _,
+                    cwd.as_ref()
+                        .map(|c| c.as_slice().as_ptr())
+                        .unwrap_or(ptr::null()),
+                    &mut si.StartupInfo,
+                    &mut pi,
+                )
+            };
+            // Restoration can change GetLastError; retain the launch error first.
+            (res == 0).then(IoError::last_os_error)
         };
-        if res == 0 {
-            let err = IoError::last_os_error();
+        if let Some(err) = error {
             let msg = format!(
                 "CreateProcessW `{:?}` in cwd `{:?}` failed: {}",
                 cmd_os,

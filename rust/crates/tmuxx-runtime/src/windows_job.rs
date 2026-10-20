@@ -1,5 +1,9 @@
 //! Windows processes enter their owning Job Object in CreateProcessW itself.
 //! No thread executes and no orphan window exists before job assignment.
+#[cfg(test)]
+#[path = "windows_job_conpty_tests.rs"]
+mod conpty_tests;
+
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -25,6 +29,30 @@ fn checked(value: BOOL) -> io::Result<()> {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+/// Suppress startup error dialogs only on this thread; preserve the GUI's
+/// process-wide policy and restore every existing caller flag afterward.
+struct SpawnErrorMode(u32);
+impl SpawnErrorMode {
+    fn enter() -> io::Result<Self> {
+        use windows_sys::Win32::System::Diagnostics::Debug::*;
+        let previous = unsafe { GetThreadErrorMode() };
+        checked(unsafe {
+            SetThreadErrorMode(
+                previous | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX,
+                null_mut(),
+            )
+        })?;
+        Ok(Self(previous))
+    }
+}
+impl Drop for SpawnErrorMode {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::SetThreadErrorMode(self.0, null_mut());
+        }
     }
 }
 
@@ -528,20 +556,25 @@ fn spawn_process(
     attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST as usize, &jobs)?;
     startup.lpAttributeList = attributes.ptr();
     let mut information: PROCESS_INFORMATION = unsafe { zeroed() };
-    checked(unsafe {
-        CreateProcessW(
-            executable.as_ptr(),
-            line.as_mut_ptr(),
-            null(),
-            null(),
-            1,
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
-            environment.map_or(null(), |env| env.as_ptr().cast()),
-            cwd.map_or(null(), |cwd| cwd.as_ptr()),
-            &startup.StartupInfo,
-            &mut information,
-        )
-    })?;
+    let result = {
+        let _error_mode = SpawnErrorMode::enter()?;
+        // Retain GetLastError before restoring the caller's thread error mode.
+        checked(unsafe {
+            CreateProcessW(
+                executable.as_ptr(),
+                line.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                environment.map_or(null(), |env| env.as_ptr().cast()),
+                cwd.map_or(null(), |cwd| cwd.as_ptr()),
+                &startup.StartupInfo,
+                &mut information,
+            )
+        })
+    };
+    result?;
     let process = unsafe { OwnedHandle::from_raw_handle(information.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(information.hThread) };
     drop(child_input);
@@ -601,6 +634,104 @@ mod tests {
     }
     fn ps_literal(text: &str) -> String {
         format!("'{}'", text.replace('\'', "''"))
+    }
+
+    #[test]
+    fn invalid_executable_returns_error_and_restores_thread_error_mode() {
+        use windows_sys::Win32::System::Diagnostics::Debug::*;
+        const NAME: &str =
+            "windows_job::tests::invalid_executable_returns_error_and_restores_thread_error_mode";
+        const ROLE: &str = "TMUXX_INVALID_STDIO_FIXTURE";
+        let args = std::env::args_os().collect::<Vec<_>>();
+        if let Some(position) = args.iter().position(|arg| arg == ROLE) {
+            let executable = Path::new(&args[position + 2]).join("invalid.exe");
+            let process_mode = unsafe { GetErrorMode() };
+            for mode in [0, SEM_NOOPENFILEERRORBOX, SEM_NOGPFAULTERRORBOX] {
+                checked(unsafe { SetThreadErrorMode(mode, null_mut()) }).unwrap();
+                let error = match spawn_owned_stdio(&executable, &[]) {
+                    Err(error) => error,
+                    Ok(mut child) => {
+                        child.kill().unwrap();
+                        child.wait().unwrap();
+                        panic!("malformed executable unexpectedly started");
+                    }
+                };
+                assert!(
+                    matches!(error.raw_os_error(), Some(193 | 216)),
+                    "unexpected native startup error: {error}"
+                );
+                assert_eq!(unsafe { GetThreadErrorMode() }, mode);
+                assert_eq!(unsafe { GetErrorMode() }, process_mode);
+                let mut success = spawn_owned_stdio(
+                    &std::env::current_exe().unwrap(),
+                    &[
+                        "--list".into(),
+                        "--exact".into(),
+                        "no_such_private_fixture_test".into(),
+                    ],
+                )
+                .unwrap();
+                assert_eq!(unsafe { GetThreadErrorMode() }, mode);
+                assert_eq!(unsafe { GetErrorMode() }, process_mode);
+                assert!(success.wait().unwrap().success());
+            }
+            return;
+        }
+
+        struct FixtureDirectory(std::path::PathBuf);
+        impl Drop for FixtureDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(self.0.join("invalid.exe"));
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = FixtureDirectory(std::env::temp_dir().join(format!(
+            "tmuxx-invalid-stdio-{}-{nonce}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+        std::fs::write(
+            directory.0.join("invalid.exe"),
+            b"private malformed PE fixture",
+        )
+        .unwrap();
+        let mut fixture = spawn_owned_stdio_piped_stderr(
+            &std::env::current_exe().unwrap(),
+            &[
+                "--exact".into(),
+                NAME.into(),
+                "--nocapture".into(),
+                "--skip".into(),
+                ROLE.into(),
+                "--skip".into(),
+                directory.0.as_os_str().to_owned(),
+            ],
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let completed = fixture.try_wait().unwrap();
+        // Keep this boundary alive throughout the assertion and always terminate
+        // the exact fixture job before inspecting any captured diagnostics.
+        fixture.kill().unwrap();
+        fixture.wait().unwrap();
+        let mut diagnostics = String::new();
+        fixture
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut diagnostics)
+            .unwrap();
+        assert!(
+            completed.is_some_and(|status| status.success()),
+            "invalid executable startup did not return successfully within five seconds: {diagnostics}"
+        );
     }
 
     #[test]
