@@ -8,5 +8,5 @@ license.workspace = true
 unicode-width = "0.2.2"
 tmuxx-command = { path = "../tmuxx-command" }
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(any(unix, windows))'.dependencies]
 libc = "0.2"

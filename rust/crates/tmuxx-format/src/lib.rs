@@ -4,9 +4,12 @@ mod color;
 mod fuzzy;
 #[cfg(unix)]
 mod locale;
+#[cfg(windows)]
+#[path = "windows_locale.rs"]
+mod locale;
 #[cfg(unix)]
 mod regex;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod time;
 mod width;
 
@@ -65,11 +68,11 @@ pub fn expand_time(
     input: &[u8],
     lookup: impl FnMut(&[u8]) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>, Error> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         expand(&time::expand(input, time::now()), lookup)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (input, lookup);
         Err(error(0, "time formatting requires a Unix platform"))
@@ -420,11 +423,11 @@ fn find_value(
                     && m.arguments.len() >= 2
             })
             .map(|m| m.arguments[1].as_slice());
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             value = time::format(&value, &flags, template);
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (flags, template);
             value.clear();
@@ -547,7 +550,7 @@ fn compound(
     if modifiers.iter().any(|m| m.name == b"E") {
         value = expand_inner(&value, lookup, depth, base, no_jobs)?;
     } else if modifiers.iter().any(|m| m.name == b"T") {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             value = expand_inner(
                 &time::expand(&value, time::now()),
@@ -557,7 +560,7 @@ fn compound(
                 no_jobs,
             )?;
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         return Err(error(base, "time formatting requires a Unix platform"));
     }
     for modifier in modifiers
@@ -783,11 +786,18 @@ fn arithmetic(args: &[Vec<u8>], values: &[Vec<u8>]) -> Vec<u8> {
         };
         #[cfg(not(unix))]
         let n = {
-            let s = std::str::from_utf8(v).ok()?;
-            if s.is_empty() {
-                0.0
-            } else {
-                s.trim_start().parse().ok()?
+            #[cfg(windows)]
+            {
+                locale::number(v)?
+            }
+            #[cfg(not(windows))]
+            {
+                let s = std::str::from_utf8(v).ok()?;
+                if s.is_empty() {
+                    0.0
+                } else {
+                    s.trim_start().parse().ok()?
+                }
             }
         };
         if floating { Some(n) } else { integer(n) }
@@ -836,7 +846,11 @@ fn arithmetic(args: &[Vec<u8>], values: &[Vec<u8>]) -> Vec<u8> {
         output.truncate(length as usize);
         output
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        locale::number_text(result, precision).unwrap_or_default()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let precision = if precision < 0 { 6 } else { precision as usize };
         format!("{result:.precision$}").into_bytes()
