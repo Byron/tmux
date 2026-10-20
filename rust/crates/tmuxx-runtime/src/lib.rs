@@ -97,6 +97,7 @@ enum Event {
     },
     Connect {
         files: bool,
+        stdin_files: bool,
         id: u64,
         tx: SyncSender<ServerMessage>,
         context: Box<ClientContext>,
@@ -215,6 +216,7 @@ impl ServerHandle {
         self.tx
             .send(Event::Connect {
                 files: false,
+                stdin_files: false,
                 id,
                 tx,
                 context: Box::new(context),
@@ -742,6 +744,14 @@ pub fn command_argv(commands: &[tmuxx_command::Command]) -> Vec<Vec<u8>> {
 
 /// Negotiate a native connection before sending any requests.
 pub fn native_handshake(stream: &mut (impl Read + Write)) -> io::Result<Hello> {
+    native_handshake_with_file_stdin(stream, false)
+}
+
+/// Opt into command-driven, bounded stdin transfers for source-file/load-buffer.
+pub fn native_handshake_with_file_stdin(
+    stream: &mut (impl Read + Write),
+    stdin_file_stream: bool,
+) -> io::Result<Hello> {
     let cwd = std::env::current_dir()?
         .into_os_string()
         .into_string()
@@ -764,15 +774,19 @@ pub fn native_handshake(stream: &mut (impl Read + Write)) -> io::Result<Hello> {
             ))
         })
         .collect::<io::Result<_>>()?;
+    let mut output = io::BufWriter::new(&mut *stream);
     serde_json::to_writer(
-        &mut *stream,
+        &mut output,
         &Hello {
             cwd: Some(cwd),
             environment,
+            stdin_file_stream,
             ..Hello::default()
         },
     )?;
-    stream.write_all(b"\n")?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    drop(output);
     let hello = read_record(&mut BufReader::new(stream), 1024)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -849,14 +863,18 @@ fn serve_connection(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     #[cfg(windows)]
     let (client_pid, client_sid, client_user) = reader.get_ref().verify_client()?;
+    let mut handshake = io::BufWriter::new(&mut output);
     serde_json::to_writer(
-        &mut output,
+        &mut handshake,
         &Hello {
             instance_id: instance_id.clone(),
+            stdin_file_stream: true,
             ..Hello::default()
         },
     )?;
-    output.write_all(b"\n")?;
+    handshake.write_all(b"\n")?;
+    handshake.flush()?;
+    drop(handshake);
     if hello.version != VERSION {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -899,6 +917,7 @@ fn serve_connection(
     let delivery_bytes = Arc::new(AtomicUsize::new(0));
     tx.send(Event::Connect {
         files: false,
+        stdin_files: hello.stdin_file_stream,
         id,
         tx: out_tx,
         context: Box::new(context),
@@ -907,6 +926,7 @@ fn serve_connection(
     .map_err(|_| io::Error::other("server stopped"))?;
     let writer_tx = tx.clone();
     let writer = thread::spawn(move || {
+        let mut output = io::BufWriter::new(output);
         for message in out_rx {
             let bytes = control::message_bytes(&message);
             let _ = delivery_bytes.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -947,14 +967,14 @@ fn serve_connection(
                     .map_err(io::Error::from)
                     .and_then(|_| output.write_all(b"\n"))
             };
-            if result.is_err() {
+            if result.and_then(|_| output.flush()).is_err() {
                 break;
             }
             if matches!(message, ServerMessage::Snapshot { .. }) {
                 let _ = writer_tx.send(Event::SnapshotSent(id));
             }
         }
-        let _ = output.shutdown(Shutdown::Both);
+        let _ = output.get_ref().shutdown(Shutdown::Both);
     });
     let result = (|| {
         while let Some(line) = read_record(&mut reader, MAX_REQUEST_BYTES)? {
@@ -1210,6 +1230,7 @@ impl Host {
                 }
                 Event::Connect {
                     files,
+                    stdin_files,
                     id,
                     tx,
                     context,
@@ -1217,6 +1238,9 @@ impl Host {
                 } => {
                     if files {
                         self.file_clients.insert(id);
+                    }
+                    if stdin_files {
+                        self.scheduler.enable_stdin_files(id);
                     }
                     let mut context = *context;
                     if context.cwd.is_none() {

@@ -146,6 +146,9 @@ impl Host {
         request_id: u64,
         data: Result<Option<Vec<u8>>, String>,
     ) -> Result<(), String> {
+        if self.scheduler_has_file_stdin(id) {
+            return self.file_stdin_chunk(id, request_id, data).unwrap();
+        }
         let stream = self
             .stdin_streams
             .get(&id)

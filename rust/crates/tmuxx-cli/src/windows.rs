@@ -103,9 +103,16 @@ pub(super) fn native_stdin(
                 subscribe: false,
                 control: false,
             };
-            if serde_json::to_writer(&mut output, &request).is_err()
-                || output.write_all(b"\n").is_err()
-            {
+            // A named-pipe write allocates an OVERLAPPED event and enters the
+            // kernel. Serializing each JSON token directly to it makes a
+            // 64 KiB stdin chunk take hundreds of thousands of tiny writes.
+            // The chunk already has a fixed bound; assemble exactly one
+            // newline-delimited record and keep the existing ACK barrier.
+            let Ok(mut record) = serde_json::to_vec(&request) else {
+                break;
+            };
+            record.push(b'\n');
+            if output.write_all(&record).is_err() {
                 break;
             }
             loop {

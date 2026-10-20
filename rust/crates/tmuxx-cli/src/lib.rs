@@ -344,14 +344,14 @@ fn run(mut cli: Cli) -> io::Result<()> {
     #[cfg(windows)]
     {
         let mut stream = tmuxx_runtime::windows::connect(&endpoint)?;
-        let hello = tmuxx_runtime::native_handshake(&mut stream)?;
+        let hello = tmuxx_runtime::native_handshake_with_file_stdin(&mut stream, cli.control == 0)?;
         if cli.control > 0 && !hello.control_commands {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "server does not support control command framing",
             ));
         }
-        native_client(cli, stream)
+        native_client(cli, stream, hello.stdin_file_stream)
     }
     #[cfg(not(any(unix, windows)))]
     Err(io::Error::new(
@@ -394,14 +394,14 @@ fn copy_bridge_bytes(input: &mut impl io::Read, output: &mut impl io::Write) -> 
 #[cfg(unix)]
 fn run_unix(cli: Cli, endpoint: PathBuf) -> io::Result<()> {
     let mut stream = connect_or_start(&cli, &endpoint, None)?;
-    let hello = tmuxx_runtime::native_handshake(&mut stream)?;
+    let hello = tmuxx_runtime::native_handshake_with_file_stdin(&mut stream, cli.control == 0)?;
     if cli.control > 0 && !hello.control_commands {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "native server does not support control command framing; use its tmux command socket",
         ));
     }
-    native_client(cli, stream)
+    native_client(cli, stream, hello.stdin_file_stream)
 }
 
 #[cfg(unix)]
@@ -532,7 +532,7 @@ fn server_command(
 }
 
 #[cfg(any(unix, windows))]
-fn native_client(cli: Cli, mut stream: NativeStream) -> io::Result<()> {
+fn native_client(cli: Cli, mut stream: NativeStream, stdin_file_stream: bool) -> io::Result<()> {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
     #[cfg(unix)]
@@ -558,7 +558,10 @@ fn native_client(cli: Cli, mut stream: NativeStream) -> io::Result<()> {
     }
     let request = Request {
         request_id: 1,
-        stdin: if cli.control == 0 && tmuxx_runtime::command_reads_stdin(&argv) {
+        stdin: if cli.control == 0
+            && !stdin_file_stream
+            && tmuxx_runtime::command_reads_stdin(&argv)
+        {
             use std::io::Read;
             let mut bytes = Vec::new();
             io::stdin()
@@ -578,9 +581,10 @@ fn native_client(cli: Cli, mut stream: NativeStream) -> io::Result<()> {
         subscribe: cli.control > 0 || cli.snapshot,
         control: cli.control > 0,
     };
+    let mut output = io::BufWriter::new(&mut stream);
     if cli.control > 0 {
         serde_json::to_writer(
-            &mut stream,
+            &mut output,
             &tmuxx_protocol::native::ClientMessage::Control(
                 tmuxx_protocol::native::ControlRequest {
                     request_id: request.request_id,
@@ -591,9 +595,11 @@ fn native_client(cli: Cli, mut stream: NativeStream) -> io::Result<()> {
             ),
         )?;
     } else {
-        serde_json::to_writer(&mut stream, &request)?;
+        serde_json::to_writer(&mut output, &request)?;
     }
-    stream.write_all(b"\n")?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    drop(output);
     let (completion_tx, completion_rx) = std::sync::mpsc::sync_channel(1);
     if cli.control > 0 {
         let mut input = stream.try_clone()?;
@@ -619,8 +625,10 @@ fn native_client(cli: Cli, mut stream: NativeStream) -> io::Result<()> {
                             },
                         );
                         id += 1;
-                        if serde_json::to_writer(&mut input, &request).is_err()
-                            || input.write_all(b"\n").is_err()
+                        let mut output = io::BufWriter::new(&mut input);
+                        if serde_json::to_writer(&mut output, &request).is_err()
+                            || output.write_all(b"\n").is_err()
+                            || output.flush().is_err()
                         {
                             return;
                         }
@@ -662,10 +670,26 @@ fn native_client(cli: Cli, mut stream: NativeStream) -> io::Result<()> {
             continue;
         };
         match message {
-            ServerMessage::File { .. } => {
-                return Err(io::Error::other(
-                    "unexpected Unix file transfer on native endpoint",
-                ));
+            ServerMessage::File {
+                request_id,
+                path,
+                data,
+                append,
+            } => {
+                if !stdin_file_stream
+                    || path != b"-"
+                    || data.is_some()
+                    || append
+                    || cli.control != 0
+                {
+                    return Err(io::Error::other(
+                        "unexpected file transfer on native endpoint",
+                    ));
+                }
+                #[cfg(unix)]
+                native_stdin(&mut reader, request_id, &mut deferred, &mut snapshots)?;
+                #[cfg(windows)]
+                windows::native_stdin(&mut reader, request_id, &mut deferred, &mut snapshots)?;
             }
             ServerMessage::Stdin { request_id, .. } => {
                 #[cfg(unix)]
@@ -839,8 +863,10 @@ fn native_stdin(
             subscribe: false,
             control: false,
         };
-        serde_json::to_writer(reader.get_mut(), &request)?;
-        reader.get_mut().write_all(b"\n")?;
+        let mut output = io::BufWriter::new(reader.get_mut());
+        serde_json::to_writer(&mut output, &request)?;
+        output.write_all(b"\n")?;
+        output.flush()?;
         pending = Some(next_id);
         next_id -= 1;
     }

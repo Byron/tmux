@@ -83,6 +83,7 @@ pub(super) fn serve(stream: UnixStream, id: u64, tx: SyncSender<Event>) -> io::R
         }
     }
     tx.send(Event::Connect {
+        stdin_files: false,
         files: true,
         id,
         tx: out_tx,

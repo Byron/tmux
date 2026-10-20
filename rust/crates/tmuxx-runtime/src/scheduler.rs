@@ -15,6 +15,10 @@ const MAX_COMMANDS: usize = 16384;
 pub(super) struct Scheduler {
     queues: BTreeMap<u64, Queue>,
     files: BTreeMap<u64, (u64, u64, PendingFile)>,
+    stdin_clients: BTreeSet<u64>,
+    stdin_consumed: BTreeSet<u64>,
+    stdin_files: BTreeMap<u64, FileInput>,
+    stdin_errors: BTreeMap<u64, (u64, String)>,
     ready: VecDeque<u64>,
     channels: BTreeMap<Vec<u8>, Channel>,
     event_waiters: BTreeMap<u64, EventWaiter>,
@@ -29,6 +33,12 @@ struct Queue {
     pending: VecDeque<Batch>,
     blocked: bool,
     bytes: usize,
+}
+
+struct FileInput {
+    request_id: u64,
+    bytes: Vec<u8>,
+    error: Option<String>,
 }
 fn command_size<'a>(commands: impl Iterator<Item = &'a Command>) -> usize {
     commands
@@ -235,6 +245,9 @@ enum Step {
 }
 
 impl Scheduler {
+    pub(super) fn enable_stdin_files(&mut self, id: u64) {
+        self.stdin_clients.insert(id);
+    }
     pub(super) fn job_summaries(&self) -> impl Iterator<Item = (u64, &[u8], &'static str)> {
         self.jobs.iter().map(|(id, job)| {
             (
@@ -298,6 +311,10 @@ impl Scheduler {
     pub(super) fn lost(&mut self, id: u64) {
         self.queues.remove(&id);
         self.files.remove(&id);
+        self.stdin_clients.remove(&id);
+        self.stdin_consumed.remove(&id);
+        self.stdin_files.remove(&id);
+        self.stdin_errors.remove(&id);
         self.ready.retain(|other| *other != id);
         self.internal.remove(&id);
         self.event_waiters.remove(&id);
@@ -316,6 +333,70 @@ impl Scheduler {
 }
 
 impl Host {
+    pub(super) fn scheduler_has_file_stdin(&self, id: u64) -> bool {
+        self.scheduler.stdin_files.contains_key(&id)
+    }
+
+    fn send_file_request(&mut self, id: u64, request_id: u64, pending: &PendingFile) {
+        if self.scheduler.stdin_clients.contains(&id) {
+            if !self.scheduler.stdin_consumed.insert(id) {
+                // Complete the asynchronous file callback after the active queue
+                // has been restored, retaining C's continuation-after-EBADF rule.
+                self.scheduler
+                    .stdin_errors
+                    .insert(id, (request_id, "Bad file descriptor: -".into()));
+                return;
+            }
+            self.scheduler.stdin_files.insert(
+                id,
+                FileInput {
+                    request_id,
+                    bytes: Vec::new(),
+                    error: None,
+                },
+            );
+        }
+        self.send(id, pending.message(request_id));
+    }
+
+    pub(super) fn file_stdin_chunk(
+        &mut self,
+        id: u64,
+        request_id: u64,
+        data: Result<Option<Vec<u8>>, String>,
+    ) -> Option<Result<(), String>> {
+        let stream = self.scheduler.stdin_files.get_mut(&id)?;
+        if stream.request_id != request_id {
+            return Some(Err("no pending stdin request".into()));
+        }
+        match data {
+            Ok(Some(bytes)) if bytes.len() > 65536 => {
+                return Some(Err("stdin chunk exceeds limit".into()));
+            }
+            Ok(Some(bytes)) => {
+                if stream.error.is_none() {
+                    if stream.bytes.len().saturating_add(bytes.len()) > MAX_REQUEST_BYTES {
+                        stream.bytes.clear();
+                        stream.error = Some("file input exceeds limit: -".into());
+                    } else {
+                        stream.bytes.extend(bytes);
+                    }
+                }
+                // After overflow keep draining acknowledged chunks until EOF.
+                // This bounds memory and lets the producer close its pipe.
+            }
+            Ok(None) | Err(_) => {
+                let stream = self.scheduler.stdin_files.remove(&id).unwrap();
+                let result = match data {
+                    Err(error) => Err(error),
+                    _ => stream.error.map_or(Ok(stream.bytes), Err),
+                };
+                self.file_complete(id, request_id, result);
+            }
+        }
+        Some(Ok(()))
+    }
+
     pub(super) fn file_complete(
         &mut self,
         id: u64,
@@ -338,6 +419,7 @@ impl Host {
                         self.collect_source(&mut source, &data, "-")
                     }
                     Ok(_) => Err("configuration exceeds size limit".into()),
+                    Err(error) if error.starts_with("file input exceeds limit:") => Err(error),
                     Err(error) => {
                         source.error(error);
                         Ok(())
@@ -346,7 +428,7 @@ impl Host {
                 .and_then(|()| self.continue_source(id, source));
                 match result {
                     Ok(Step::File(pending)) => {
-                        self.send(id, pending.message(request_id));
+                        self.send_file_request(id, request_id, &pending);
                         self.scheduler
                             .files
                             .insert(id, (request_id, group, pending));
@@ -673,8 +755,13 @@ impl Host {
     }
 
     pub(super) fn scheduled_work(&mut self) -> bool {
+        let errors = std::mem::take(&mut self.scheduler.stdin_errors);
+        let completed_files = !errors.is_empty();
+        for (id, (request_id, error)) in errors {
+            self.file_complete(id, request_id, Err(error));
+        }
         let Some(id) = self.scheduler.ready.pop_front() else {
-            return false;
+            return completed_files;
         };
         self.drive(id);
         true
@@ -868,7 +955,7 @@ impl Host {
                             batch.output.append(&mut source.control_output);
                             late_output.append(&mut source.deferred_output);
                         }
-                        self.send(id, pending.message(batch.request_id));
+                        self.send_file_request(id, batch.request_id, &pending);
                         self.scheduler
                             .files
                             .insert(id, (batch.request_id, item.group, pending));
@@ -1324,7 +1411,13 @@ impl Host {
                             .join(os_string(path).map_err(|error| error.to_string())?),
                     )?;
                 }
-                if self.file_clients.contains(&id) {
+                if self.file_clients.contains(&id)
+                    || (self.scheduler.stdin_clients.contains(&id)
+                        && !context.control
+                        && !context.attached
+                        && self.request_stdin.is_none()
+                        && matches!(&effect, Effect::LoadBuffer { path, .. } if path == b"-"))
+                {
                     return Ok(Step::File(PendingFile::Buffer(effect)));
                 }
                 if self
@@ -1394,7 +1487,9 @@ impl Host {
                     source.error("Bad file descriptor: -".into());
                 } else if let Some(input) = self.request_stdin.take() {
                     self.collect_source(&mut source, &input, "-")?;
-                } else if self.file_clients.contains(&id) {
+                } else if self.file_clients.contains(&id)
+                    || self.scheduler.stdin_clients.contains(&id)
+                {
                     return Ok(Step::File(PendingFile::Source(source)));
                 } else {
                     source.error("Bad file descriptor: -".into());
@@ -2853,6 +2948,202 @@ pub(super) fn suitable_shell(value: &[u8]) -> bool {
             .is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("com")
             })
+}
+
+#[cfg(test)]
+mod file_stdin_tests {
+    use super::*;
+
+    fn host() -> (Host, Receiver<ServerMessage>) {
+        let (events, _) = mpsc::sync_channel(1);
+        let mut host = Host::new(events, &Options::new("unused-file-stdin"), BTreeMap::new());
+        let (tx, rx) = mpsc::sync_channel(64);
+        host.clients.insert(
+            1,
+            Client {
+                tx,
+                context: ClientContext::default(),
+                subscribed: false,
+                control: false,
+                delivery_bytes: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        host.scheduler.enable_stdin_files(1);
+        (host, rx)
+    }
+    fn run(host: &mut Host, id: u64, arguments: &[&str]) {
+        host.request(
+            1,
+            Request {
+                request_id: id,
+                argv: arguments
+                    .iter()
+                    .map(|arg| arg.as_bytes().to_vec())
+                    .collect(),
+                stdin: None,
+                subscribe: false,
+                control: false,
+            },
+        );
+        drive(host);
+    }
+    fn drive(host: &mut Host) {
+        for _ in 0..1024 {
+            if !host.scheduled_work() {
+                return;
+            }
+        }
+        panic!("stdin file queue failed to quiesce");
+    }
+    fn requested(rx: &Receiver<ServerMessage>, request: u64) {
+        assert!(rx.try_iter().any(|message|matches!(message,ServerMessage::File { request_id,path,data:None,append:false } if request_id==request && path==b"-")));
+    }
+    #[test]
+    fn source_stdin_runs_prefix_once_and_resumes_only_on_owned_eof() {
+        let (mut host, rx) = host();
+        run(
+            &mut host,
+            7,
+            &[
+                "set",
+                "-ag",
+                "@prefix",
+                "x",
+                ";",
+                "source-file",
+                "-",
+                "-",
+                ";",
+                "set",
+                "-g",
+                "@suffix",
+                "after",
+            ],
+        );
+        requested(&rx, 7);
+        assert_eq!(host.engine.options["@prefix"], "x");
+        assert!(!host.engine.options.contains_key("@suffix"));
+        assert!(
+            host.stdin_chunk(2, 7, Ok(Some(b"set -g @body forged".to_vec())))
+                .is_err()
+        );
+        assert!(
+            host.stdin_chunk(1, 8, Ok(Some(b"set -g @body forged".to_vec())))
+                .is_err()
+        );
+        assert!(host.stdin_chunk(1, 7, Ok(Some(vec![0; 65537]))).is_err());
+        for chunk in [b"set -g @body ".as_slice(), b"complete\n"] {
+            host.stdin_chunk(1, 7, Ok(Some(chunk.to_vec()))).unwrap();
+            drive(&mut host);
+            assert!(!host.engine.options.contains_key("@body"));
+            assert_eq!(host.engine.options["@prefix"], "x");
+        }
+        host.stdin_chunk(1, 7, Ok(None)).unwrap();
+        drive(&mut host);
+        assert_eq!(host.engine.options["@body"], "complete");
+        assert_eq!(host.engine.options["@prefix"], "x");
+        assert_eq!(host.engine.options["@suffix"], "after");
+        let messages = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, ServerMessage::File { .. })),
+            "repeated stdin was requested again"
+        );
+        assert!(messages.iter().any(|m|matches!(m,ServerMessage::Reply(reply) if reply.request_id==7 && reply.error.as_deref()==Some("Bad file descriptor: -"))));
+        assert!(host.stdin_chunk(1, 7, Ok(None)).is_err());
+        assert_eq!(host.engine.options["@prefix"], "x");
+    }
+    #[test]
+    fn buffer_stdin_preserves_every_byte_and_repeated_reads_keep_callback_order() {
+        let (mut host, rx) = host();
+        run(
+            &mut host,
+            8,
+            &[
+                "load-buffer",
+                "-b",
+                "binary",
+                "-",
+                ";",
+                "show-buffer",
+                "-b",
+                "binary",
+            ],
+        );
+        requested(&rx, 8);
+        let bytes = (0..=255u8).collect::<Vec<_>>();
+        for chunk in bytes.chunks(17) {
+            host.stdin_chunk(1, 8, Ok(Some(chunk.to_vec()))).unwrap();
+        }
+        host.stdin_chunk(1, 8, Ok(None)).unwrap();
+        drive(&mut host);
+        assert!(rx.try_iter().any(|m|matches!(m,ServerMessage::Reply(reply) if reply.request_id==8 && reply.error.is_none() && reply.output==bytes)));
+        run(
+            &mut host,
+            9,
+            &[
+                "load-buffer",
+                "-b",
+                "second",
+                "-",
+                ";",
+                "set",
+                "-g",
+                "@after-ebadf",
+                "ran",
+            ],
+        );
+        assert_eq!(host.engine.options["@after-ebadf"], "ran");
+        let messages = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, ServerMessage::File { .. }))
+        );
+        assert!(messages.iter().any(|m|matches!(m,ServerMessage::Reply(reply) if reply.request_id==9 && reply.error.as_deref()==Some("Bad file descriptor: -"))));
+    }
+    #[test]
+    fn stdin_overflow_drains_bounded_bytes_and_disconnect_discards_uncommitted_source() {
+        let (mut host, rx) = host();
+        run(
+            &mut host,
+            10,
+            &["source-file", "-", ";", "set", "-g", "@cancelled", "bad"],
+        );
+        requested(&rx, 10);
+        let mut first = b"set -g @poison bad\n#".to_vec();
+        first.resize(65536, b'x');
+        host.stdin_chunk(1, 10, Ok(Some(first))).unwrap();
+        for _ in 0..MAX_REQUEST_BYTES / 65536 {
+            host.stdin_chunk(1, 10, Ok(Some(vec![b'x'; 65536])))
+                .unwrap();
+            assert!(host.scheduler.stdin_files[&1].bytes.len() <= MAX_REQUEST_BYTES);
+        }
+        assert!(host.scheduler.stdin_files[&1].bytes.is_empty());
+        assert!(host.scheduler.stdin_files[&1].error.is_some());
+        host.stdin_chunk(1, 10, Ok(Some(vec![0; 65536]))).unwrap();
+        host.stdin_chunk(1, 10, Ok(None)).unwrap();
+        drive(&mut host);
+        assert!(!host.engine.options.contains_key("@poison"));
+        assert!(!host.engine.options.contains_key("@cancelled"));
+        assert!(rx.try_iter().any(|m|matches!(m,ServerMessage::Reply(reply) if reply.request_id==10 && reply.error.as_deref()==Some("file input exceeds limit: -"))));
+        // A fresh connection owns a fresh stdin resource; disconnect cannot
+        // complete partially accumulated configuration or retain its allocation.
+        let (mut fresh, fresh_rx) = self::host();
+        run(&mut fresh, 11, &["source-file", "-"]);
+        requested(&fresh_rx, 11);
+        fresh
+            .stdin_chunk(1, 11, Ok(Some(b"set -g @disconnected bad\n".to_vec())))
+            .unwrap();
+        fresh.disconnect(1);
+        drive(&mut fresh);
+        assert!(fresh.scheduler.stdin_files.is_empty());
+        assert!(fresh.scheduler.stdin_consumed.is_empty());
+        assert!(fresh.scheduler.stdin_clients.is_empty());
+        assert!(fresh.scheduler.files.is_empty());
+        assert!(!fresh.engine.options.contains_key("@disconnected"));
+    }
 }
 
 #[cfg(test)]

@@ -33,6 +33,10 @@ pub struct Hello {
     /// Tagged control requests preserve source blocks and per-command guards.
     #[serde(default)]
     pub control_commands: bool,
+    /// Opt into bounded source/buffer stdin file requests. Omission preserves
+    /// the original inline Request.stdin behavior for existing native clients.
+    #[serde(default)]
+    pub stdin_file_stream: bool,
 }
 
 impl Default for Hello {
@@ -46,6 +50,7 @@ impl Default for Hello {
             host_effects: false,
             snapshot_stream: true,
             control_commands: true,
+            stdin_file_stream: false,
         }
     }
 }
@@ -55,7 +60,8 @@ pub struct Request {
     pub request_id: u64,
     pub argv: Vec<Vec<u8>>,
     /// File input for a command such as `load-buffer -`, including arbitrary bytes.
-    /// Reply to `ServerMessage::Stdin` with argv `["tmuxx-stdin", original_id]`;
+    /// Reply to `ServerMessage::Stdin`, or a negotiated stdin-only `File`, with
+    /// argv `["tmuxx-stdin", original_id]`;
     /// use a fresh request ID, at most 65536 bytes per chunk, and None for EOF.
     /// Each chunk receives a Reply acknowledgement before the next is sent.
     #[serde(default)]
@@ -100,8 +106,9 @@ pub struct Response {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    /// Internal Unix adapter transfer, issued after command validation and expansion.
-    /// Native endpoints never emit this message.
+    /// File transfer issued after command validation and expansion. The Unix
+    /// adapter supports its ordinary file protocol. Native endpoints emit only
+    /// stdin reads (path "-", no data, no append) after stdin_file_stream opt-in.
     File {
         request_id: u64,
         path: Vec<u8>,
@@ -198,5 +205,20 @@ mod tests {
         assert!(!request.subscribe);
         assert!(!request.control);
         assert_eq!(request.argv, [vec![255]]);
+    }
+
+    #[test]
+    fn stdin_file_stream_requires_an_explicit_peer_capability() {
+        let legacy: Hello = serde_json::from_str(r#"{"version":1}"#).unwrap();
+        assert!(!legacy.stdin_file_stream);
+        assert!(!Hello::default().stdin_file_stream);
+        let negotiated: Hello =
+            serde_json::from_str(r#"{"version":1,"stdin_file_stream":true}"#).unwrap();
+        assert!(negotiated.stdin_file_stream);
+        assert!(
+            serde_json::from_slice::<Hello>(&serde_json::to_vec(&negotiated).unwrap())
+                .unwrap()
+                .stdin_file_stream
+        );
     }
 }
