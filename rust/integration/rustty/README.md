@@ -5,6 +5,18 @@
 and every original/result file SHA-256. The patch changes Rust sources,
 Cargo metadata, Windows packaging and the Rustty README; no Zig production sources.
 
+The integration also carries Rustty commit
+[`8ac4798bccc54d3916d829ea15e538842c28c251`](https://github.com/byron/ghostty/commit/8ac4798bccc54d3916d829ea15e538842c28c251),
+the companion to tmuxx resize fix `edb75876d80425ed2f69e82096366a4089a26312`.
+Older running owners can retain capture lengths wider than a shrunken row or
+obsolete row IDs in an unknown capture cache. The adapter caps those used lengths
+to the retained row widths and discards unknown-cache orphans before strict
+snapshot restoration, allowing existing panes to reconnect without restarting
+their processes. Tuple, unsigned-integer, duplicate-ID and allocation checks
+remain mandatory, and orphan rows in known capture metadata are still rejected.
+This change is applied on top of the recorded `cb67824` integration base; the
+other Windows integration changes and dependency layout are preserved.
+
 The backend supports app-owned tmuxx, existing native Unix endpoints, native
 stdio over SSH, Windows per-user named pipes, and system C tmux over SSH. The
 `rustty tmux` driver dispatches the shared tmuxx CLI before GUI/PTY initialization,
@@ -72,7 +84,7 @@ checkout, using Rust 1.95.0:
 
 - `cargo +1.95.0 check --locked --offline -p rustty-app`.
 - `cargo +1.95.0 test --locked --offline -p rustty --features sessions --lib tmuxx::tests:: -- --test-threads=1`:
-  18 current tests: embedded/local shared panes and independent selection; focused host
+  21 current tests: embedded/local shared panes and independent selection; focused host
   action election/no snapshot replay/clipboard event-ID replies; exit17/respawn
   with a new PID and selection reset; synchronized per-pane Up/paste encodings
   without mouse/reply broadcast; focus aggregation across views/connections,
@@ -85,7 +97,9 @@ checkout, using Rust 1.95.0:
   status across late views, fragmentation, respawn and reattachment; malformed
   snapshot preservation; slow-view status reconciliation; and trusted SSH command
   separation from protocol selection; timed-out mutations completing once while
-  asynchronous replies remain separate. New tests require fresh platform evidence;
+  asynchronous replies remain separate; legacy capture lengths after non-reflow
+  shrinking, stale unknown capture rows after reflow, and malformed capture
+  metadata rejection after compatibility normalization. New tests require fresh platform evidence;
   the historical macOS result predates them.
 - `cargo +1.95.0 test --locked --offline -p rustty-app --lib tmuxx_workspace::tests:: -- --test-threads=1`:
   six tests covering linked-window identities and indexed targets, atomic
@@ -199,7 +213,7 @@ cargo +1.95.0 test --locked --offline -p rustty-app --test tmuxx_driver --target
 cargo +1.95.0 test --locked --offline -p rustty-app --test windows_conpty --target x86_64-pc-windows-msvc -- --ignored
 ```
 
-All 18 selected backend tests run on Windows. The 44 config tests include exact
+All 21 selected backend tests run on Windows. The 44 config tests include exact
 remote-command quote preservation. The launcher test synchronizes two initial
 clients against an empty real owner and verifies one session/pane/PID, existing
 owner reuse, and process cleanup. The two Windows driver tests exercise the GUI

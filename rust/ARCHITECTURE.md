@@ -425,6 +425,15 @@ ordered updates. Rustty currently renders/searches through mutable
 layer. UI scrolling/search/selection must not mutate authoritative pane state
 or another client's view. Test two views of the same pane.
 
+Resizing must leave capture metadata valid for snapshot restoration. When
+attaching to older owners, Rustty normalizes two legacy capture-cache defects:
+used lengths wider than the retained row, and obsolete row IDs in an unknown
+cache. Validate tuple shape, unsigned integers, duplicate IDs and allocation
+bounds before correcting either defect; preserve allocations and reject orphan
+rows in known caches. Strict terminal and graph validation still completes
+before publishing any restored view. Reconnection keeps the existing pane
+processes and does not replay host effects.
+
 A view mirroring a tmux-owned terminal must not automatically send its own
 DA/DSR/OSC replies back: the owning engine already answers application queries.
 User input and negotiated client capability/colour reporting are separate.

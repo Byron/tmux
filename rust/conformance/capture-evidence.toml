@@ -75,8 +75,8 @@ description = "An empty width resize retains exact zero-allocation rows, so -N r
 
 [[suites.assertions]]
 id = "capture.snapshot-metadata-bounds"
-tests = ["invalid_snapshot_capture_metadata_is_rejected_before_reflow"]
-description = "Restore rejects missing-row timestamps, unknown flags, used lengths beyond row width, and unbounded allocation lengths before resize can allocate from untrusted metadata."
+tests = ["invalid_snapshot_capture_metadata_is_rejected_before_reflow", "snapshot_restores_after_non_reflow_width_shrink", "snapshot_restores_after_reflow_discards_unknown_capture_rows"]
+description = "Restore rejects missing-row timestamps, unknown flags, used lengths beyond row width, and unbounded allocation lengths before resize can allocate from untrusted metadata. Native snapshots remain valid after non-reflow width shrink and reflow that replaces rows with unknown capture metadata."
 
 [[suites.assertions]]
 id = "capture-restore-color-origin"
